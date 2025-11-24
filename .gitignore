@@ -7,3 +7,4 @@
 /obj
 /bin/Release/net8.0/linux-x64
 /.vs/ProjectEvaluation
+/publish
