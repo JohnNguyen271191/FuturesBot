@@ -3,6 +3,7 @@ using FuturesBot.IServices;
 using FuturesBot.Models;
 using FuturesBot.Utils;
 using System;
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using static FuturesBot.Utils.EnumTypesHelper;
@@ -13,12 +14,19 @@ namespace FuturesBot.Services
     {
         private readonly HttpClient _http;
         private readonly BotConfig _config;
+        // Timestamp offset
+        private long _serverTimeOffsetMs = 0;
+        private DateTime _lastTimeSync = DateTime.MinValue;
+
+        // (nếu chưa có SymbolRulesService thì thêm field luôn)
+        private readonly SymbolRulesService _rulesService;
 
         public BinanceFuturesClientService(BotConfig config)
         {
             _config = config;
             _http = new HttpClient { BaseAddress = new Uri(config.BaseUrl) };
             _http.DefaultRequestHeaders.Add("X-MBX-APIKEY", config.ApiKey);
+            _rulesService = new SymbolRulesService(_http, _config);
         }
 
         // ==========================
@@ -85,6 +93,16 @@ namespace FuturesBot.Services
             int leverage,
             bool marketOrder = true)
         {
+            var rules = await _rulesService.GetRulesAsync(symbol);
+
+            var qty = SymbolRulesService.TruncateToStep(quantity, rules.QtyStep);
+            if (qty < rules.MinQty)
+                qty = rules.MinQty;
+
+            var entry = SymbolRulesService.TruncateToStep(entryPrice, rules.PriceStep);
+            var sl = SymbolRulesService.TruncateToStep(stopLoss, rules.PriceStep);
+            var tp = SymbolRulesService.TruncateToStep(takeProfit, rules.PriceStep);
+
             // PAPER MODE: chỉ log, không call API
             if (_config.PaperMode)
             {
@@ -108,7 +126,7 @@ namespace FuturesBot.Services
                 ["symbol"] = symbol,
                 ["side"] = sideStr,
                 ["type"] = typeStr,
-                ["quantity"] = quantity.ToString(),
+                ["quantity"] = qty.ToString(CultureInfo.InvariantCulture),
                 ["recvWindow"] = "5000",
                 ["positionSide"] = positionSide,
             };
@@ -116,11 +134,16 @@ namespace FuturesBot.Services
             if (!marketOrder)
             {
                 entryParams["timeInForce"] = "GTC";
-                entryParams["price"] = entryPrice.ToString();
+                entryParams["price"] = entry.ToString(CultureInfo.InvariantCulture);
             }
 
             Console.WriteLine("=== SEND ENTRY ORDER ===");
             var entryResp = await SignedPostAsync("/fapi/v1/order", entryParams);
+            if (!IsOkResponse(entryResp, out var entryErr))
+            {
+                Console.WriteLine($"[ENTRY ERROR] {symbol} {entryErr!.Code}: {entryErr.Msg}");
+                return;
+            }
             Console.WriteLine("[ENTRY RESP] " + entryResp);
 
             // 3. Gửi SL (STOP_MARKET, reduceOnly)
@@ -131,7 +154,7 @@ namespace FuturesBot.Services
                 ["symbol"] = symbol,
                 ["side"] = closeSideStr,
                 ["type"] = "STOP_MARKET",
-                ["stopPrice"] = stopLoss.ToString(),
+                ["stopPrice"] = sl.ToString(CultureInfo.InvariantCulture),
                 ["closePosition"] = "true",      // đóng toàn bộ vị thế
                 ["timeInForce"] = "GTC",
                 ["recvWindow"] = "5000",
@@ -149,7 +172,7 @@ namespace FuturesBot.Services
                 ["symbol"] = symbol,
                 ["side"] = closeSideStr,
                 ["type"] = "TAKE_PROFIT_MARKET",
-                ["stopPrice"] = takeProfit.ToString(),
+                ["stopPrice"] = tp.ToString(CultureInfo.InvariantCulture),
                 ["closePosition"] = "true",
                 ["timeInForce"] = "GTC",
                 ["recvWindow"] = "5000",
@@ -299,6 +322,30 @@ namespace FuturesBot.Services
             };
         }
 
+        public async Task SyncServerTimeAsync()
+        {
+            try
+            {
+                var resp = await _http.GetAsync($"{_config.BaseUrl}/fapi/v1/time");
+                resp.EnsureSuccessStatusCode();
+
+                var json = await resp.Content.ReadAsStringAsync();
+                using var doc = JsonDocument.Parse(json);
+
+                var serverTime = doc.RootElement.GetProperty("serverTime").GetInt64();
+                var localTime = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+                _serverTimeOffsetMs = localTime - serverTime;
+                _lastTimeSync = DateTime.UtcNow;
+
+                Console.WriteLine($"[TIME OFFSET] => {_serverTimeOffsetMs} ms");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("[TIME SYNC ERROR] " + ex.Message);
+            }
+        }        
+
         // ==========================
         //       PRIVATE HELPERS
         // ==========================
@@ -320,7 +367,8 @@ namespace FuturesBot.Services
             string path,
             IDictionary<string, string> parameters)
         {
-            long ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            long ts = GetBinanceTimestamp();
+            parameters["timestamp"] = ts.ToString();
             var sb = new StringBuilder();
 
             // build queryString
@@ -353,7 +401,8 @@ namespace FuturesBot.Services
 
         private async Task<string> SignedGetAsync(string path, IDictionary<string, string> parameters)
         {
-            long ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            long ts = GetBinanceTimestamp();
+            parameters["timestamp"] = ts.ToString();
             var sb = new StringBuilder();
 
             foreach (var kv in parameters)
@@ -381,5 +430,45 @@ namespace FuturesBot.Services
 
             return body;
         }
+
+        private long GetBinanceTimestamp()
+        {
+            if ((DateTime.UtcNow - _lastTimeSync) > TimeSpan.FromMinutes(30))
+            {
+                _ = SyncServerTimeAsync();
+            }
+
+            var local = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            return local - _serverTimeOffsetMs;
+        }
+
+        private bool IsOkResponse(string body, out BinanceErrorResponse? error)
+        {
+            error = null;
+            if (string.IsNullOrWhiteSpace(body)) return true;
+
+            var trimmed = body.TrimStart();
+            if (!trimmed.StartsWith("{") || !trimmed.Contains("\"code\""))
+                return true;
+
+            try
+            {
+                var err = JsonSerializer.Deserialize<BinanceErrorResponse>(body);
+                if (err != null && err.Code != 0)
+                {
+                    error = err;
+                    return false;
+                }
+            }
+            catch { }
+
+            return true;
+        }
     }
+}
+
+public class BinanceErrorResponse
+{
+    public int Code { get; set; }
+    public string Msg { get; set; } = "";
 }
