@@ -5,7 +5,7 @@ using Microsoft.Extensions.Configuration;
 
 Console.OutputEncoding = System.Text.Encoding.UTF8;
 
-var config = new ConfigurationBuilder().AddJsonFile("appSettings.json", optional: false, reloadOnChange: false).Build().Get<BotConfig>();
+var config = new ConfigurationBuilder().AddJsonFile("appsettings.json", optional: false, reloadOnChange: false).Build().Get<BotConfig>();
 if (config is null)
 {
     throw new ArgumentNullException(nameof(config));
