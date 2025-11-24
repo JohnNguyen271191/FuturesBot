@@ -27,7 +27,7 @@ jobs:
         username: ${{ secrets.EC2_USER }}
         key: ${{ secrets.EC2_SSH_KEY }}
         source: "publish/*"
-        target: "/home/ec2-user/bot/"
+        target: "/home/ubuntu/futuresbot/"
 
     - name: Restart bot service
       uses: appleboy/ssh-action@v1.0.3
@@ -36,5 +36,5 @@ jobs:
         username: ${{ secrets.EC2_USER }}
         key: ${{ secrets.EC2_SSH_KEY }}
         script: |
-          sudo systemctl restart cryptobot
-          sudo systemctl status cryptobot --no-pager
+          sudo systemctl restart futuresbot.service
+          sudo systemctl status futuresbot.service --no-pager
