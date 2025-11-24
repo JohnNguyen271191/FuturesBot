@@ -2,6 +2,7 @@
 using FuturesBot.IServices;
 using FuturesBot.Models;
 using FuturesBot.Utils;
+using System;
 using System.Text;
 using System.Text.Json;
 using static FuturesBot.Utils.EnumTypesHelper;
@@ -30,31 +31,48 @@ namespace FuturesBot.Services
             int limit = 200)
         {
             var url = $"/fapi/v1/klines?symbol={symbol}&interval={interval}&limit={limit}";
-            var resp = await _http.GetAsync(url);
-            resp.EnsureSuccessStatusCode();
-
-            var json = await resp.Content.ReadAsStringAsync();
-            using var doc = JsonDocument.Parse(json);
-
-            var list = new List<Candle>();
-
-            foreach (var item in doc.RootElement.EnumerateArray())
+            for (int attempt = 1; attempt <= 3; attempt++)
             {
-                long openTimeMs = item[0].GetInt64();
-                var openTime = DateTimeOffset.FromUnixTimeMilliseconds(openTimeMs).UtcDateTime;
-
-                list.Add(new Candle
+                try
                 {
-                    OpenTime = openTime,
-                    Open = decimal.Parse(item[1].GetString()!),
-                    High = decimal.Parse(item[2].GetString()!),
-                    Low = decimal.Parse(item[3].GetString()!),
-                    Close = decimal.Parse(item[4].GetString()!),
-                    Volume = decimal.Parse(item[5].GetString()!)
-                });
-            }
+                    var resp = await _http.GetAsync(url);
+                    resp.EnsureSuccessStatusCode();
 
-            return list;
+                    var json = await resp.Content.ReadAsStringAsync();
+                    using var doc = JsonDocument.Parse(json);
+
+                    var list = new List<Candle>();
+
+                    foreach (var item in doc.RootElement.EnumerateArray())
+                    {
+                        long openTimeMs = item[0].GetInt64();
+                        var openTime = DateTimeOffset.FromUnixTimeMilliseconds(openTimeMs).UtcDateTime;
+
+                        list.Add(new Candle
+                        {
+                            OpenTime = openTime,
+                            Open = decimal.Parse(item[1].GetString()!),
+                            High = decimal.Parse(item[2].GetString()!),
+                            Low = decimal.Parse(item[3].GetString()!),
+                            Close = decimal.Parse(item[4].GetString()!),
+                            Volume = decimal.Parse(item[5].GetString()!)
+                        });
+                    }
+
+                    return list;
+                }
+                catch (IOException ex) when (attempt < 3)
+                {
+                    Console.WriteLine($"[WARN] IO error when calling Binance (attempt {attempt}): {ex.Message}");
+                    await Task.Delay(500 * attempt);
+                }
+                catch (HttpRequestException ex) when (attempt < 3)
+                {
+                    Console.WriteLine($"[WARN] HTTP error when calling Binance (attempt {attempt}): {ex.Message}");
+                    await Task.Delay(500 * attempt);
+                }
+            }
+            throw new Exception("Failed to get candles from Binance after 3 attempts.");
         }
 
         public async Task PlaceFuturesOrderAsync(
@@ -82,6 +100,7 @@ namespace FuturesBot.Services
 
             // 2. gửi lệnh vào (entry)
             string sideStr = side == SignalType.Long ? "BUY" : "SELL";
+            string positionSide = side == SignalType.Long ? "LONG" : "SHORT";
             string typeStr = marketOrder ? "MARKET" : "LIMIT";
 
             var entryParams = new Dictionary<string, string>
@@ -90,7 +109,8 @@ namespace FuturesBot.Services
                 ["side"] = sideStr,
                 ["type"] = typeStr,
                 ["quantity"] = quantity.ToString(),
-                ["recvWindow"] = "5000"
+                ["recvWindow"] = "5000",
+                ["positionSide"] = positionSide,
             };
 
             if (!marketOrder)
@@ -115,6 +135,7 @@ namespace FuturesBot.Services
                 ["closePosition"] = "true",      // đóng toàn bộ vị thế
                 ["timeInForce"] = "GTC",
                 ["recvWindow"] = "5000",
+                ["positionSide"] = positionSide,
                 // ["workingType"] = "MARK_PRICE" // nếu muốn dùng giá mark
             };
 
@@ -132,6 +153,7 @@ namespace FuturesBot.Services
                 ["closePosition"] = "true",
                 ["timeInForce"] = "GTC",
                 ["recvWindow"] = "5000",
+                ["positionSide"] = positionSide,
                 // ["workingType"] = "MARK_PRICE"
             };
 
@@ -193,22 +215,20 @@ namespace FuturesBot.Services
 
             try
             {
-                using (var doc = JsonDocument.Parse(posJson))
+                using var doc = JsonDocument.Parse(posJson);
+                foreach (var el in doc.RootElement.EnumerateArray())
                 {
-                    foreach (var el in doc.RootElement.EnumerateArray())
-                    {
-                        var sym = el.GetProperty("symbol").GetString();
-                        if (!string.Equals(sym, symbol, StringComparison.OrdinalIgnoreCase))
-                            continue;
+                    var sym = el.GetProperty("symbol").GetString();
+                    if (!string.Equals(sym, symbol, StringComparison.OrdinalIgnoreCase))
+                        continue;
 
-                        var positionAmtStr = el.GetProperty("positionAmt").GetString() ?? "0";
-                        if (decimal.TryParse(positionAmtStr, out var positionAmt))
+                    var positionAmtStr = el.GetProperty("positionAmt").GetString() ?? "0";
+                    if (decimal.TryParse(positionAmtStr, out var positionAmt))
+                    {
+                        if (positionAmt != 0)
                         {
-                            if (positionAmt != 0)
-                            {
-                                // Đang có vị thế (long hoặc short)
-                                return true;
-                            }
+                            // Đang có vị thế (long hoặc short)
+                            return true;
                         }
                     }
                 }
@@ -230,14 +250,12 @@ namespace FuturesBot.Services
 
             try
             {
-                using (var doc = JsonDocument.Parse(ordersJson))
+                using var doc = JsonDocument.Parse(ordersJson);
+                // nếu có ít nhất 1 phần tử trong mảng -> đang có lệnh chờ
+                if (doc.RootElement.ValueKind == JsonValueKind.Array &&
+                    doc.RootElement.GetArrayLength() > 0)
                 {
-                    // nếu có ít nhất 1 phần tử trong mảng -> đang có lệnh chờ
-                    if (doc.RootElement.ValueKind == JsonValueKind.Array &&
-                        doc.RootElement.GetArrayLength() > 0)
-                    {
-                        return true;
-                    }
+                    return true;
                 }
             }
             catch

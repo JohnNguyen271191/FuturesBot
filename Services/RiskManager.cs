@@ -27,12 +27,14 @@ namespace FuturesBot.Services
 
         public decimal CalculatePositionSize(decimal entry, decimal stopLoss)
         {
+            var minQuantity = 0.002m;
             var riskAmount = _config.AccountBalance * _config.RiskPerTradePercent / 100m;
             var slDistance = Math.Abs(entry - stopLoss);
             if (slDistance <= 0) return 0;
 
             // Futures: loss ≈ slDistance * qty
-            return riskAmount / slDistance;
+            var quantity = Math.Round(riskAmount / slDistance, 3);
+            return quantity < minQuantity ? minQuantity : quantity;
         }
 
         public void RegisterResult(decimal pnl)
