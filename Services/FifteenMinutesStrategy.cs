@@ -126,7 +126,12 @@ namespace FuturesBot.Services
 
                 bool rsiBear = rsi15[i15] < 45 && rsi15[i15] < rsi15[i15 - 1];
 
-                if (retestEma && bearishReject && macdCrossDown && rsiBear)
+                bool extremeDump =
+    last15.Close < ema34_15[i15] * 0.995m &&   // gãy xa dưới EMA34
+    macd15[i15] < sig15[i15] &&
+    rsi15[i15] < 30;                           // RSI oversold mạnh
+
+                if ((retestEma && bearishReject && macdCrossDown && rsiBear) || extremeDump)
                 {
                     decimal entry = last15.Close;
 
