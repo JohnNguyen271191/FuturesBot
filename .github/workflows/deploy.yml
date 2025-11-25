@@ -29,6 +29,9 @@ jobs:
         source: "publish/*"
         target: "/home/ubuntu/futuresbot/"
 
+    - name: Restart service
+      run: ssh ubuntu@EC2 "sudo systemctl daemon-reload && sudo systemctl restart futuresbot"
+
     - name: Restart bot service
       uses: appleboy/ssh-action@v1.0.3
       with:
