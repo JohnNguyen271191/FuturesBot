@@ -50,7 +50,7 @@ namespace FuturesBot.Services
             decimal avgPullbackVol = PriceActionHelper.AverageVolume(candles15m, i15 - 1, 3);
             decimal currentVol = last15.Volume;
 
-            bool strongVolume = avgPullbackVol > 0 && currentVol >= avgPullbackVol * 1.0m;
+            bool strongVolume = avgPullbackVol > 0 && currentVol >= avgPullbackVol * 0.7m;
             if (!strongVolume)
                 return new TradeSignal();
 
@@ -65,7 +65,7 @@ namespace FuturesBot.Services
                     goto ShortPart; // tránh long ngay cây breakout đầu tiên
 
                 // (3.2) Retest EMA34/EMA89: nến hiện tại phải "chạm xuống EMA rồi bật lên"
-                bool retestEma = last15.Low <= ema34_15[i15] * 1.002m || last15.Low <= ema89_15[i15] * 1.002m;
+                bool retestEma = last15.Low <= ema34_15[i15] * 1.003m || last15.Low <= ema89_15[i15] * 1.003m;
 
                 bool bullishReject =
                     last15.Close > last15.Open &&          // nến xanh
@@ -74,7 +74,7 @@ namespace FuturesBot.Services
                 // (3.3) Momentum: MACD + RSI
                 bool macdCrossUp = macd15[i15] > sig15[i15]; //&& macd15[i15 - 1] <= sig15[i15 - 1];
 
-                bool rsiBull = rsi15[i15] > 50 && rsi15[i15] > rsi15[i15 - 1];
+                bool rsiBull = rsi15[i15] > 55 && rsi15[i15] > rsi15[i15 - 1];
 
                 if (retestEma && bullishReject && macdCrossUp && rsiBull)
                 {
@@ -115,7 +115,7 @@ namespace FuturesBot.Services
                     return new TradeSignal(); // tránh short ngay cây breakout đầu tiên
 
                 // (4.2) Retest EMA34/EMA89: nến hiện tại phải "chạm lên EMA rồi bị đạp xuống"
-                bool retestEma = last15.High >= ema34_15[i15] * 0.998m || last15.High >= ema89_15[i15] * 0.998m;
+                bool retestEma = last15.High >= ema34_15[i15] * 0.997m || last15.High >= ema89_15[i15] * 0.997m;
 
                 bool bearishReject =
                     last15.Close < last15.Open &&         // nến đỏ
@@ -124,7 +124,7 @@ namespace FuturesBot.Services
                 // (4.3) Momentum: MACD + RSI
                 bool macdCrossDown = macd15[i15] < sig15[i15]; //&& macd15[i15 - 1] >= sig15[i15 - 1];
 
-                bool rsiBear = rsi15[i15] < 50 && rsi15[i15] < rsi15[i15 - 1];
+                bool rsiBear = rsi15[i15] < 45 && rsi15[i15] < rsi15[i15 - 1];
 
                 if (retestEma && bearishReject && macdCrossDown && rsiBear)
                 {
