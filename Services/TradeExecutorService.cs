@@ -79,7 +79,7 @@ PaperMode: {_config.PaperMode}
 
             // nếu muốn vẫn confirm qua console thì giữ lại đoạn hỏi y/n, 
             // còn không thì auto gửi luôn:
-            await _exchange.PlaceFuturesOrderAsync(symbol.Coin, signal.Type, qty, entry, sl, tp, symbol.Leverage, marketOrder: false);
+            await _exchange.PlaceFuturesOrderAsync(symbol.Coin, signal.Type, qty, entry, sl, tp, symbol.Leverage, _notifier, marketOrder: false);
 
             await _notifier.SendAsync("[INFO] API call sent to place the order (check Binance).");
         }

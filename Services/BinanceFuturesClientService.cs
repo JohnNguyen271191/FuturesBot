@@ -91,6 +91,7 @@ namespace FuturesBot.Services
             decimal stopLoss,
             decimal takeProfit,
             int leverage,
+            SlackNotifierService slackNotifierService,
             bool marketOrder = true)
         {
             var rules = await _rulesService.GetRulesAsync(symbol);
@@ -137,14 +138,14 @@ namespace FuturesBot.Services
                 entryParams["price"] = entry.ToString(CultureInfo.InvariantCulture);
             }
 
-            Console.WriteLine("=== SEND ENTRY ORDER ===");
+            await slackNotifierService.SendAsync("=== SEND ENTRY ORDER ===");
             var entryResp = await SignedPostAsync("/fapi/v1/order", entryParams);
             if (string.IsNullOrEmpty(entryResp))
             {
-                Console.WriteLine($"[ENTRY ERROR] {symbol}");
+                await slackNotifierService.SendAsync($"[ENTRY ERROR] {symbol}");
                 return;
             }
-            Console.WriteLine("[ENTRY RESP] " + entryResp);
+            await slackNotifierService.SendAsync($"[ENTRY RESP] {entryResp}");
 
             // 3. Gửi SL (STOP_MARKET, reduceOnly)
             string closeSideStr = side == SignalType.Long ? "SELL" : "BUY";
@@ -162,9 +163,9 @@ namespace FuturesBot.Services
                 // ["workingType"] = "MARK_PRICE" // nếu muốn dùng giá mark
             };
 
-            Console.WriteLine("=== SEND STOP LOSS ===");
+            await slackNotifierService.SendAsync("=== SEND STOP LOSS ===");
             var slResp = await SignedPostAsync("/fapi/v1/order", slParams);
-            Console.WriteLine("[SL RESP] " + slResp);
+            await slackNotifierService.SendAsync($"[SL RESP] {slResp}");
 
             // 4. Gửi TP (TAKE_PROFIT_MARKET, reduceOnly)
             var tpParams = new Dictionary<string, string>
@@ -180,9 +181,9 @@ namespace FuturesBot.Services
                 // ["workingType"] = "MARK_PRICE"
             };
 
-            Console.WriteLine("=== SEND TAKE PROFIT ===");
+            await slackNotifierService.SendAsync("=== SEND TAKE PROFIT ===");
             var tpResp = await SignedPostAsync("/fapi/v1/order", tpParams);
-            Console.WriteLine("[TP RESP] " + tpResp);
+            await slackNotifierService.SendAsync($"[TP RESP] {tpResp}");
         }
 
         public async Task<PositionInfo> GetPositionAsync(string symbol)

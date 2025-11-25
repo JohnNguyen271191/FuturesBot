@@ -1,4 +1,5 @@
 ﻿using FuturesBot.Models;
+using FuturesBot.Services;
 using static FuturesBot.Utils.EnumTypesHelper;
 
 namespace FuturesBot.IServices
@@ -7,7 +8,7 @@ namespace FuturesBot.IServices
     {
         Task<IReadOnlyList<Candle>> GetRecentCandlesAsync(string symbol, string interval, int limit = 200);
 
-        Task PlaceFuturesOrderAsync(string symbol, SignalType side, decimal quantity, decimal entryPrice, decimal stopLoss, decimal takeProfit, int leverage, bool marketOrder = true);
+        Task PlaceFuturesOrderAsync(string symbol, SignalType side, decimal quantity, decimal entryPrice, decimal stopLoss, decimal takeProfit, int leverage, SlackNotifierService slackNotifierService, bool marketOrder = true);
 
 
         Task<PositionInfo> GetPositionAsync(string symbol);
