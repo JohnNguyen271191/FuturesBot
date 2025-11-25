@@ -111,7 +111,12 @@ namespace FuturesBot.Services
                 // Ít nhất 1–2 nến trước đã đóng dưới EMA34
                 bool wasBelowEma34Recently = candles15m[i15 - 1].Close <= ema34_15[i15 - 1] * 1.0002m; //&& candles15m[i15 - 1].Close < ema34_15[i15 - 1];
 
-                if (!wasBelowEma34Recently)
+                bool extremeDump =
+    last15.Close < ema34_15[i15] * 0.995m &&   // gãy xa dưới EMA34
+    macd15[i15] < sig15[i15] &&
+    rsi15[i15] < 30;
+
+                if (!wasBelowEma34Recently && !extremeDump)
                     return new TradeSignal(); // tránh short ngay cây breakout đầu tiên
 
                 // (4.2) Retest EMA34/EMA89: nến hiện tại phải "chạm lên EMA rồi bị đạp xuống"
@@ -125,11 +130,6 @@ namespace FuturesBot.Services
                 bool macdCrossDown = macd15[i15] < sig15[i15]; //&& macd15[i15 - 1] >= sig15[i15 - 1];
 
                 bool rsiBear = rsi15[i15] < 45 && rsi15[i15] < rsi15[i15 - 1];
-
-                bool extremeDump =
-    last15.Close < ema34_15[i15] * 0.995m &&   // gãy xa dưới EMA34
-    macd15[i15] < sig15[i15] &&
-    rsi15[i15] < 30;                           // RSI oversold mạnh
 
                 if ((retestEma && bearishReject && macdCrossDown && rsiBear) || extremeDump)
                 {
