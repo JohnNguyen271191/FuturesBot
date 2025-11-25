@@ -444,34 +444,5 @@ namespace FuturesBot.Services
             var local = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             return local - _serverTimeOffsetMs;
         }
-
-        private bool IsOkResponse(string body, out BinanceErrorResponse? error)
-        {
-            error = null;
-            if (string.IsNullOrWhiteSpace(body)) return true;
-
-            var trimmed = body.TrimStart();
-            if (!trimmed.StartsWith("{") || !trimmed.Contains("\"code\""))
-                return true;
-
-            try
-            {
-                var err = JsonSerializer.Deserialize<BinanceErrorResponse>(body);
-                if (err != null && err.Code != 0)
-                {
-                    error = err;
-                    return false;
-                }
-            }
-            catch { }
-
-            return true;
-        }
     }
-}
-
-public class BinanceErrorResponse
-{
-    public int Code { get; set; }
-    public string Msg { get; set; } = "";
 }

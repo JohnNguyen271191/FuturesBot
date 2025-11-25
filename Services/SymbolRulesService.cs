@@ -87,7 +87,7 @@ namespace FuturesBot.Services
 
         public static decimal TruncateToStep(decimal value, decimal step)
         {
-            if (step == 0) return value;
+            if (step <= 0) return value;
             return Math.Floor(value / step) * step;
         }
     }
