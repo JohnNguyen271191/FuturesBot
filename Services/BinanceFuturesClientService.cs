@@ -100,6 +100,7 @@ namespace FuturesBot.Services
             if (qty < rules.MinQty)
                 qty = rules.MinQty;
 
+            qty = Math.Round(qty, 0);
             var entry = SymbolRulesService.TruncateToStep(entryPrice, rules.PriceStep);
             var sl = SymbolRulesService.TruncateToStep(stopLoss, rules.PriceStep);
             var tp = SymbolRulesService.TruncateToStep(takeProfit, rules.PriceStep);
