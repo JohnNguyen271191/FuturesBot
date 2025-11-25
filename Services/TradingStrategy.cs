@@ -78,7 +78,10 @@ namespace FuturesBot.Services
 
                 bool rsiBull = rsi15[i15] > 55 && rsi15[i15] > rsi15[i15 - 1];
 
-                if ((retestEma && bullishReject && macdCrossUp && rsiBull) || extremeUp)
+                bool shouldLong = (retestEma && bullishReject && macdCrossUp && rsiBull)
+                                    || (retestEma && bullishReject && rsiBull)
+                                    || extremeUp;
+                if (shouldLong)
                 {
                     decimal entry = last15.Close;
 
@@ -95,7 +98,7 @@ namespace FuturesBot.Services
                         };
 
                     decimal risk = entry - sl;
-                    decimal tp = Math.Round(entry + risk * 1.5m, 3);   // TP = 1.5R
+                    decimal tp = Math.Round(entry + risk * 0.5m, 3);   // TP = 0.5R
 
                     return new TradeSignal
                     {
@@ -134,10 +137,12 @@ namespace FuturesBot.Services
 
                 // (4.3) Momentum: MACD + RSI
                 bool macdCrossDown = macd15[i15] < sig15[i15]; //&& macd15[i15 - 1] >= sig15[i15 - 1];
-
                 bool rsiBear = rsi15[i15] < 45 && rsi15[i15] < rsi15[i15 - 1];
+                bool shouldShort = (retestEma && bearishReject && macdCrossDown && rsiBear)
+                                    || (retestEma && bearishReject && rsiBear)
+                                    || extremeDump;
 
-                if ((retestEma && bearishReject && macdCrossDown && rsiBear) || extremeDump)
+                if (shouldShort)
                 {
                     decimal entry = last15.Close;
 
@@ -154,7 +159,7 @@ namespace FuturesBot.Services
                         };
 
                     decimal risk = sl - entry;
-                    decimal tp = Math.Round(entry - risk * 1.5m, 3); // TP = 1.5R
+                    decimal tp = Math.Round(entry - risk * 0.5m, 3); // TP = 0.5R
 
                     return new TradeSignal
                     {
