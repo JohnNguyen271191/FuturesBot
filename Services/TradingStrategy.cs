@@ -80,6 +80,7 @@ namespace FuturesBot.Services
 
                 bool shouldLong = (retestEma && bullishReject && macdCrossUp && rsiBull)
                                     || (retestEma && bullishReject && rsiBull)
+                                    || (bullishReject && macdCrossUp && rsiBull)
                                     || extremeUp;
                 if (shouldLong)
                 {
@@ -140,6 +141,7 @@ namespace FuturesBot.Services
                 bool rsiBear = rsi15[i15] < 45 && rsi15[i15] < rsi15[i15 - 1];
                 bool shouldShort = (retestEma && bearishReject && macdCrossDown && rsiBear)
                                     || (retestEma && bearishReject && rsiBear)
+                                    || (bearishReject && macdCrossDown && rsiBear)
                                     || extremeDump;
 
                 if (shouldShort)
