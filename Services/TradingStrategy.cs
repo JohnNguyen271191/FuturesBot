@@ -89,7 +89,7 @@ namespace FuturesBot.Services
                     // SL anti-hunt: đáy swing - buffer
                     decimal swingLow = PriceActionHelper.FindSwingLow(candles15m, i15, lookback: 5);
                     decimal buffer = entry * 0.001m; // 0.1%
-                    decimal sl = Math.Round(swingLow - buffer, 3);
+                    decimal sl = swingLow - buffer;
 
                     if (sl <= 0 || sl >= entry)
                         return new TradeSignal
@@ -99,7 +99,7 @@ namespace FuturesBot.Services
                         };
 
                     decimal risk = entry - sl;
-                    decimal tp = Math.Round(entry + risk * 0.5m, 3);   // TP = 0.5R
+                    decimal tp = entry + risk * 0.5m;   // TP = 0.5R
 
                     return new TradeSignal
                     {
@@ -151,7 +151,7 @@ namespace FuturesBot.Services
                     // SL anti-hunt: đỉnh swing + buffer
                     decimal swingHigh = PriceActionHelper.FindSwingHigh(candles15m, i15, lookback: 5);
                     decimal buffer = entry * 0.001m; // 0.1%
-                    decimal sl = Math.Round(swingHigh + buffer, 3);
+                    decimal sl = swingHigh + buffer;
 
                     if (sl <= entry)
                         return new TradeSignal 
@@ -161,7 +161,7 @@ namespace FuturesBot.Services
                         };
 
                     decimal risk = sl - entry;
-                    decimal tp = Math.Round(entry - risk * 0.5m, 3); // TP = 0.5R
+                    decimal tp = entry - risk * 0.5m; // TP = 0.5R
 
                     return new TradeSignal
                     {
