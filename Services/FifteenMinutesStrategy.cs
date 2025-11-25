@@ -43,7 +43,12 @@ namespace FuturesBot.Services
                 last15.Close < ema34_15[i15];
                 //&& ema34_15[i15] < ema89_15[i15];
 
-            if (!upTrend && !downTrend)
+           bool extremeDump =
+    last15.Close < ema34_15[i15] * 0.995m &&   // gãy xa dưới EMA34
+    macd15[i15] < sig15[i15] &&
+    rsi15[i15] < 30; 
+
+            if (!upTrend && !downTrend && !extremeDump)
                 return new TradeSignal(); // sideway -> bỏ
 
             // ===== 2. Volume pattern (nến setup phải vol mạnh hơn pullback) =====
@@ -51,8 +56,8 @@ namespace FuturesBot.Services
             decimal currentVol = last15.Volume;
 
             bool strongVolume = avgPullbackVol > 0 && currentVol >= avgPullbackVol * 0.7m;
-            //if (!strongVolume)
-                //return new TradeSignal();
+            if (!strongVolume && !extremeDump)
+                return new TradeSignal();
 
             // ===== 3. LONG SETUP (sau breakout, bắt buộc có retest) =====
             if (upTrend)
@@ -105,16 +110,11 @@ namespace FuturesBot.Services
         ShortPart: // label nhảy xuống khi không đủ điều kiện long
 
             // ===== 4. SHORT SETUP (sau breakout, bắt buộc có retest) =====
-            if (downTrend)
+            if (downTrend || extremeDump)
             {
                 // (4.1) Xác nhận đã có breakout trước đó:
                 // Ít nhất 1–2 nến trước đã đóng dưới EMA34
                 bool wasBelowEma34Recently = candles15m[i15 - 1].Close <= ema34_15[i15 - 1] * 1.0002m; //&& candles15m[i15 - 1].Close < ema34_15[i15 - 1];
-
-                bool extremeDump =
-    last15.Close < ema34_15[i15] * 0.995m &&   // gãy xa dưới EMA34
-    macd15[i15] < sig15[i15] &&
-    rsi15[i15] < 30;
 
                 if (!wasBelowEma34Recently && !extremeDump)
                     return new TradeSignal(); // tránh short ngay cây breakout đầu tiên
