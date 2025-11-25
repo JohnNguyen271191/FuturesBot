@@ -139,9 +139,9 @@ namespace FuturesBot.Services
 
             Console.WriteLine("=== SEND ENTRY ORDER ===");
             var entryResp = await SignedPostAsync("/fapi/v1/order", entryParams);
-            if (!IsOkResponse(entryResp, out var entryErr))
+            if (string.IsNullOrEmpty(entryResp))
             {
-                Console.WriteLine($"[ENTRY ERROR] {symbol} {entryErr!.Code}: {entryErr.Msg}");
+                Console.WriteLine($"[ENTRY ERROR] {symbol}");
                 return;
             }
             Console.WriteLine("[ENTRY RESP] " + entryResp);
@@ -394,6 +394,7 @@ namespace FuturesBot.Services
             if (!resp.IsSuccessStatusCode)
             {
                 Console.WriteLine($"[BINANCE ERROR] {resp.StatusCode}: {body}");
+                return string.Empty;
             }
 
             return body;
