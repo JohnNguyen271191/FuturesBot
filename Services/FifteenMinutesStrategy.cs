@@ -59,7 +59,7 @@ namespace FuturesBot.Services
             {
                 // (3.1) Xác nhận đã có breakout trước đó:
                 // Ít nhất 1–2 nến trước đã đóng trên EMA34 (không phải vừa mới cross)
-                bool wasAboveEma34Recently = candles15m[i15 - 1].Close > ema34_15[i15 - 1]; //&& candles15m[i15 - 1].Close > ema34_15[i15 - 1];
+                bool wasAboveEma34Recently = candles15m[i15 - 1].Close >= ema34_15[i15 - 1] * 1.002m; //&& candles15m[i15 - 1].Close > ema34_15[i15 - 1];
 
                 if (!wasAboveEma34Recently)
                     goto ShortPart; // tránh long ngay cây breakout đầu tiên
@@ -109,7 +109,7 @@ namespace FuturesBot.Services
             {
                 // (4.1) Xác nhận đã có breakout trước đó:
                 // Ít nhất 1–2 nến trước đã đóng dưới EMA34
-                bool wasBelowEma34Recently = candles15m[i15 - 1].Close < ema34_15[i15 - 1]; //&& candles15m[i15 - 1].Close < ema34_15[i15 - 1];
+                bool wasBelowEma34Recently = candles15m[i15 - 1].Close <= ema34_15[i15 - 1] * 1.0002m; //&& candles15m[i15 - 1].Close < ema34_15[i15 - 1];
 
                 if (!wasBelowEma34Recently)
                     return new TradeSignal(); // tránh short ngay cây breakout đầu tiên
