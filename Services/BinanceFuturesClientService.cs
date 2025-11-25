@@ -140,9 +140,9 @@ namespace FuturesBot.Services
 
             await slackNotifierService.SendAsync("=== SEND ENTRY ORDER ===");
             var entryResp = await SignedPostAsync("/fapi/v1/order", entryParams);
-            if (string.IsNullOrEmpty(entryResp))
+            if (entryResp.Contains("[BINANCE ERROR]"))
             {
-                await slackNotifierService.SendAsync($"[ENTRY ERROR] {symbol}");
+                await slackNotifierService.SendAsync(entryResp);
                 return;
             }
             await slackNotifierService.SendAsync($"[ENTRY RESP] {entryResp}");
@@ -394,8 +394,7 @@ namespace FuturesBot.Services
 
             if (!resp.IsSuccessStatusCode)
             {
-                Console.WriteLine($"[BINANCE ERROR] {resp.StatusCode}: {body}");
-                return string.Empty;
+                return ($"[BINANCE ERROR] {resp.StatusCode}: {body}");
             }
 
             return body;
