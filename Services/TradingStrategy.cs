@@ -5,7 +5,7 @@ using static FuturesBot.Utils.EnumTypesHelper;
 
 namespace FuturesBot.Services
 {
-    public class FifteenMinutesStrategy(IndicatorService indicators) : IStrategyService
+    public class TradingStrategy(IndicatorService indicators) : IStrategyService
     {
         private readonly IndicatorService _indicators = indicators;
 
@@ -43,9 +43,10 @@ namespace FuturesBot.Services
                 last15.Close < ema34_15[i15];
                 //&& ema34_15[i15] < ema89_15[i15];
 
-           bool extremeDump = last15.Close < ema34_15[i15] * 0.995m && macd15[i15] < sig15[i15] && rsi15[i15] < 30; 
+            bool extremeDump = last15.Close < ema34_15[i15] * 0.995m && macd15[i15] < sig15[i15] && rsi15[i15] < 30;
+            bool extremeUp = last15.Close > ema34_15[i15] * 1.005m && macd15[i15] > sig15[i15] && rsi15[i15] > 75;
 
-            if (!upTrend && !downTrend && !extremeDump)
+            if (!upTrend && !downTrend && !extremeDump && !extremeUp)
                 return new TradeSignal(); // sideway -> bỏ
 
             // ===== 2. Volume pattern (nến setup phải vol mạnh hơn pullback) =====
@@ -53,7 +54,7 @@ namespace FuturesBot.Services
             decimal currentVol = last15.Volume;
 
             bool strongVolume = avgPullbackVol > 0 && currentVol >= avgPullbackVol * 0.7m;
-            if (!strongVolume && !extremeDump)
+            if (!strongVolume && !extremeDump && !extremeUp)
                 return new TradeSignal();
 
             // ===== 3. LONG SETUP (sau breakout, bắt buộc có retest) =====
@@ -63,7 +64,7 @@ namespace FuturesBot.Services
                 // Ít nhất 1–2 nến trước đã đóng trên EMA34 (không phải vừa mới cross)
                 bool wasAboveEma34Recently = prev15.Close >= ema34_15[i15 - 1] * 1.002m; //&& candles15m[i15 - 1].Close > ema34_15[i15 - 1];
 
-                if (!wasAboveEma34Recently)
+                if (!wasAboveEma34Recently && !extremeUp)
                     goto ShortPart; // tránh long ngay cây breakout đầu tiên
 
                 // (3.2) Retest EMA34/EMA89: nến hiện tại phải "chạm xuống EMA rồi bật lên"
@@ -78,7 +79,7 @@ namespace FuturesBot.Services
 
                 bool rsiBull = rsi15[i15] > 55 && rsi15[i15] > rsi15[i15 - 1];
 
-                if (retestEma && bullishReject && macdCrossUp && rsiBull)
+                if ((retestEma && bullishReject && macdCrossUp && rsiBull) || extremeUp)
                 {
                     decimal entry = last15.Close;
 

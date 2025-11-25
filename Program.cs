@@ -11,7 +11,7 @@ if (config is null)
     throw new ArgumentNullException(nameof(config));
 }
 var indicators = new IndicatorService();
-var strategy = new FifteenMinutesStrategy(indicators);
+var strategy = new TradingStrategy(indicators);
 var risk = new RiskManager(config);
 var notifier = new SlackNotifierService(config);
 IExchangeClientService exchange = new BinanceFuturesClientService(config);
@@ -19,7 +19,7 @@ var executor = new TradeExecutorService(exchange, risk, config, notifier);
 var pnl = new PnlReporterService(notifier);
 var liveSync = new LiveSyncService(exchange, pnl);
 
-await notifier.SendAsync($"=== FuturesBot {config.Intervals[0].FrameTime.ToUpper()} started ===");
+await notifier.SendAsync($"=== FuturesBot {config.Intervals[0].FrameTime.ToUpper()} - {DateTime.Now.ToLongDateString()} started ===");
 
 while (true)
 {
