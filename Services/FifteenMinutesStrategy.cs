@@ -35,13 +35,13 @@ namespace FuturesBot.Services
             // ===== 1. Trend filter H1 + M15 =====
             bool upTrend =
                 lastH1.Close > ema34_h1[iH1] &&
-                last15.Close > ema34_15[i15] &&
-                ema34_15[i15] > ema89_15[i15];
+                last15.Close > ema34_15[i15];
+                //&& ema34_15[i15] > ema89_15[i15];
 
             bool downTrend =
                 lastH1.Close < ema34_h1[iH1] &&
-                last15.Close < ema34_15[i15] &&
-                ema34_15[i15] < ema89_15[i15];
+                last15.Close < ema34_15[i15];
+                //&& ema34_15[i15] < ema89_15[i15];
 
             if (!upTrend && !downTrend)
                 return new TradeSignal(); // sideway -> bỏ
@@ -50,7 +50,7 @@ namespace FuturesBot.Services
             decimal avgPullbackVol = PriceActionHelper.AverageVolume(candles15m, i15 - 1, 5);
             decimal currentVol = last15.Volume;
 
-            bool strongVolume = avgPullbackVol > 0 && currentVol >= avgPullbackVol * 1.2m;
+            bool strongVolume = avgPullbackVol > 0 && currentVol >= avgPullbackVol * 0.8m;
             if (!strongVolume)
                 return new TradeSignal();
 
@@ -72,7 +72,7 @@ namespace FuturesBot.Services
                     last15.Close > ema34_15[i15];          // đóng lại phía trên EMA34
 
                 // (3.3) Momentum: MACD + RSI
-                bool macdCrossUp = macd15[i15] > sig15[i15] && macd15[i15 - 1] <= sig15[i15 - 1];
+                bool macdCrossUp = macd15[i15] > sig15[i15]; //&& macd15[i15 - 1] <= sig15[i15 - 1];
 
                 bool rsiBull = rsi15[i15] > 50 && rsi15[i15] > rsi15[i15 - 1];
 
@@ -122,7 +122,7 @@ namespace FuturesBot.Services
                     last15.Close < ema34_15[i15];         // đóng lại dưới EMA34
 
                 // (4.3) Momentum: MACD + RSI
-                bool macdCrossDown = macd15[i15] < sig15[i15] && macd15[i15 - 1] >= sig15[i15 - 1];
+                bool macdCrossDown = macd15[i15] < sig15[i15]; //&& macd15[i15 - 1] >= sig15[i15 - 1];
 
                 bool rsiBear = rsi15[i15] < 50 && rsi15[i15] < rsi15[i15 - 1];
 
