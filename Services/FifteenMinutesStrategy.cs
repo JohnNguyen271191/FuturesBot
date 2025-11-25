@@ -47,10 +47,10 @@ namespace FuturesBot.Services
                 return new TradeSignal(); // sideway -> bỏ
 
             // ===== 2. Volume pattern (nến setup phải vol mạnh hơn pullback) =====
-            decimal avgPullbackVol = PriceActionHelper.AverageVolume(candles15m, i15 - 1, 5);
+            decimal avgPullbackVol = PriceActionHelper.AverageVolume(candles15m, i15 - 1, 3);
             decimal currentVol = last15.Volume;
 
-            bool strongVolume = avgPullbackVol > 0 && currentVol >= avgPullbackVol * 0.8m;
+            bool strongVolume = avgPullbackVol > 0 && currentVol >= avgPullbackVol * 1.0m;
             if (!strongVolume)
                 return new TradeSignal();
 
@@ -59,13 +59,13 @@ namespace FuturesBot.Services
             {
                 // (3.1) Xác nhận đã có breakout trước đó:
                 // Ít nhất 1–2 nến trước đã đóng trên EMA34 (không phải vừa mới cross)
-                bool wasAboveEma34Recently = candles15m[i15 - 2].Close > ema34_15[i15 - 2] && candles15m[i15 - 1].Close > ema34_15[i15 - 1];
+                bool wasAboveEma34Recently = candles15m[i15 - 1].Close > ema34_15[i15 - 1]; //&& candles15m[i15 - 1].Close > ema34_15[i15 - 1];
 
                 if (!wasAboveEma34Recently)
                     goto ShortPart; // tránh long ngay cây breakout đầu tiên
 
                 // (3.2) Retest EMA34/EMA89: nến hiện tại phải "chạm xuống EMA rồi bật lên"
-                bool retestEma = last15.Low <= ema34_15[i15] * 1.001m || last15.Low <= ema89_15[i15] * 1.001m;
+                bool retestEma = last15.Low <= ema34_15[i15] * 1.002m || last15.Low <= ema89_15[i15] * 1.002m;
 
                 bool bullishReject =
                     last15.Close > last15.Open &&          // nến xanh
@@ -109,13 +109,13 @@ namespace FuturesBot.Services
             {
                 // (4.1) Xác nhận đã có breakout trước đó:
                 // Ít nhất 1–2 nến trước đã đóng dưới EMA34
-                bool wasBelowEma34Recently = candles15m[i15 - 2].Close < ema34_15[i15 - 2] && candles15m[i15 - 1].Close < ema34_15[i15 - 1];
+                bool wasBelowEma34Recently = candles15m[i15 - 1].Close < ema34_15[i15 - 1]; //&& candles15m[i15 - 1].Close < ema34_15[i15 - 1];
 
                 if (!wasBelowEma34Recently)
                     return new TradeSignal(); // tránh short ngay cây breakout đầu tiên
 
                 // (4.2) Retest EMA34/EMA89: nến hiện tại phải "chạm lên EMA rồi bị đạp xuống"
-                bool retestEma = last15.High >= ema34_15[i15] * 0.999m || last15.High >= ema89_15[i15] * 0.999m;
+                bool retestEma = last15.High >= ema34_15[i15] * 0.998m || last15.High >= ema89_15[i15] * 0.998m;
 
                 bool bearishReject =
                     last15.Close < last15.Open &&         // nến đỏ
