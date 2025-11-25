@@ -83,7 +83,7 @@ namespace FuturesBot.Services
             throw new Exception("Failed to get candles from Binance after 3 attempts.");
         }
 
-        public async Task PlaceFuturesOrderAsync(
+        public async Task<bool> PlaceFuturesOrderAsync(
             string symbol,
             SignalType side,
             decimal quantity,
@@ -111,7 +111,7 @@ namespace FuturesBot.Services
                 Console.WriteLine($" -> {side} {quantity} {symbol} @ {entryPrice}");
                 Console.WriteLine($" -> SL (STOP_MARKET) : {stopLoss}");
                 Console.WriteLine($" -> TP (TAKE_PROFIT_MARKET) : {takeProfit}");
-                return;
+                return true;
             }
 
             // 1. set leverage
@@ -143,7 +143,7 @@ namespace FuturesBot.Services
             if (entryResp.Contains("[BINANCE ERROR]"))
             {
                 await slackNotifierService.SendAsync(entryResp);
-                return;
+                return false;
             }
             await slackNotifierService.SendAsync($"[ENTRY RESP] {entryResp}");
 
@@ -184,6 +184,7 @@ namespace FuturesBot.Services
             await slackNotifierService.SendAsync("=== SEND TAKE PROFIT ===");
             var tpResp = await SignedPostAsync("/fapi/v1/order", tpParams);
             await slackNotifierService.SendAsync($"[TP RESP] {tpResp}");
+            return true;
         }
 
         public async Task<PositionInfo> GetPositionAsync(string symbol)

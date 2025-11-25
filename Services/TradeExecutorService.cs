@@ -29,19 +29,19 @@ namespace FuturesBot.Services
             // NEW: chặn nếu đã có vị thế hoặc lệnh chờ
             if (await _exchange.HasOpenPositionOrOrderAsync(symbol.Coin))
             {
-                await _notifier.SendAsync("[BLOCKED] Already have open position or pending order. Skip new signal.");
+                await _notifier.SendAsync($"[BLOCKED] - {symbol.Coin} - Already have open position or pending order. Skip new signal.");
                 return;
             }
 
             if (!_risk.CanOpenNewTrade())
             {
-                await _notifier.SendAsync($"[BLOCKED] Not eligible to open a position. Reason: {signal.Reason}");
+                await _notifier.SendAsync($"[BLOCKED] - {symbol.Coin} - Not eligible to open a position. Reason: {signal.Reason}");
                 return;
             }
 
             if (signal.EntryPrice is null || signal.StopLoss is null || signal.TakeProfit is null)
             {
-                await _notifier.SendAsync("[WARN] The Signal not enough Entry/SL/TP.");
+                await _notifier.SendAsync($"[WARN] - {symbol.Coin} - The Signal not enough Entry/SL/TP.");
                 return;
             }
 
@@ -52,7 +52,7 @@ namespace FuturesBot.Services
             var qty = _risk.CalculatePositionSize(entry, sl);
             if (qty <= 0)
             {
-                await _notifier.SendAsync("[WARN] Position size = 0, signal ignore.");
+                await _notifier.SendAsync($"[WARN] - {symbol.Coin} - Position size = 0, signal ignore.");
                 return;
             }
 
@@ -79,9 +79,15 @@ PaperMode: {_config.PaperMode}
 
             // nếu muốn vẫn confirm qua console thì giữ lại đoạn hỏi y/n, 
             // còn không thì auto gửi luôn:
-            await _exchange.PlaceFuturesOrderAsync(symbol.Coin, signal.Type, qty, entry, sl, tp, symbol.Leverage, _notifier, marketOrder: false);
+            var isOrdered = await _exchange.PlaceFuturesOrderAsync(symbol.Coin, signal.Type, qty, entry, sl, tp, symbol.Leverage, _notifier, marketOrder: false);
 
-            await _notifier.SendAsync("[INFO] API call sent to place the order (check Binance).");
+            if (isOrdered)
+            {
+                await _notifier.SendAsync($"[INFO] - {symbol.Coin} - API call sent to place the order (check Binance).");
+            } else
+            {
+                await _notifier.SendAsync($"[ERROR] - {symbol.Coin} - API calln't sent to place the order (check Binance).");
+            }            
         }
     }
 }
