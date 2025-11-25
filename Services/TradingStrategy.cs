@@ -1,4 +1,5 @@
-﻿using FuturesBot.IServices;
+﻿using FuturesBot.Config;
+using FuturesBot.IServices;
 using FuturesBot.Models;
 using FuturesBot.Utils;
 using static FuturesBot.Utils.EnumTypesHelper;
@@ -9,9 +10,7 @@ namespace FuturesBot.Services
     {
         private readonly IndicatorService _indicators = indicators;
 
-        public TradeSignal GenerateSignal(
-        IReadOnlyList<Candle> candles15m,
-        IReadOnlyList<Candle> candles1h)
+        public TradeSignal GenerateSignal(IReadOnlyList<Candle> candles15m, IReadOnlyList<Candle> candles1h, Symbol symbol)
         {
             if (candles15m.Count < 120 || candles1h.Count < 120)
                 return new TradeSignal();
@@ -85,14 +84,14 @@ namespace FuturesBot.Services
 
                     // SL anti-hunt: đáy swing - buffer
                     decimal swingLow = PriceActionHelper.FindSwingLow(candles15m, i15, lookback: 5);
-                    decimal buffer = entry * 0.0005m; // 0.05%
+                    decimal buffer = entry * 0.001m; // 0.1%
                     decimal sl = Math.Round(swingLow - buffer, 3);
 
                     if (sl <= 0 || sl >= entry)
                         return new TradeSignal
                         {
                             Type = SignalType.Info,
-                            Reason = $"H1 uptrend, Can't order due to sl {sl} <= 0 || sl {sl} >= entry {entry}"
+                            Reason = $"{symbol.Coin} : uptrend, Can't order due to sl {sl} <= 0 || sl {sl} >= entry {entry}"
                         };
 
                     decimal risk = entry - sl;
@@ -104,13 +103,13 @@ namespace FuturesBot.Services
                         EntryPrice = entry,
                         StopLoss = sl,
                         TakeProfit = tp,
-                        Reason = "H1 uptrend, breakout xong retest EMA + strong vol + MACD up + RSI>50"
+                        Reason = $"{symbol.Coin} : uptrend, breakout xong retest EMA + strong vol + MACD up + RSI>50"
                     };
                 }
                 return new TradeSignal
                 {
                     Type = SignalType.Info,
-                    Reason = $"H1 uptrend, Can't order due to retestEma: {retestEma} - bullishReject: {bullishReject} - macdCrossUp: {macdCrossUp} - rsiBull: {rsiBull} - extremeUp: {extremeUp}"
+                    Reason = $"{symbol.Coin} : uptrend, Can't order due to retestEma: {retestEma} - bullishReject: {bullishReject} - macdCrossUp: {macdCrossUp} - rsiBull: {rsiBull} - extremeUp: {extremeUp}"
                 };
             }
 
@@ -144,14 +143,14 @@ namespace FuturesBot.Services
 
                     // SL anti-hunt: đỉnh swing + buffer
                     decimal swingHigh = PriceActionHelper.FindSwingHigh(candles15m, i15, lookback: 5);
-                    decimal buffer = entry * 0.0005m; // 0.05%
+                    decimal buffer = entry * 0.001m; // 0.1%
                     decimal sl = Math.Round(swingHigh + buffer, 3);
 
                     if (sl <= entry)
                         return new TradeSignal 
                         {
                             Type = SignalType.Info,
-                            Reason = $"H1 downtrend, Can't order due to sl {sl} < entry {entry}"
+                            Reason = $"{symbol.Coin} : downtrend, Can't order due to sl {sl} < entry {entry}"
                         };
 
                     decimal risk = sl - entry;
@@ -163,13 +162,13 @@ namespace FuturesBot.Services
                         EntryPrice = entry,
                         StopLoss = sl,
                         TakeProfit = tp,
-                        Reason = "H1 downtrend, breakout xong retest EMA + strong vol + MACD down + RSI<50"
+                        Reason = "{symbol.Coin} : downtrend, breakout xong retest EMA + strong vol + MACD down + RSI<50"
                     };
                 }
                 return new TradeSignal
                 {
                     Type = SignalType.Info,
-                    Reason = $"H1 downtrend, Can't order due to retestEma: {retestEma} - bearishReject: {bearishReject} - macdCrossDown: {macdCrossDown} - rsiBear: {rsiBear} - extremeDump: {extremeDump}"
+                    Reason = $"{symbol.Coin} : downtrend, Can't order due to retestEma: {retestEma} - bearishReject: {bearishReject} - macdCrossDown: {macdCrossDown} - rsiBear: {rsiBear} - extremeDump: {extremeDump}"
                 };
             }
 

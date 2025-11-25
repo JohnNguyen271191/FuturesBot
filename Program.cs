@@ -19,7 +19,7 @@ var executor = new TradeExecutorService(exchange, risk, config, notifier);
 var pnl = new PnlReporterService(notifier);
 var liveSync = new LiveSyncService(exchange, pnl);
 
-await notifier.SendAsync($"=== FuturesBot {config.Intervals[0].FrameTime.ToUpper()} - {DateTime.Now.ToLongDateString()} started ===");
+await notifier.SendAsync($"=== FuturesBot {config.Intervals[0].FrameTime.ToUpper()} - {DateTime.Now:dd/MM/yyyy HH:mm:ss} started ===");
 
 while (true)
 {
@@ -27,12 +27,10 @@ while (true)
     {
         try
         {
-            var candles15m = await exchange.GetRecentCandlesAsync(
-                symbol.Coin, config.Intervals[0].FrameTime, 200);
-            var candles1h = await exchange.GetRecentCandlesAsync(
-                symbol.Coin, config.Intervals[1].FrameTime, 200);
+            var candles15m = await exchange.GetRecentCandlesAsync(symbol.Coin, config.Intervals[0].FrameTime, 200);
+            var candles1h = await exchange.GetRecentCandlesAsync(symbol.Coin, config.Intervals[1].FrameTime, 200);
 
-            var signal = strategy.GenerateSignal(candles15m, candles1h);
+            var signal = strategy.GenerateSignal(candles15m, candles1h, symbol);
 
             await executor.HandleSignalAsync(signal, symbol);
         }
