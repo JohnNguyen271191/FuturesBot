@@ -51,8 +51,8 @@ namespace FuturesBot.Services
             decimal currentVol = last15.Volume;
 
             bool strongVolume = avgPullbackVol > 0 && currentVol >= avgPullbackVol * 0.7m;
-            if (!strongVolume)
-                return new TradeSignal();
+            //if (!strongVolume)
+                //return new TradeSignal();
 
             // ===== 3. LONG SETUP (sau breakout, bắt buộc có retest) =====
             if (upTrend)
