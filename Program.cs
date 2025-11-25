@@ -19,7 +19,7 @@ var executor = new TradeExecutorService(exchange, risk, config, notifier);
 var pnl = new PnlReporterService(notifier);
 var liveSync = new LiveSyncService(exchange, pnl);
 
-await notifier.SendAsync("=== FuturesBot 5M started ===");
+await notifier.SendAsync($"=== FuturesBot {config.Intervals[0].FrameTime.ToUpper()} started ===");
 
 while (true)
 {
