@@ -58,7 +58,7 @@ namespace FuturesBot.Services
                 return new TradeSignal();
 
             // ===== 3. LONG SETUP (sau breakout, bắt buộc có retest) =====
-            if (upTrend)
+            if (upTrend || extremeUp)
             {
                 // (3.1) Xác nhận đã có breakout trước đó:
                 // Ít nhất 1–2 nến trước đã đóng trên EMA34 (không phải vừa mới cross)
