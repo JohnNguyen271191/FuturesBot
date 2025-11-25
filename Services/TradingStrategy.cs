@@ -89,7 +89,11 @@ namespace FuturesBot.Services
                     decimal sl = Math.Round(swingLow - buffer, 3);
 
                     if (sl <= 0 || sl >= entry)
-                        return new TradeSignal();
+                        return new TradeSignal
+                        {
+                            Type = SignalType.Info,
+                            Reason = $"H1 uptrend, Can't order due to sl {sl} <= 0 || sl {sl} >= entry {entry}"
+                        };
 
                     decimal risk = entry - sl;
                     decimal tp = Math.Round(entry + risk * 1.5m, 3);   // TP = 1.5R
@@ -103,6 +107,11 @@ namespace FuturesBot.Services
                         Reason = "H1 uptrend, breakout xong retest EMA + strong vol + MACD up + RSI>50"
                     };
                 }
+                return new TradeSignal
+                {
+                    Type = SignalType.Info,
+                    Reason = $"H1 uptrend, Can't order due to retestEma: {retestEma} - bullishReject: {bullishReject} - macdCrossUp: {macdCrossUp} - rsiBull: {rsiBull} - extremeUp: {extremeUp}"
+                };
             }
 
         ShortPart: // label nhảy xuống khi không đủ điều kiện long
@@ -139,7 +148,11 @@ namespace FuturesBot.Services
                     decimal sl = Math.Round(swingHigh + buffer, 3);
 
                     if (sl <= entry)
-                        return new TradeSignal();
+                        return new TradeSignal 
+                        {
+                            Type = SignalType.Info,
+                            Reason = $"H1 downtrend, Can't order due to sl {sl} < entry {entry}"
+                        };
 
                     decimal risk = sl - entry;
                     decimal tp = Math.Round(entry - risk * 1.5m, 3); // TP = 1.5R
@@ -153,6 +166,11 @@ namespace FuturesBot.Services
                         Reason = "H1 downtrend, breakout xong retest EMA + strong vol + MACD down + RSI<50"
                     };
                 }
+                return new TradeSignal
+                {
+                    Type = SignalType.Info,
+                    Reason = $"H1 downtrend, Can't order due to retestEma: {retestEma} - bearishReject: {bearishReject} - macdCrossDown: {macdCrossDown} - rsiBear: {rsiBear} - extremeDump: {extremeDump}"
+                };
             }
 
             return new TradeSignal();

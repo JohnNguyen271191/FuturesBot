@@ -8,7 +8,8 @@ namespace FuturesBot.Utils
             None,
             Long,
             Short,
-            Close
+            Close,
+            Info
         }
     }
 }

@@ -20,6 +20,12 @@ namespace FuturesBot.Services
         {
             if (signal.Type == SignalType.None) return;
 
+            if (signal.Type == SignalType.Info)
+            {
+                await _notifier.SendAsync($"[INFO] {signal.Reason}");
+                return;
+            }
+
             // NEW: chặn nếu đã có vị thế hoặc lệnh chờ
             if (await _exchange.HasOpenPositionOrOrderAsync(symbol.Coin))
             {
