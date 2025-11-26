@@ -142,7 +142,7 @@ namespace FuturesBot.Services
             var entryResp = await SignedPostAsync("/fapi/v1/order", entryParams);
             if (entryResp.Contains("[BINANCE ERROR]"))
             {
-                await slackNotifierService.SendAsync($"Send order: symbol={symbol}, side={sideStr}, qty={qty}, price={entry}, sl={sl}, tp={tp}");
+                await slackNotifierService.SendAsync($"Send order: symbol={symbol}, side={sideStr}, qty={qty} - {rules.QtyStep}, price={entry} - {rules.PriceStep}, sl={sl}, tp={tp}");
                 await slackNotifierService.SendAsync(entryResp);
                 return false;
             }
