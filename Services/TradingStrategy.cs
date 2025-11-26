@@ -20,7 +20,6 @@ namespace FuturesBot.Services
 
             var ema34_15 = _indicators.Ema(candles15m, 34);
             var ema89_15 = _indicators.Ema(candles15m, 89);
-            var ema200_15 = _indicators.Ema(candles15m, 200);
 
             var ema34_h1 = _indicators.Ema(candles1h, 34);
 
@@ -34,13 +33,13 @@ namespace FuturesBot.Services
             // ===== 1. Trend filter H1 + M15 =====
             bool upTrend =
                 lastH1.Close > ema34_h1[iH1] &&
-                last15.Close > ema34_15[i15];
-                //&& ema34_15[i15] > ema89_15[i15];
+                last15.Close > ema34_15[i15] &&
+                ema34_15[i15] > ema89_15[i15];
 
             bool downTrend =
                 lastH1.Close < ema34_h1[iH1] &&
-                last15.Close < ema34_15[i15];
-                //&& ema34_15[i15] < ema89_15[i15];
+                last15.Close < ema34_15[i15] &&
+                ema34_15[i15] < ema89_15[i15];
 
             bool extremeDump = last15.Close < ema34_15[i15] * 0.995m && macd15[i15] < sig15[i15] && rsi15[i15] < 30;
             bool extremeUp = last15.Close > ema34_15[i15] * 1.005m && macd15[i15] > sig15[i15] && rsi15[i15] > 75;
@@ -52,7 +51,7 @@ namespace FuturesBot.Services
             decimal avgPullbackVol = PriceActionHelper.AverageVolume(candles15m, i15 - 1, 3);
             decimal currentVol = last15.Volume;
 
-            bool strongVolume = avgPullbackVol > 0 && currentVol >= avgPullbackVol * 0.7m;
+            bool strongVolume = avgPullbackVol > 0 && currentVol >= avgPullbackVol * 1.0m;
             if (!strongVolume && !extremeDump && !extremeUp)
                 return new TradeSignal();
 
@@ -67,14 +66,14 @@ namespace FuturesBot.Services
                     goto ShortPart; // tránh long ngay cây breakout đầu tiên
 
                 // (3.2) Retest EMA34/EMA89: nến hiện tại phải "chạm xuống EMA rồi bật lên"
-                bool retestEma = last15.Low <= ema34_15[i15] * 1.003m || last15.Low <= ema89_15[i15] * 1.003m;
+                bool retestEma = last15.Low <= ema34_15[i15] * 1.002m || last15.Low <= ema89_15[i15] * 1.002m;
 
                 bool bullishReject =
                     last15.Close > last15.Open &&          // nến xanh
                     last15.Close > ema34_15[i15];          // đóng lại phía trên EMA34
 
                 // (3.3) Momentum: MACD + RSI
-                bool macdCrossUp = macd15[i15] > sig15[i15]; //&& macd15[i15 - 1] <= sig15[i15 - 1];
+                bool macdCrossUp = macd15[i15] > sig15[i15] && macd15[i15 - 1] <= sig15[i15 - 1];
 
                 bool rsiBull = rsi15[i15] > 55 && rsi15[i15] > rsi15[i15 - 1];
 
@@ -130,14 +129,14 @@ namespace FuturesBot.Services
                     return new TradeSignal(); // tránh short ngay cây breakout đầu tiên
 
                 // (4.2) Retest EMA34/EMA89: nến hiện tại phải "chạm lên EMA rồi bị đạp xuống"
-                bool retestEma = last15.High >= ema34_15[i15] * 0.997m || last15.High >= ema89_15[i15] * 0.997m;
+                bool retestEma = last15.High >= ema34_15[i15] * 0.998m || last15.High >= ema89_15[i15] * 0.998m;
 
                 bool bearishReject =
                     last15.Close < last15.Open &&         // nến đỏ
                     last15.Close < ema34_15[i15];         // đóng lại dưới EMA34
 
                 // (4.3) Momentum: MACD + RSI
-                bool macdCrossDown = macd15[i15] < sig15[i15]; //&& macd15[i15 - 1] >= sig15[i15 - 1];
+                bool macdCrossDown = macd15[i15] < sig15[i15] && macd15[i15 - 1] >= sig15[i15 - 1];
                 bool rsiBear = rsi15[i15] < 45 && rsi15[i15] < rsi15[i15 - 1];
                 bool shouldShort = (retestEma && bearishReject && macdCrossDown && rsiBear)
                                     || (retestEma && bearishReject && rsiBear)
