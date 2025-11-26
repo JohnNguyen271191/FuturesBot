@@ -40,37 +40,47 @@ namespace FuturesBot.Services
             if (symbols.GetArrayLength() == 0)
                 throw new Exception($"No symbol info returned for {symbol}");
 
-            var sym = symbols[0];
-
             decimal priceStep = 0, qtyStep = 0, minQty = 0, minNotional = 0;
 
-            foreach (var f in sym.GetProperty("filters").EnumerateArray())
+            foreach (var s in symbols.EnumerateArray())
             {
-                var type = f.GetProperty("filterType").GetString();
-                switch (type)
+                var sym = s.GetProperty("symbol").GetString();
+                if (!string.Equals(sym, symbol, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                var contractType = s.GetProperty("contractType").GetString();
+                if (contractType == "PERPETUAL")
                 {
-                    case "PRICE_FILTER":
-                        priceStep = decimal.Parse(
-                            f.GetProperty("tickSize").GetString()!,
-                            CultureInfo.InvariantCulture);
-                        break;
+                    foreach (var f in s.GetProperty("filters").EnumerateArray())
+                    {
+                        var type = f.GetProperty("filterType").GetString();
+                        switch (type)
+                        {
+                            case "PRICE_FILTER":
+                                priceStep = decimal.Parse(
+                                    f.GetProperty("tickSize").GetString()!,
+                                    CultureInfo.InvariantCulture);
+                                break;
 
-                    case "LOT_SIZE":
-                        qtyStep = decimal.Parse(
-                            f.GetProperty("stepSize").GetString()!,
-                            CultureInfo.InvariantCulture);
-                        minQty = decimal.Parse(
-                            f.GetProperty("minQty").GetString()!,
-                            CultureInfo.InvariantCulture);
-                        break;
+                            case "LOT_SIZE":
+                                qtyStep = decimal.Parse(
+                                    f.GetProperty("stepSize").GetString()!,
+                                    CultureInfo.InvariantCulture);
+                                minQty = decimal.Parse(
+                                    f.GetProperty("minQty").GetString()!,
+                                    CultureInfo.InvariantCulture);
+                                break;
 
-                    case "MIN_NOTIONAL":
-                        minNotional = decimal.Parse(
-                            f.GetProperty("notional").GetString()!,
-                            CultureInfo.InvariantCulture);
-                        break;
+                            case "MIN_NOTIONAL":
+                                minNotional = decimal.Parse(
+                                    f.GetProperty("notional").GetString()!,
+                                    CultureInfo.InvariantCulture);
+                                break;
+                        }
+                    }
+                    break;
                 }
-            }
+            }            
 
             rules = new SymbolRules
             {
