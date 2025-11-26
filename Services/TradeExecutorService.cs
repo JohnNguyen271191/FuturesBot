@@ -29,7 +29,7 @@ namespace FuturesBot.Services
             // NEW: chặn nếu đã có vị thế hoặc lệnh chờ
             if (await _exchange.HasOpenPositionOrOrderAsync(symbol.Coin))
             {
-                await _notifier.SendAsync($"[BLOCKED] - {symbol.Coin} - Already have open position or pending order. Skip new signal.");
+                await _notifier.SendAsync($"[BLOCKED] - {symbol.Coin} - Already have open position or pending order. Skip new signal : {signal.Reason}");
                 return;
             }
 
