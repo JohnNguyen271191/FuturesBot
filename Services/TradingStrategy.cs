@@ -169,7 +169,7 @@ namespace FuturesBot.Services
                         EntryPrice = entry,
                         StopLoss = sl,
                         TakeProfit = tp,
-                        Reason = "{symbol.Coin} : downtrend, breakout xong retest EMA + strong vol + MACD down + RSI<50"
+                        Reason = $"{symbol.Coin} : downtrend, breakout xong retest EMA + strong vol + MACD down + RSI<50"
                     };
                 }
                 return new TradeSignal
