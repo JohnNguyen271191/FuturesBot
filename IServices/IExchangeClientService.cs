@@ -18,5 +18,7 @@ namespace FuturesBot.IServices
         Task<bool> HasOpenPositionOrOrderAsync(string symbol);
 
         Task CancelAllOpenOrdersAsync(string symbol);
+
+        Task ClosePositionAsync(string symbol, decimal quantity);
     }
 }

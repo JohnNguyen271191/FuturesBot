@@ -198,22 +198,54 @@ namespace FuturesBot.Services
             });
 
             using var doc = JsonDocument.Parse(json);
-            var arr = doc.RootElement;
+            var root = doc.RootElement;
 
-            if (arr.ValueKind == JsonValueKind.Array && arr.GetArrayLength() > 0)
+            if (root.ValueKind == JsonValueKind.Array && root.GetArrayLength() > 0)
             {
-                var el = arr[0];
-                return new PositionInfo
+                JsonElement? chosen = null;
+
+                // 1) Ưu tiên phần tử có positionAmt != 0 (đang có lệnh)
+                foreach (var el in root.EnumerateArray())
                 {
-                    Symbol = el.GetProperty("symbol").GetString() ?? symbol,
-                    PositionAmt = decimal.Parse(el.GetProperty("positionAmt").GetString() ?? "0"),
-                    EntryPrice = decimal.Parse(el.GetProperty("entryPrice").GetString() ?? "0"),
-                    MarkPrice = decimal.Parse(el.GetProperty("markPrice").GetString() ?? "0"),
-                    UpdateTime = DateTimeOffset.FromUnixTimeMilliseconds(el.GetProperty("updateTime").GetInt64()).UtcDateTime
-                };
+                    var sym = el.GetProperty("symbol").GetString();
+                    if (!string.Equals(sym, symbol, StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    var amtStr = el.GetProperty("positionAmt").GetString() ?? "0";
+                    var amt = decimal.Parse(amtStr, CultureInfo.InvariantCulture);
+
+                    if (amt != 0)
+                    {
+                        chosen = el;
+                        break;
+                    }
+
+                    // nếu chưa chọn gì thì tạm giữ lại (phòng khi không có lệnh)
+                    chosen ??= el;
+                }
+
+                if (chosen.HasValue)
+                {
+                    var el = chosen.Value;
+
+                    string sym = el.GetProperty("symbol").GetString() ?? symbol;
+                    decimal positionAmt = decimal.Parse(el.GetProperty("positionAmt").GetString() ?? "0", CultureInfo.InvariantCulture);
+                    decimal entryPrice = decimal.Parse(el.GetProperty("entryPrice").GetString() ?? "0", CultureInfo.InvariantCulture);
+                    decimal markPrice = decimal.Parse(el.GetProperty("markPrice").GetString() ?? "0", CultureInfo.InvariantCulture);
+                    long updateMs = el.GetProperty("updateTime").GetInt64();
+
+                    return new PositionInfo
+                    {
+                        Symbol = sym,
+                        PositionAmt = positionAmt,
+                        EntryPrice = entryPrice,
+                        MarkPrice = markPrice,
+                        UpdateTime = DateTimeOffset.FromUnixTimeMilliseconds(updateMs).UtcDateTime
+                    };
+                }
             }
 
-            // Không có position
+            // Không có position nào (flat)
             return new PositionInfo
             {
                 Symbol = symbol,
@@ -375,6 +407,21 @@ namespace FuturesBot.Services
             }
 
             Console.WriteLine($"[CancelAllOpenOrdersAsync OK] {symbol} => {content}");
+        }
+
+        public async Task ClosePositionAsync(string symbol, decimal quantity)
+        {
+            var side = quantity > 0 ? "SELL" : "BUY";
+            var positionSide = quantity > 0 ? "LONG" : "SHORT";
+            await SignedPostAsync("/fapi/v1/order", new Dictionary<string, string>
+            {
+                ["symbol"] = symbol,
+                ["side"] = side,
+                ["type"] = "MARKET",
+                ["quantity"] = Math.Abs(quantity).ToString(CultureInfo.InvariantCulture),
+                ["recvWindow"] = "5000",
+                ["positionSide"] = positionSide
+            });
         }
 
         // ==========================

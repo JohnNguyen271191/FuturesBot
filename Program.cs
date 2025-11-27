@@ -69,13 +69,13 @@ while (true)
             bool hasLongPosition = pos.PositionAmt > 0;
             bool hasShortPosition = pos.PositionAmt < 0;
 
-            if (hasLongPosition || hasShortPosition)
+            if (pos.IsLong || pos.IsShort)
             {
                 var exitSignal = strategy.GenerateExitSignal(candles15m, hasLongPosition, hasShortPosition, symbol);
 
                 if (exitSignal.Type == SignalType.CloseLong || exitSignal.Type == SignalType.CloseShort)
                 {
-                    await executor.HandleSignalAsync(exitSignal, symbol);
+                    await exchange.ClosePositionAsync(symbol.Coin, pos.PositionAmt);
                     continue;
                 }
             }
