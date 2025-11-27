@@ -10,11 +10,11 @@ namespace FuturesBot.Services
     /// Chiến lược:
     /// - Trend filter: H1 + M15 với EMA34/EMA89
     /// - Entry: M15 retest EMA34/EMA89 + rejection + volume + MACD + RSI
+    /// - Entry không lấy đúng last15.Close mà offset 1 chút để tránh vào đỉnh/đáy.
     /// - SL: swing high/low + buffer
     /// - TP: 1.5R
     /// 
-    /// Không dùng extremeUp/extremeDump để auto vào lệnh,
-    /// chỉ dùng để cho phép bỏ qua 1 số filter (volume/trend nhẹ) khi thị trường rất mạnh.
+    /// ExtremeUp/ExtremeDump chỉ giúp nới lỏng filter, không auto vào lệnh.
     /// </summary>
     public class TradingStrategy(IndicatorService indicators) : IStrategyService
     {
@@ -35,6 +35,11 @@ namespace FuturesBot.Services
         private const decimal ExtremeRsiHigh = 75m;
         private const decimal ExtremeRsiLow = 30m;
         private const decimal ExtremeEmaBoost = 0.01m;       // 1% lệch EMA cho extreme
+
+        // 🔥 Offset entry so với last close (0.1%)
+        // Long:  entry = Close * (1 - EntryOffsetPercent)
+        // Short: entry = Close * (1 + EntryOffsetPercent)
+        private const decimal EntryOffsetPercent = 0.001m;   // 0.1%
 
         public TradeSignal GenerateSignal(
             IReadOnlyList<Candle> candles15m,
@@ -198,11 +203,21 @@ namespace FuturesBot.Services
             }
 
             // (5) Tính Entry/SL/TP
-            decimal entry = last15.Close;
+            // Entry: thấp hơn Close một chút để tránh vào đỉnh nến setup
+            decimal rawEntry = last15.Close * (1 - EntryOffsetPercent);
 
             decimal swingLow = PriceActionHelper.FindSwingLow(candles15m, i15, lookback: SwingLookback);
-            decimal buffer = entry * StopBufferPercent;
+            decimal buffer = rawEntry * StopBufferPercent;
             decimal sl = swingLow - buffer;
+
+            // Nếu offset làm entry nằm dưới swingLow quá sâu -> fallback về giữa Close & swingLow
+            decimal entry = rawEntry;
+            if (entry <= swingLow)
+                entry = (last15.Close + swingLow) / 2;
+
+            // Recalc SL theo entry mới
+            buffer = entry * StopBufferPercent;
+            sl = swingLow - buffer;
 
             if (sl <= 0 || sl >= entry)
             {
@@ -222,7 +237,7 @@ namespace FuturesBot.Services
                 EntryPrice = entry,
                 StopLoss = sl,
                 TakeProfit = tp,
-                Reason = $"{symbol.Coin} : LONG uptrend – breakout trước đó, retest EMA + bullish rejection + momentum OK."
+                Reason = $"{symbol.Coin} : LONG uptrend – breakout trước đó, retest EMA + bullish rejection + momentum OK (entry offset dưới Close)."
             };
         }
 
@@ -300,11 +315,21 @@ namespace FuturesBot.Services
             }
 
             // (5) Tính Entry/SL/TP
-            decimal entry = last15.Close;
+            // Entry: cao hơn Close một chút để tránh vào đáy nến setup
+            decimal rawEntry = last15.Close * (1 + EntryOffsetPercent);
 
             decimal swingHigh = PriceActionHelper.FindSwingHigh(candles15m, i15, lookback: SwingLookback);
-            decimal buffer = entry * StopBufferPercent;
+            decimal buffer = rawEntry * StopBufferPercent;
             decimal sl = swingHigh + buffer;
+
+            // Nếu offset làm entry nằm trên swingHigh quá xa -> fallback về giữa Close & swingHigh
+            decimal entry = rawEntry;
+            if (entry >= swingHigh)
+                entry = (last15.Close + swingHigh) / 2;
+
+            // Recalc SL theo entry mới
+            buffer = entry * StopBufferPercent;
+            sl = swingHigh + buffer;
 
             if (sl <= entry)
             {
@@ -324,7 +349,7 @@ namespace FuturesBot.Services
                 EntryPrice = entry,
                 StopLoss = sl,
                 TakeProfit = tp,
-                Reason = $"{symbol.Coin} : SHORT downtrend – breakout trước đó, retest EMA + bearish rejection + momentum OK."
+                Reason = $"{symbol.Coin} : SHORT downtrend – breakout trước đó, retest EMA + bearish rejection + momentum OK (entry offset trên Close)."
             };
         }
     }
