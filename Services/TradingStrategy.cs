@@ -52,11 +52,7 @@ namespace FuturesBot.Services
         /// Exit: nếu đang LONG và đóng dưới EMA34 → ExitLong
         ///        nếu đang SHORT và đóng trên EMA34 → ExitShort
         /// </summary>
-        public TradeSignal GenerateExitSignal(
-            IReadOnlyList<Candle> candles15m,
-            bool hasLongPosition,
-            bool hasShortPosition,
-            Symbol symbol)
+        public TradeSignal GenerateExitSignal(IReadOnlyList<Candle> candles15m, bool hasLongPosition, bool hasShortPosition, Symbol symbol)
         {
             if (candles15m == null || candles15m.Count < 40)
                 return new TradeSignal();
@@ -72,7 +68,7 @@ namespace FuturesBot.Services
             {
                 return new TradeSignal
                 {
-                    Type = SignalType.Info,
+                    Type = SignalType.CloseLong,
                     Reason = $"{symbol.Coin}: Đang LONG nhưng giá đóng dưới EMA34 M15 → Exit để bảo vệ vốn."
                 };
             }
@@ -82,7 +78,7 @@ namespace FuturesBot.Services
             {
                 return new TradeSignal
                 {
-                    Type = SignalType.Info,
+                    Type = SignalType.CloseShort,
                     Reason = $"{symbol.Coin}: Đang SHORT nhưng giá đóng trên EMA34 M15 → Exit để tránh đảo trend."
                 };
             }
@@ -119,25 +115,13 @@ namespace FuturesBot.Services
             var (macd15, sig15, _) = _indicators.Macd(candles15m, 5, 13, 5);
 
             // --- Trend ---
-            bool upTrend =
-                lastH1.Close > ema34_h1[iH1] &&
-                last15.Close > ema34_15[i15] &&
-                ema34_15[i15] > ema89_15[i15];
+            bool upTrend = lastH1.Close > ema34_h1[iH1] && last15.Close > ema34_15[i15] && ema34_15[i15] > ema89_15[i15];
 
-            bool downTrend =
-                lastH1.Close < ema34_h1[iH1] &&
-                last15.Close < ema34_15[i15] &&
-                ema34_15[i15] < ema89_15[i15];
+            bool downTrend = lastH1.Close < ema34_h1[iH1] && last15.Close < ema34_15[i15] && ema34_15[i15] < ema89_15[i15];
 
-            bool extremeUp =
-                last15.Close > ema34_15[i15] * (1 + ExtremeEmaBoost) &&
-                macd15[i15] > sig15[i15] &&
-                rsi15[i15] > ExtremeRsiHigh;
+            bool extremeUp = last15.Close > ema34_15[i15] * (1 + ExtremeEmaBoost) && macd15[i15] > sig15[i15] && rsi15[i15] > ExtremeRsiHigh;
 
-            bool extremeDump =
-                last15.Close < ema34_15[i15] * (1 - ExtremeEmaBoost) &&
-                macd15[i15] < sig15[i15] &&
-                rsi15[i15] < ExtremeRsiLow;
+            bool extremeDump = last15.Close < ema34_15[i15] * (1 - ExtremeEmaBoost) && macd15[i15] < sig15[i15] && rsi15[i15] < ExtremeRsiLow;
 
             // Không có trend, không extreme -> không trade
             if (!upTrend && !downTrend && !extremeUp && !extremeDump)
@@ -153,9 +137,7 @@ namespace FuturesBot.Services
             // --- LONG ---
             if (upTrend || extremeUp)
             {
-                var longSignal = BuildLong(candles15m, ema34_15, ema89_15,
-                    rsi15, macd15, sig15,
-                    last15, prev15, symbol, extremeUp);
+                var longSignal = BuildLong(candles15m, ema34_15, ema89_15, rsi15, macd15, sig15, last15, prev15, symbol, extremeUp);
 
                 if (longSignal.Type != SignalType.None)
                     return longSignal;
@@ -164,9 +146,7 @@ namespace FuturesBot.Services
             // --- SHORT ---
             if (downTrend || extremeDump)
             {
-                var shortSignal = BuildShort(candles15m, ema34_15, ema89_15,
-                    rsi15, macd15, sig15,
-                    last15, prev15, symbol, extremeDump);
+                var shortSignal = BuildShort(candles15m, ema34_15, ema89_15, rsi15, macd15, sig15, last15, prev15, symbol, extremeDump);
 
                 if (shortSignal.Type != SignalType.None)
                     return shortSignal;
@@ -195,8 +175,7 @@ namespace FuturesBot.Services
             int i15 = candles15m.Count - 1;
 
             // 1. Breakout trước
-            bool breakout =
-                prev15.Close >= ema34_15[i15 - 1] * (1 + BreakoutBand);
+            bool breakout = prev15.Close >= ema34_15[i15 - 1] * (1 + BreakoutBand);
 
             if (!breakout && !extremeUp)
             {
@@ -212,30 +191,19 @@ namespace FuturesBot.Services
             decimal ema89 = ema89_15[i15];
 
             bool retest =
-                (last15.Low <= ema34 * (1 + EmaRetestBand) &&
-                 last15.Low >= ema34 * (1 - EmaRetestBand))
+                (last15.Low <= ema34 * (1 + EmaRetestBand) && last15.Low >= ema34 * (1 - EmaRetestBand))
                 ||
-                (last15.Low <= ema89 * (1 + EmaRetestBand) &&
-                 last15.Low >= ema89 * (1 - EmaRetestBand));
+                (last15.Low <= ema89 * (1 + EmaRetestBand) && last15.Low >= ema89 * (1 - EmaRetestBand));
 
             // 3. Rejection
-            bool reject =
-                last15.Close > last15.Open &&
-                last15.Close > ema34;
+            bool reject = last15.Close > last15.Open && last15.Close > ema34;
 
             // 4. Momentum
-            bool macdCrossUp =
-                macd15[i15] > sig15[i15] &&
-                macd15[i15 - 1] <= sig15[i15 - 1];
+            bool macdCrossUp = macd15[i15] > sig15[i15] && macd15[i15 - 1] <= sig15[i15 - 1];
 
-            bool rsiBull =
-                rsi15[i15] > RsiBullThreshold &&
-                rsi15[i15] > rsi15[i15 - 1];
+            bool rsiBull = rsi15[i15] > RsiBullThreshold && rsi15[i15] > rsi15[i15 - 1];
 
-            bool momentum =
-                (macdCrossUp && rsiBull) ||
-                (rsiBull && macd15[i15] > 0) ||
-                (extremeUp && rsiBull);
+            bool momentum = (macdCrossUp && rsiBull) || (rsiBull && macd15[i15] > 0) || (extremeUp && rsiBull);
 
             bool ok = retest && reject && momentum;
 
@@ -244,7 +212,7 @@ namespace FuturesBot.Services
                 return new TradeSignal
                 {
                     Type = SignalType.Info,
-                    Reason = $"{symbol.Coin}: Uptrend nhưng setup long chưa đạt (retest={retest}, reject={reject}, momentum={momentum})."
+                    Reason = $"{symbol.Coin}: H1 Uptrend nhưng setup long chưa đạt (retest={retest}, reject={reject}, momentum={momentum})."
                 };
             }
 
@@ -302,8 +270,7 @@ namespace FuturesBot.Services
             int i15 = candles15m.Count - 1;
 
             // 1. Breakout trước
-            bool breakout =
-                prev15.Close <= ema34_15[i15 - 1] * (1 - BreakoutBand);
+            bool breakout = prev15.Close <= ema34_15[i15 - 1] * (1 - BreakoutBand);
 
             if (!breakout && !extremeDump)
             {
@@ -319,30 +286,19 @@ namespace FuturesBot.Services
             decimal ema89 = ema89_15[i15];
 
             bool retest =
-                (last15.High >= ema34 * (1 - EmaRetestBand) &&
-                 last15.High <= ema34 * (1 + EmaRetestBand))
+                (last15.High >= ema34 * (1 - EmaRetestBand) && last15.High <= ema34 * (1 + EmaRetestBand))
                 ||
-                (last15.High >= ema89 * (1 - EmaRetestBand) &&
-                 last15.High <= ema89 * (1 + EmaRetestBand));
+                (last15.High >= ema89 * (1 - EmaRetestBand) && last15.High <= ema89 * (1 + EmaRetestBand));
 
             // 3. Rejection
-            bool reject =
-                last15.Close < last15.Open &&
-                last15.Close < ema34;
+            bool reject = last15.Close < last15.Open && last15.Close < ema34;
 
             // 4. Momentum
-            bool macdCrossDown =
-                macd15[i15] < sig15[i15] &&
-                macd15[i15 - 1] >= sig15[i15 - 1];
+            bool macdCrossDown =  macd15[i15] < sig15[i15] && macd15[i15 - 1] >= sig15[i15 - 1];
 
-            bool rsiBear =
-                rsi15[i15] < RsiBearThreshold &&
-                rsi15[i15] < rsi15[i15 - 1];
+            bool rsiBear = rsi15[i15] < RsiBearThreshold && rsi15[i15] < rsi15[i15 - 1];
 
-            bool momentum =
-                (macdCrossDown && rsiBear) ||
-                (rsiBear && macd15[i15] < 0) ||
-                (extremeDump && rsiBear);
+            bool momentum = (macdCrossDown && rsiBear) || (rsiBear && macd15[i15] < 0) || (extremeDump && rsiBear);
 
             bool ok = retest && reject && momentum;
 
@@ -351,7 +307,7 @@ namespace FuturesBot.Services
                 return new TradeSignal
                 {
                     Type = SignalType.Info,
-                    Reason = $"{symbol.Coin}: Downtrend nhưng setup short chưa đạt (retest={retest}, reject={reject}, momentum={momentum})."
+                    Reason = $"{symbol.Coin}: H1 Downtrend nhưng setup short chưa đạt (retest={retest}, reject={reject}, momentum={momentum})."
                 };
             }
 

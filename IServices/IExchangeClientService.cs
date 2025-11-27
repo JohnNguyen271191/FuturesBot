@@ -16,5 +16,7 @@ namespace FuturesBot.IServices
         Task<UserTradeInfo?> GetLastUserTradeAsync(string symbol, DateTime since);
 
         Task<bool> HasOpenPositionOrOrderAsync(string symbol);
+
+        Task CancelAllOpenOrdersAsync(string symbol);
     }
 }

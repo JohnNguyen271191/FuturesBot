@@ -4,6 +4,7 @@ using FuturesBot.Models;
 using FuturesBot.Utils;
 using System;
 using System.Globalization;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using static FuturesBot.Utils.EnumTypesHelper;
@@ -208,8 +209,7 @@ namespace FuturesBot.Services
                     PositionAmt = decimal.Parse(el.GetProperty("positionAmt").GetString() ?? "0"),
                     EntryPrice = decimal.Parse(el.GetProperty("entryPrice").GetString() ?? "0"),
                     MarkPrice = decimal.Parse(el.GetProperty("markPrice").GetString() ?? "0"),
-                    UpdateTime = DateTimeOffset.FromUnixTimeMilliseconds(
-                        el.GetProperty("updateTime").GetInt64()).UtcDateTime
+                    UpdateTime = DateTimeOffset.FromUnixTimeMilliseconds(el.GetProperty("updateTime").GetInt64()).UtcDateTime
                 };
             }
 
@@ -347,7 +347,35 @@ namespace FuturesBot.Services
             {
                 Console.WriteLine("[TIME SYNC ERROR] " + ex.Message);
             }
-        }        
+        }
+
+        public async Task CancelAllOpenOrdersAsync(string symbol)
+        {
+            long ts = GetBinanceTimestamp();
+
+            var qs = $"symbol={symbol}&timestamp={ts}";
+
+            // ký HMAC SHA256
+            var keyBytes = Encoding.UTF8.GetBytes(_config.ApiSecret);
+            using var hmac = new HMACSHA256(keyBytes);
+            var hash = hmac.ComputeHash(Encoding.UTF8.GetBytes(qs));
+            var signature = BitConverter.ToString(hash).Replace("-", "").ToLowerInvariant();
+
+            string url = $"/fapi/v1/allOpenOrders?{qs}&signature={signature}";
+
+            var req = new HttpRequestMessage(HttpMethod.Delete, url);
+
+            var resp = await _http.SendAsync(req);
+
+            string content = await resp.Content.ReadAsStringAsync();
+
+            if (!resp.IsSuccessStatusCode)
+            {
+                Console.WriteLine($"[CancelAllOpenOrdersAsync ERROR] {content}");
+            }
+
+            Console.WriteLine($"[CancelAllOpenOrdersAsync OK] {symbol} => {content}");
+        }
 
         // ==========================
         //       PRIVATE HELPERS

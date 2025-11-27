@@ -26,6 +26,13 @@ namespace FuturesBot.Services
                 return;
             }
 
+            if (signal.Type == SignalType.CloseLong || signal.Type == SignalType.CloseShort)
+            {
+                await _notifier.SendAsync($"[INFO] {signal.Reason}");
+                await _exchange.CancelAllOpenOrdersAsync(symbol.Coin);
+                return;
+            }
+
             // NEW: chặn nếu đã có vị thế hoặc lệnh chờ
             if (await _exchange.HasOpenPositionOrOrderAsync(symbol.Coin))
             {

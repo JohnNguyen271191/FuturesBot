@@ -2,6 +2,7 @@ using FuturesBot.Config;
 using FuturesBot.IServices;
 using FuturesBot.Services;
 using Microsoft.Extensions.Configuration;
+using static FuturesBot.Utils.EnumTypesHelper;
 
 Console.OutputEncoding = System.Text.Encoding.UTF8;
 
@@ -24,13 +25,11 @@ var executor   = new TradeExecutorService(exchange, risk, config, notifier);
 var pnl        = new PnlReporterService(notifier);
 var liveSync   = new LiveSyncService(exchange, pnl);
 
-await notifier.SendAsync(
-    $"=== FuturesBot {config.Intervals[0].FrameTime.ToUpper()} - {DateTime.Now:dd/MM/yyyy HH:mm:ss} started ===");
+await notifier.SendAsync($"=== FuturesBot {config.Intervals[0].FrameTime.ToUpper()} - {DateTime.Now:dd/MM/yyyy HH:mm:ss} started ===");
 
 // Lưu thời gian cây 15m cuối cùng đã xử lý cho mỗi symbol
 // Key: symbol.Coin (vd: "BTCUSDT"), Value: thời gian đóng nến 15m cuối cùng đã xử lý
-var lastProcessedCandleTime15m = config.Symbols
-    .ToDictionary(s => s.Coin, _ => DateTime.MinValue);
+var lastProcessedCandleTime15m = config.Symbols.ToDictionary(s => s.Coin, _ => DateTime.MinValue);
 
 while (true)
 {
@@ -53,14 +52,11 @@ while (true)
                 continue;
 
             // ===== XÁC ĐỊNH CÂY 15M ĐÃ ĐÓNG GẦN NHẤT =====
-            // Tuỳ model Candle của mày có Time / CloseTime / OpenTime.
-            // Giả sử ở đây dùng thuộc tính Time là thời gian nến (mày đổi lại nếu khác).
             var last15mCandle = candles15m[^1];
-            var last15mTime   = last15mCandle.OpenTime; // nếu model là CloseTime thì đổi thành .CloseTime
+            var last15mTime   = last15mCandle.OpenTime;
 
             // Nếu nến này đã được xử lý rồi -> bỏ qua, không generate signal nữa
-            if (lastProcessedCandleTime15m.TryGetValue(symbol.Coin, out var lastTime)
-                && lastTime >= last15mTime)
+            if (lastProcessedCandleTime15m.TryGetValue(symbol.Coin, out var lastTime) && lastTime >= last15mTime)
             {
                 continue;
             }
@@ -68,10 +64,25 @@ while (true)
             // Cập nhật lại thời gian đã xử lý cho symbol này
             lastProcessedCandleTime15m[symbol.Coin] = last15mTime;
 
-            // ===== CHỈ TỚI ĐÂY MỚI GỌI STRATEGY (MỖI 1 CÂY 15M 1 LẦN) =====
-            var signal = strategy.GenerateSignal(candles15m, candles1h, symbol);
+            // LẤY TRẠNG THÁI VỊ THẾ HIỆN TẠI
+            var pos = await exchange.GetPositionAsync(symbol.Coin);
+            bool hasLongPosition = pos.PositionAmt > 0;
+            bool hasShortPosition = pos.PositionAmt < 0;
 
-            await executor.HandleSignalAsync(signal, symbol);
+            if (hasLongPosition || hasShortPosition)
+            {
+                var exitSignal = strategy.GenerateExitSignal(candles15m, hasLongPosition, hasShortPosition, symbol);
+
+                if (exitSignal.Type == SignalType.CloseLong || exitSignal.Type == SignalType.CloseShort)
+                {
+                    await executor.HandleSignalAsync(exitSignal, symbol);
+                    continue;
+                }
+            }
+
+            var entrySignal = strategy.GenerateSignal(candles15m, candles1h, symbol);
+
+            await executor.HandleSignalAsync(entrySignal, symbol);
         }
         catch (Exception ex)
         {

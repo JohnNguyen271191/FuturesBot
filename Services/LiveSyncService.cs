@@ -60,6 +60,7 @@ namespace FuturesBot.Services
                     };
 
                     await _pnl.RegisterClosedTradeAsync(closed);
+                    await _exchange.CancelAllOpenOrdersAsync(symbol.Coin);
                 }
 
                 // Nếu khác size -> update state

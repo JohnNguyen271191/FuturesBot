@@ -9,7 +9,9 @@ namespace FuturesBot.Utils
             Long,
             Short,
             Close,
-            Info
+            Info,
+            CloseShort,
+            CloseLong
         }
     }
 }
