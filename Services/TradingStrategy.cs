@@ -135,7 +135,7 @@ namespace FuturesBot.Services
                 // (4.3) Momentum: MACD + RSI
                 bool macdCrossDown = macd15[i15] < sig15[i15] && macd15[i15 - 1] >= sig15[i15 - 1];
                 bool rsiBear = rsi15[i15] < 45 && rsi15[i15] < rsi15[i15 - 1];
-                bool shouldShort = (retestEma && bearishReject && (macdCrossDown || extremeDown) && rsiBear);
+                bool shouldShort = (retestEma && bearishReject && (macdCrossDown || extremeDump) && rsiBear);
 
                 if (shouldShort)
                 {
