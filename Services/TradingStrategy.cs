@@ -39,7 +39,7 @@ namespace FuturesBot.Services
         // 🔥 Offset entry so với last close (0.1%)
         // Long:  entry = Close * (1 - EntryOffsetPercent)
         // Short: entry = Close * (1 + EntryOffsetPercent)
-        private const decimal EntryOffsetPercent = 0.001m;   // 0.1%
+        private const decimal EntryOffsetPercent = 0.003m;   // 0.1%
 
         public TradeSignal GenerateSignal(
             IReadOnlyList<Candle> candles15m,
