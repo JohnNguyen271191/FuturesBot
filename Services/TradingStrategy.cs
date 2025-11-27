@@ -77,10 +77,7 @@ namespace FuturesBot.Services
 
                 bool rsiBull = rsi15[i15] > 55 && rsi15[i15] > rsi15[i15 - 1];
 
-                bool shouldLong = (retestEma && bullishReject && macdCrossUp && rsiBull)
-                                    || (retestEma && bullishReject && rsiBull)
-                                    || (bullishReject && macdCrossUp && rsiBull)
-                                    || extremeUp;
+                bool shouldLong = (retestEma && bullishReject && (macdCrossUp || extremeUp) && rsiBull);
                 if (shouldLong)
                 {
                     decimal entry = last15.Close;
@@ -123,7 +120,7 @@ namespace FuturesBot.Services
             {
                 // (4.1) Xác nhận đã có breakout trước đó:
                 // Ít nhất 1–2 nến trước đã đóng dưới EMA34
-                bool wasBelowEma34Recently = prev15.Close <= ema34_15[i15 - 1] * 1.0002m; //&& candles15m[i15 - 1].Close < ema34_15[i15 - 1];
+                bool wasBelowEma34Recently = prev15.Close <= ema34_15[i15 - 1] * 1.002m; //&& candles15m[i15 - 1].Close < ema34_15[i15 - 1];
 
                 if (!wasBelowEma34Recently && !extremeDump)
                     return new TradeSignal(); // tránh short ngay cây breakout đầu tiên
@@ -138,10 +135,7 @@ namespace FuturesBot.Services
                 // (4.3) Momentum: MACD + RSI
                 bool macdCrossDown = macd15[i15] < sig15[i15] && macd15[i15 - 1] >= sig15[i15 - 1];
                 bool rsiBear = rsi15[i15] < 45 && rsi15[i15] < rsi15[i15 - 1];
-                bool shouldShort = (retestEma && bearishReject && macdCrossDown && rsiBear)
-                                    || (retestEma && bearishReject && rsiBear)
-                                    || (bearishReject && macdCrossDown && rsiBear)
-                                    || extremeDump;
+                bool shouldShort = (retestEma && bearishReject && (macdCrossDown || extremeDown) && rsiBear);
 
                 if (shouldShort)
                 {
