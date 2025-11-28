@@ -73,12 +73,9 @@ PaperMode: {_config.PaperMode}
 
             if (_config.PaperMode)
             {
-                // paper mode: chỉ gửi thông báo, không hỏi console
                 return;
             }
 
-            // nếu muốn vẫn confirm qua console thì giữ lại đoạn hỏi y/n, 
-            // còn không thì auto gửi luôn:
             var isOrdered = await _exchange.PlaceFuturesOrderAsync(symbol.Coin, signal.Type, qty, entry, sl, tp, symbol.Leverage, _notifier, marketOrder: false);
 
             if (isOrdered)

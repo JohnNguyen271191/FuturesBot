@@ -2,7 +2,6 @@
 using FuturesBot.IServices;
 using FuturesBot.Models;
 using FuturesBot.Utils;
-using System;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
@@ -15,11 +14,8 @@ namespace FuturesBot.Services
     {
         private readonly HttpClient _http;
         private readonly BotConfig _config;
-        // Timestamp offset
         private long _serverTimeOffsetMs = 0;
         private DateTime _lastTimeSync = DateTime.MinValue;
-
-        // (nếu chưa có SymbolRulesService thì thêm field luôn)
         private readonly SymbolRulesService _rulesService;
 
         public BinanceFuturesClientService(BotConfig config)
@@ -34,10 +30,7 @@ namespace FuturesBot.Services
         //        PUBLIC API
         // ==========================
 
-        public async Task<IReadOnlyList<Candle>> GetRecentCandlesAsync(
-            string symbol,
-            string interval,
-            int limit = 200)
+        public async Task<IReadOnlyList<Candle>> GetRecentCandlesAsync(string symbol, string interval, int limit = 200)
         {
             var url = $"/fapi/v1/klines?symbol={symbol}&interval={interval}&limit={limit}";
             for (int attempt = 1; attempt <= 3; attempt++)
@@ -149,7 +142,6 @@ namespace FuturesBot.Services
             }
             await slackNotifierService.SendAsync($"[ENTRY RESP] {entryResp}");
 
-            // 3. Gửi SL (STOP_MARKET, reduceOnly)
             string closeSideStr = side == SignalType.Long ? "SELL" : "BUY";
 
             var slParams = new Dictionary<string, string>
@@ -158,18 +150,16 @@ namespace FuturesBot.Services
                 ["side"] = closeSideStr,
                 ["type"] = "STOP_MARKET",
                 ["stopPrice"] = sl.ToString(CultureInfo.InvariantCulture),
-                ["closePosition"] = "true",      // đóng toàn bộ vị thế
+                ["closePosition"] = "true",
                 ["timeInForce"] = "GTC",
                 ["recvWindow"] = "5000",
-                ["positionSide"] = positionSide,
-                // ["workingType"] = "MARK_PRICE" // nếu muốn dùng giá mark
+                ["positionSide"] = positionSide
             };
 
             await slackNotifierService.SendAsync("=== SEND STOP LOSS ===");
             var slResp = await SignedPostAsync("/fapi/v1/order", slParams);
             await slackNotifierService.SendAsync($"[SL RESP] {slResp}");
 
-            // 4. Gửi TP (TAKE_PROFIT_MARKET, reduceOnly)
             var tpParams = new Dictionary<string, string>
             {
                 ["symbol"] = symbol,
@@ -179,8 +169,7 @@ namespace FuturesBot.Services
                 ["closePosition"] = "true",
                 ["timeInForce"] = "GTC",
                 ["recvWindow"] = "5000",
-                ["positionSide"] = positionSide,
-                // ["workingType"] = "MARK_PRICE"
+                ["positionSide"] = positionSide
             };
 
             await slackNotifierService.SendAsync("=== SEND TAKE PROFIT ===");
@@ -191,7 +180,6 @@ namespace FuturesBot.Services
 
         public async Task<PositionInfo> GetPositionAsync(string symbol)
         {
-            // /fapi/v2/positionRisk trả danh sách, mình lọc theo symbol
             var json = await SignedGetAsync("/fapi/v2/positionRisk", new Dictionary<string, string>
             {
                 ["symbol"] = symbol
@@ -245,7 +233,6 @@ namespace FuturesBot.Services
                 }
             }
 
-            // Không có position nào (flat)
             return new PositionInfo
             {
                 Symbol = symbol,
@@ -258,11 +245,9 @@ namespace FuturesBot.Services
 
         public async Task<bool> HasOpenPositionOrOrderAsync(string symbol)
         {
-            // Trong paper mode: coi như không có lệnh/vị thế, cho phép test tự do
             if (_config.PaperMode)
                 return false;
 
-            // 1) Check position hiện tại
             var posParams = new Dictionary<string, string>
             {
                 ["symbol"] = symbol,
@@ -285,7 +270,6 @@ namespace FuturesBot.Services
                     {
                         if (positionAmt != 0)
                         {
-                            // Đang có vị thế (long hoặc short)
                             return true;
                         }
                     }
@@ -293,11 +277,9 @@ namespace FuturesBot.Services
             }
             catch
             {
-                // nếu parse lỗi thì log thôi, không crash bot
                 Console.WriteLine("[WARN] Cannot parse positionRisk response.");
             }
 
-            // 2) Check open orders
             var orderParams = new Dictionary<string, string>
             {
                 ["symbol"] = symbol,
@@ -309,9 +291,7 @@ namespace FuturesBot.Services
             try
             {
                 using var doc = JsonDocument.Parse(ordersJson);
-                // nếu có ít nhất 1 phần tử trong mảng -> đang có lệnh chờ
-                if (doc.RootElement.ValueKind == JsonValueKind.Array &&
-                    doc.RootElement.GetArrayLength() > 0)
+                if (doc.RootElement.ValueKind == JsonValueKind.Array && doc.RootElement.GetArrayLength() > 0)
                 {
                     return true;
                 }
@@ -321,7 +301,6 @@ namespace FuturesBot.Services
                 Console.WriteLine("[WARN] Cannot parse openOrders response.");
             }
 
-            // Không có vị thế & không có lệnh chờ
             return false;
         }
 
@@ -349,8 +328,7 @@ namespace FuturesBot.Services
             {
                 Symbol = last.GetProperty("symbol").GetString() ?? symbol,
                 Id = last.GetProperty("id").GetInt64(),
-                Time = DateTimeOffset.FromUnixTimeMilliseconds(
-                    last.GetProperty("time").GetInt64()).UtcDateTime,
+                Time = DateTimeOffset.FromUnixTimeMilliseconds(last.GetProperty("time").GetInt64()).UtcDateTime,
                 Price = decimal.Parse(last.GetProperty("price").GetString() ?? "0"),
                 Qty = decimal.Parse(last.GetProperty("qty").GetString() ?? "0"),
                 IsBuyer = last.GetProperty("buyer").GetBoolean()
@@ -387,7 +365,6 @@ namespace FuturesBot.Services
 
             var qs = $"symbol={symbol}&timestamp={ts}";
 
-            // ký HMAC SHA256
             var keyBytes = Encoding.UTF8.GetBytes(_config.ApiSecret);
             using var hmac = new HMACSHA256(keyBytes);
             var hash = hmac.ComputeHash(Encoding.UTF8.GetBytes(qs));
@@ -441,15 +418,12 @@ namespace FuturesBot.Services
             Console.WriteLine("[LEVERAGE RESP] " + resp);
         }
 
-        private async Task<string> SignedPostAsync(
-            string path,
-            IDictionary<string, string> parameters)
+        private async Task<string> SignedPostAsync(string path, IDictionary<string, string> parameters)
         {
             long ts = GetBinanceTimestamp();
             parameters["timestamp"] = ts.ToString();
             var sb = new StringBuilder();
 
-            // build queryString
             foreach (var kv in parameters)
             {
                 if (sb.Length > 0) sb.Append('&');

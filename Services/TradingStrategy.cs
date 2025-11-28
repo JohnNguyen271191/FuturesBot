@@ -16,8 +16,6 @@ namespace FuturesBot.Services
     /// - Khi đang có vị thế:
     ///       LONG => nếu đóng dưới EMA34 => EXIT LONG
     ///       SHORT => nếu đóng trên EMA34 => EXIT SHORT
-    /// 
-    /// Đây là file hoàn chỉnh, mày chỉ cần copy paste.
     /// </summary>
     public class TradingStrategy(IndicatorService indicators) : IStrategyService
     {
@@ -27,7 +25,7 @@ namespace FuturesBot.Services
 
         private const int MinBars = 120;
         private const int SwingLookback = 5;
-        private const int PullbackVolumeLookback = 3;
+        private const int PullbackVolumeLookback = 5;
 
         private const decimal EmaRetestBand = 0.002m;        // ±0.2%
         private const decimal BreakoutBand = 0.001m;         // 0.1%
@@ -42,6 +40,7 @@ namespace FuturesBot.Services
 
         // Entry offset để tránh đỉnh/đáy
         private const decimal EntryOffsetPercent = 0.003m;   // 0.3%
+        private const decimal ExtremeEntryOffsetPercent = 0.005m; // 0.5%
 
 
         // =====================================================================
@@ -91,10 +90,7 @@ namespace FuturesBot.Services
         //                           ENTRY SIGNAL
         // =====================================================================
 
-        public TradeSignal GenerateSignal(
-            IReadOnlyList<Candle> candles15m,
-            IReadOnlyList<Candle> candles1h,
-            Symbol symbol)
+        public TradeSignal GenerateSignal(IReadOnlyList<Candle> candles15m, IReadOnlyList<Candle> candles1h, Symbol symbol)
         {
             if (candles15m.Count < MinBars || candles1h.Count < MinBars)
                 return new TradeSignal();
@@ -182,7 +178,7 @@ namespace FuturesBot.Services
                 return new TradeSignal
                 {
                     Type = SignalType.Info,
-                    Reason = $"{symbol.Coin}: Uptrend nhưng chưa breakout EMA34 trước đó."
+                    Reason = $"{symbol.Coin}: H1 Uptrend nhưng chưa breakout EMA34 trước đó."
                 };
             }
 
@@ -217,7 +213,8 @@ namespace FuturesBot.Services
             }
 
             // 5. ENTRY OFFSET
-            decimal rawEntry = last15.Close * (1 - EntryOffsetPercent);
+            var entryOffsetPercent = extremeUp ? ExtremeEntryOffsetPercent : EntryOffsetPercent;
+            decimal rawEntry = last15.Close * (1 - entryOffsetPercent);
 
             // 6. SL & TP
             decimal swingLow = PriceActionHelper.FindSwingLow(candles15m, i15, SwingLookback);
@@ -277,7 +274,7 @@ namespace FuturesBot.Services
                 return new TradeSignal
                 {
                     Type = SignalType.Info,
-                    Reason = $"{symbol.Coin}: Downtrend nhưng chưa breakout EMA34 trước đó."
+                    Reason = $"{symbol.Coin}: H1 Downtrend nhưng chưa breakout EMA34 trước đó."
                 };
             }
 
@@ -312,7 +309,8 @@ namespace FuturesBot.Services
             }
 
             // 5. ENTRY OFFSET
-            decimal rawEntry = last15.Close * (1 + EntryOffsetPercent);
+            var entryOffsetPercent = extremeDump ? ExtremeEntryOffsetPercent : EntryOffsetPercent;
+            decimal rawEntry = last15.Close * (1 + entryOffsetPercent);
 
             // 6. SL & TP
             decimal swingHigh = PriceActionHelper.FindSwingHigh(candles15m, i15, SwingLookback);
@@ -344,7 +342,5 @@ namespace FuturesBot.Services
                 Reason = $"{symbol.Coin}: SHORT – breakout + retest EMA + rejection + momentum + entryOffset."
             };
         }
-
-
     }
 }

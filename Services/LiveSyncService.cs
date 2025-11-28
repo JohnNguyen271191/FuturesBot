@@ -30,7 +30,6 @@ namespace FuturesBot.Services
 
                 var pos = await _exchange.GetPositionAsync(symbol.Coin);
 
-                // TH1: trước có vị thế, giờ hết -> vừa đóng
                 bool wasOpen = !state.LastPosition.IsFlat;
                 bool nowFlat = pos.IsFlat;
 
@@ -38,10 +37,9 @@ namespace FuturesBot.Services
                 {
                     var last = state.LastPosition;
 
-                    // Lấy giá trade cuối cùng kể từ lúc change trước
                     var lastTrade = await _exchange.GetLastUserTradeAsync(
                         symbol.Coin,
-                        state.LastChangeTime.AddMinutes(-1)); // buffer
+                        state.LastChangeTime.AddMinutes(-1));
 
                     decimal exitPrice = lastTrade?.Price ?? pos.MarkPrice;
 
@@ -63,7 +61,6 @@ namespace FuturesBot.Services
                     await _exchange.CancelAllOpenOrdersAsync(symbol.Coin);
                 }
 
-                // Nếu khác size -> update state
                 if (pos.PositionAmt != state.LastPosition.PositionAmt ||
                     pos.EntryPrice != state.LastPosition.EntryPrice)
                 {
