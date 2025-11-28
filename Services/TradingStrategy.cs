@@ -34,6 +34,7 @@ namespace FuturesBot.Services
         private const decimal EmaRetestBand = 0.002m;        // ±0.2%
         private const decimal StopBufferPercent = 0.005m;    // 0.5%
         private const decimal RiskReward = 1.5m;             // TP = SL * 1.5
+        private const decimal RiskRewardSideway = 1m;       // TP = SL * 1 cho scalp nhanh
 
         private const decimal RsiBullThreshold = 55m;
         private const decimal RsiBearThreshold = 45m;
@@ -150,7 +151,15 @@ namespace FuturesBot.Services
 
             // Không có trend, không extreme -> không trade
             if (!upTrend && !downTrend && !extremeUp && !extremeDump)
+            {
+                var sidewaySignal = BuildSidewayScalp(candles15m, ema34_15, ema89_15, ema200_15, rsi15, macd15, sig15, last15, symbol);
+
+                // Nếu có kèo scalp hợp lệ thì vào, còn không thì đứng im
+                if (sidewaySignal.Type != SignalType.None)
+                    return sidewaySignal;
+
                 return new TradeSignal();
+            }
 
             // =================== VOLUME LỌC PULLBACK =====================
 
@@ -405,6 +414,165 @@ namespace FuturesBot.Services
                 TakeProfit = tp,
                 Reason = $"{symbol.Coin}: SHORT – trend down + retest EMA kháng cự gần nhất ({nearestResistance:F6}) + rejection + momentum + entryOffset."
             };
+        }
+
+        // =====================================================================
+        //                        SIDEWAY SCALP (15M)
+        // =====================================================================
+
+        private TradeSignal BuildSidewayScalp(
+            IReadOnlyList<Candle> candles15m,
+            IReadOnlyList<decimal> ema34_15,
+            IReadOnlyList<decimal> ema89_15,
+            IReadOnlyList<decimal> ema200_15,
+            IReadOnlyList<decimal> rsi15,
+            IReadOnlyList<decimal> macd15,
+            IReadOnlyList<decimal> sig15,
+            Candle last15,
+            Symbol symbol)
+        {
+            int i15 = candles15m.Count - 1;
+
+            decimal ema34 = ema34_15[i15];
+            decimal ema89 = ema89_15[i15];
+            decimal ema200 = ema200_15[i15];
+
+            // 1) Xác định bias sideway theo EMA 15M
+            bool shortBias =
+                ema34 < ema89 &&
+                ema89 < ema200;          // cấu trúc down trên 15M (như case SOL)
+
+            bool longBias =
+                ema34 > ema89 &&
+                ema89 > ema200;          // cấu trúc up trên 15M
+
+            if (!shortBias && !longBias)
+                return new TradeSignal(); // không có bias rõ thì thôi
+
+            // 2) Lấy EMA gần nhất làm kháng cự/hỗ trợ để scalp
+            if (shortBias)
+            {
+                // Kháng cự gần nhất phía trên giá: ưu tiên EMA89, sau đó EMA200
+                var resistances = new List<decimal>();
+
+                if (ema89 > last15.Close) resistances.Add(ema89);
+                if (ema200 > last15.Close) resistances.Add(ema200);
+
+                if (resistances.Count == 0)
+                    return new TradeSignal();
+
+                decimal nearestRes = resistances.Min();
+
+                // Giá phải chạm vùng quanh kháng cự
+                bool touchRes =
+                    last15.High >= nearestRes * (1 - EmaRetestBand) &&
+                    last15.High <= nearestRes * (1 + EmaRetestBand);
+
+                // Nến rejection: râu trên chọt EMA, thân đỏ đóng dưới EMA
+                bool reject =
+                    last15.Close < last15.Open &&
+                    last15.High > nearestRes &&
+                    last15.Close < nearestRes;
+
+                // Momemtum đảo chiều: RSI cao rồi gãy xuống, MACD bắt đầu cong xuống
+                bool rsiTurnDown =
+                    rsi15[i15] <= rsi15[i15 - 1] &&
+                    rsi15[i15 - 1] >= 60m;                  // trước đó đã nóng rồi
+
+                bool macdTurnDown =
+                    macd15[i15] <= macd15[i15 - 1];         // histogram yếu đi
+
+                bool momentum = rsiTurnDown && macdTurnDown;
+
+                if (!(touchRes && reject && momentum))
+                    return new TradeSignal();
+
+                // ENTRY: đặt cao hơn close 1 chút để không đu đáy
+                decimal rawEntry = last15.Close * (1 + EntryOffsetPercent);
+
+                // SL/TP: scalp nhanh, RR = 1R
+                decimal swingHigh = PriceActionHelper.FindSwingHigh(candles15m, i15, SwingLookback);
+
+                decimal entry = rawEntry;
+                if (entry >= swingHigh)
+                    entry = (last15.Close + swingHigh) / 2;
+
+                decimal sl = swingHigh + entry * StopBufferPercent;
+
+                if (sl <= entry)
+                    return new TradeSignal();
+
+                decimal risk = sl - entry;
+                decimal tp = entry - risk * RiskRewardSideway;
+
+                return new TradeSignal
+                {
+                    Type = SignalType.Short,
+                    EntryPrice = entry,
+                    StopLoss = sl,
+                    TakeProfit = tp,
+                    Reason = $"{symbol.Coin}: SIDEWAY SCALP SHORT – bias down 15M, retest EMA (near={nearestRes:F2}) + rejection + RSI/MACD quay đầu."
+                };
+            }
+            else // longBias
+            {
+                // Hỗ trợ gần nhất phía dưới giá: ưu tiên EMA89, sau đó EMA200
+                var supports = new List<decimal>();
+
+                if (ema89 < last15.Close) supports.Add(ema89);
+                if (ema200 < last15.Close) supports.Add(ema200);
+
+                if (supports.Count == 0)
+                    return new TradeSignal();
+
+                decimal nearestSup = supports.Max();
+
+                bool touchSup =
+                    last15.Low <= nearestSup * (1 + EmaRetestBand) &&
+                    last15.Low >= nearestSup * (1 - EmaRetestBand);
+
+                bool reject =
+                    last15.Close > last15.Open &&
+                    last15.Low < nearestSup &&
+                    last15.Close > nearestSup;
+
+                bool rsiTurnUp =
+                    rsi15[i15] >= rsi15[i15 - 1] &&
+                    rsi15[i15 - 1] <= 40m;
+
+                bool macdTurnUp =
+                    macd15[i15] >= macd15[i15 - 1];
+
+                bool momentum = rsiTurnUp && macdTurnUp;
+
+                if (!(touchSup && reject && momentum))
+                    return new TradeSignal();
+
+                decimal rawEntry = last15.Close * (1 - EntryOffsetPercent);
+
+                decimal swingLow = PriceActionHelper.FindSwingLow(candles15m, i15, SwingLookback);
+
+                decimal entry = rawEntry;
+                if (entry <= swingLow)
+                    entry = (last15.Close + swingLow) / 2;
+
+                decimal sl = swingLow - entry * StopBufferPercent;
+
+                if (sl >= entry || sl <= 0)
+                    return new TradeSignal();
+
+                decimal risk = entry - sl;
+                decimal tp = entry + risk * RiskRewardSideway;
+
+                return new TradeSignal
+                {
+                    Type = SignalType.Long,
+                    EntryPrice = entry,
+                    StopLoss = sl,
+                    TakeProfit = tp,
+                    Reason = $"{symbol.Coin}: SIDEWAY SCALP LONG – bias up 15M, retest EMA (near={nearestSup:F2}) + rejection + RSI/MACD quay đầu."
+                };
+            }
         }
     }
 }
