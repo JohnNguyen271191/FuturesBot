@@ -1,5 +1,3 @@
-using System.Collections.Generic;
-using System.Linq;
 using FuturesBot.Config;
 using FuturesBot.IServices;
 using FuturesBot.Models;
@@ -34,7 +32,6 @@ namespace FuturesBot.Services
         private const int PullbackVolumeLookback = 3;
 
         private const decimal EmaRetestBand = 0.002m;        // ±0.2%
-        private const decimal BreakoutBand = 0.001m;         // 0.1% (giữ lại để dùng cho extreme nếu cần)
         private const decimal StopBufferPercent = 0.005m;    // 0.5%
         private const decimal RiskReward = 1.5m;             // TP = SL * 1.5
 
@@ -169,18 +166,7 @@ namespace FuturesBot.Services
             // --- LONG ---
             if (upTrend || extremeUp)
             {
-                var longSignal = BuildLong(
-                    candles15m,
-                    ema34_15,
-                    ema89_15,
-                    ema200_15,
-                    rsi15,
-                    macd15,
-                    sig15,
-                    last15,
-                    prev15,
-                    symbol,
-                    extremeUp);
+                var longSignal = BuildLong(candles15m, ema34_15, ema89_15, ema200_15, rsi15, macd15, sig15, last15, prev15, symbol, extremeUp);
 
                 if (longSignal.Type != SignalType.None)
                     return longSignal;
@@ -189,18 +175,7 @@ namespace FuturesBot.Services
             // --- SHORT ---
             if (downTrend || extremeDump)
             {
-                var shortSignal = BuildShort(
-                    candles15m,
-                    ema34_15,
-                    ema89_15,
-                    ema200_15,
-                    rsi15,
-                    macd15,
-                    sig15,
-                    last15,
-                    prev15,
-                    symbol,
-                    extremeDump);
+                var shortSignal = BuildShort(candles15m, ema34_15, ema89_15, ema200_15, rsi15, macd15, sig15, last15, prev15, symbol, extremeDump);
 
                 if (shortSignal.Type != SignalType.None)
                     return shortSignal;
@@ -274,14 +249,9 @@ namespace FuturesBot.Services
             bool macdCrossUp = macd15[i15] > sig15[i15] && macd15[i15 - 1] <= sig15[i15 - 1];
             bool rsiBull = rsi15[i15] > RsiBullThreshold && rsi15[i15] >= rsi15[i15 - 1];
 
-            bool momentum =
-                (macdCrossUp && rsiBull) ||
-                (rsiBull && macd15[i15] > 0) ||
-                (extremeUp && rsiBull);
+            bool momentum = (macdCrossUp && rsiBull) || (rsiBull && macd15[i15] > 0) || (extremeUp && rsiBull);
 
-            bool ok =
-                (touchSupport && reject && momentum) ||
-                (extremeUp && momentum); // cho phép đu extreme khi rất mạnh
+            bool ok = (touchSupport && reject && momentum) || (extremeUp && momentum); // cho phép đu extreme khi rất mạnh
 
             if (!ok)
             {
@@ -390,14 +360,9 @@ namespace FuturesBot.Services
             bool macdCrossDown = macd15[i15] < sig15[i15] && macd15[i15 - 1] >= sig15[i15 - 1];
             bool rsiBear = rsi15[i15] < RsiBearThreshold && rsi15[i15] <= rsi15[i15 - 1];
 
-            bool momentum =
-                (macdCrossDown && rsiBear) ||
-                (rsiBear && macd15[i15] < 0) ||
-                (extremeDump && rsiBear);
+            bool momentum = (macdCrossDown && rsiBear) || (rsiBear && macd15[i15] < 0) || (extremeDump && rsiBear);
 
-            bool ok =
-                (retest && reject && momentum) ||
-                (extremeDump && momentum); // cho phép đu extreme
+            bool ok = (retest && reject && momentum) || (extremeDump && momentum); // cho phép đu extreme
 
             if (!ok)
             {

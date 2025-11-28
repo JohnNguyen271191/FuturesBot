@@ -25,7 +25,10 @@ var executor   = new TradeExecutorService(exchange, risk, config, notifier);
 var pnl        = new PnlReporterService(notifier);
 var liveSync   = new LiveSyncService(exchange, pnl);
 
-await notifier.SendAsync($"=== FuturesBot {config.Intervals[0].FrameTime.ToUpper()} - {DateTime.UtcNow:dd/MM/yyyy HH:mm:ss} started ===");
+var vnZone = TimeZoneInfo.FindSystemTimeZoneById("Asia/Ho_Chi_Minh");
+var nowVN = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, vnZone);
+
+await notifier.SendAsync($"=== FuturesBot {config.Intervals[0].FrameTime.ToUpper()} - {nowVN:dd/MM/yyyy HH:mm:ss} started ===");
 
 // Lưu thời gian cây 15m cuối cùng đã xử lý cho mỗi symbol
 // Key: symbol.Coin (vd: "BTCUSDT"), Value: thời gian đóng nến 15m cuối cùng đã xử lý
@@ -38,15 +41,9 @@ while (true)
         try
         {
             // Lấy 200 cây nến gần nhất
-            var candles15m = await exchange.GetRecentCandlesAsync(
-                symbol.Coin,
-                config.Intervals[0].FrameTime,
-                200);
+            var candles15m = await exchange.GetRecentCandlesAsync(symbol.Coin, config.Intervals[0].FrameTime, 200);
 
-            var candles1h = await exchange.GetRecentCandlesAsync(
-                symbol.Coin,
-                config.Intervals[1].FrameTime,
-                200);
+            var candles1h = await exchange.GetRecentCandlesAsync(symbol.Coin, config.Intervals[1].FrameTime, 200);
 
             if (candles15m is null || candles15m.Count == 0)
                 continue;
