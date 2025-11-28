@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using FuturesBot.Config;
 using FuturesBot.IServices;
 using FuturesBot.Models;
@@ -14,12 +15,10 @@ namespace FuturesBot.Services
     ///     + SHORT: chờ giá retest EMA gần nhất phía trên (34/89/200) + rejection + momentum
     /// - Momentum MACD + RSI
     /// - Entry offset để tránh vào đúng đỉnh/đáy (giảm rủi ro)
-    /// - SL theo swing + buffer, TP = 1.5R
+    /// - SL theo swing + buffer (ưu tiên sâu hơn quanh EMA89), TP = 1.5R
     /// - Khi đang có vị thế:
     ///       LONG  => nếu đóng dưới EMA34 M15 => EXIT LONG
     ///       SHORT => nếu đóng trên EMA34 M15 => EXIT SHORT
-    /// 
-    /// Đây là file hoàn chỉnh, mày chỉ cần copy paste.
     /// </summary>
     public class TradingStrategy(IndicatorService indicators) : IStrategyService
     {
@@ -29,12 +28,12 @@ namespace FuturesBot.Services
 
         private const int MinBars = 120;
         private const int SwingLookback = 5;
-        private const int PullbackVolumeLookback = 3;
+        private const int PullbackVolumeLookback = 5;
 
         private const decimal EmaRetestBand = 0.002m;        // ±0.2%
         private const decimal StopBufferPercent = 0.005m;    // 0.5%
         private const decimal RiskReward = 1.5m;             // TP = SL * 1.5
-        private const decimal RiskRewardSideway = 1m;       // TP = SL * 1 cho scalp nhanh
+        private const decimal RiskRewardSideway = 1m;        // TP = SL * 1 cho scalp nhanh
 
         private const decimal RsiBullThreshold = 55m;
         private const decimal RsiBearThreshold = 45m;
@@ -44,6 +43,9 @@ namespace FuturesBot.Services
 
         // Entry offset để tránh đỉnh/đáy
         private const decimal EntryOffsetPercent = 0.003m;   // 0.3%
+
+        // SL an toàn quanh EMA89 (0.3% xa hơn EMA89)
+        private const decimal Ema89StopExtraPercent = 0.003m;
 
 
         // =====================================================================
@@ -149,12 +151,20 @@ namespace FuturesBot.Services
                 macd15[i15] < sig15[i15] &&
                 rsi15[i15] < ExtremeRsiLow;
 
-            // Không có trend, không extreme -> không trade
+            // Không có trend, không extreme -> thử kèo sideway scalp, không có thì đứng im
             if (!upTrend && !downTrend && !extremeUp && !extremeDump)
             {
-                var sidewaySignal = BuildSidewayScalp(candles15m, ema34_15, ema89_15, ema200_15, rsi15, macd15, sig15, last15, symbol);
+                var sidewaySignal = BuildSidewayScalp(
+                    candles15m,
+                    ema34_15,
+                    ema89_15,
+                    ema200_15,
+                    rsi15,
+                    macd15,
+                    sig15,
+                    last15,
+                    symbol);
 
-                // Nếu có kèo scalp hợp lệ thì vào, còn không thì đứng im
                 if (sidewaySignal.Type != SignalType.None)
                     return sidewaySignal;
 
@@ -175,7 +185,18 @@ namespace FuturesBot.Services
             // --- LONG ---
             if (upTrend || extremeUp)
             {
-                var longSignal = BuildLong(candles15m, ema34_15, ema89_15, ema200_15, rsi15, macd15, sig15, last15, prev15, symbol, extremeUp);
+                var longSignal = BuildLong(
+                    candles15m,
+                    ema34_15,
+                    ema89_15,
+                    ema200_15,
+                    rsi15,
+                    macd15,
+                    sig15,
+                    last15,
+                    prev15,
+                    symbol,
+                    extremeUp);
 
                 if (longSignal.Type != SignalType.None)
                     return longSignal;
@@ -184,7 +205,18 @@ namespace FuturesBot.Services
             // --- SHORT ---
             if (downTrend || extremeDump)
             {
-                var shortSignal = BuildShort(candles15m, ema34_15, ema89_15, ema200_15, rsi15, macd15, sig15, last15, prev15, symbol, extremeDump);
+                var shortSignal = BuildShort(
+                    candles15m,
+                    ema34_15,
+                    ema89_15,
+                    ema200_15,
+                    rsi15,
+                    macd15,
+                    sig15,
+                    last15,
+                    prev15,
+                    symbol,
+                    extremeDump);
 
                 if (shortSignal.Type != SignalType.None)
                     return shortSignal;
@@ -258,7 +290,10 @@ namespace FuturesBot.Services
             bool macdCrossUp = macd15[i15] > sig15[i15] && macd15[i15 - 1] <= sig15[i15 - 1];
             bool rsiBull = rsi15[i15] > RsiBullThreshold && rsi15[i15] >= rsi15[i15 - 1];
 
-            bool momentum = (macdCrossUp && rsiBull) || (rsiBull && macd15[i15] > 0) || (extremeUp && rsiBull);
+            bool momentum =
+                (macdCrossUp && rsiBull) ||
+                (rsiBull && macd15[i15] > 0) ||
+                (extremeUp && rsiBull);
 
             bool ok = (touchSupport && reject && momentum) || (extremeUp && momentum); // cho phép đu extreme khi rất mạnh
 
@@ -274,14 +309,38 @@ namespace FuturesBot.Services
             // 5. ENTRY OFFSET – đặt entry thấp hơn close 1 chút để tránh đu đỉnh
             decimal rawEntry = last15.Close * (1 - EntryOffsetPercent);
 
-            // 6. SL & TP – dùng swing low + buffer
+            // 6. SL & TP – dùng swing low + EMA89 để tránh bị quét
             decimal swingLow = PriceActionHelper.FindSwingLow(candles15m, i15, SwingLookback);
 
             decimal entry = rawEntry;
             if (entry <= swingLow)
                 entry = (last15.Close + swingLow) / 2;
 
-            decimal sl = swingLow - entry * StopBufferPercent;
+            // SL candidate 1: dưới swingLow 0.5% của entry
+            decimal slFromSwing = swingLow - entry * StopBufferPercent;
+
+            // SL candidate 2: dưới EMA89 0.3% (nếu EMA89 nằm dưới entry)
+            decimal slFromEma89 = 0m;
+            if (ema89 > 0 && ema89 < entry)
+            {
+                slFromEma89 = ema89 * (1 - Ema89StopExtraPercent);
+            }
+
+            // Chọn SL sâu hơn trong các candidate (giá nhỏ hơn → sâu hơn)
+            var slCandidates = new List<decimal>();
+            if (slFromSwing > 0) slCandidates.Add(slFromSwing);
+            if (slFromEma89 > 0) slCandidates.Add(slFromEma89);
+
+            if (slCandidates.Count == 0)
+            {
+                return new TradeSignal
+                {
+                    Type = SignalType.Info,
+                    Reason = $"{symbol.Coin}: Không tìm được SL hợp lệ cho long."
+                };
+            }
+
+            decimal sl = slCandidates.Min();
 
             if (sl >= entry || sl <= 0)
             {
@@ -301,7 +360,7 @@ namespace FuturesBot.Services
                 EntryPrice = entry,
                 StopLoss = sl,
                 TakeProfit = tp,
-                Reason = $"{symbol.Coin}: LONG – trend up + retest EMA hỗ trợ gần nhất ({nearestSupport:F6}) + rejection + momentum + entryOffset."
+                Reason = $"{symbol.Coin}: LONG – trend up + retest EMA hỗ trợ gần nhất ({nearestSupport:F6}) + rejection + momentum + entryOffset (SL dựa trên swing/EMA89)."
             };
         }
 
@@ -369,7 +428,10 @@ namespace FuturesBot.Services
             bool macdCrossDown = macd15[i15] < sig15[i15] && macd15[i15 - 1] >= sig15[i15 - 1];
             bool rsiBear = rsi15[i15] < RsiBearThreshold && rsi15[i15] <= rsi15[i15 - 1];
 
-            bool momentum = (macdCrossDown && rsiBear) || (rsiBear && macd15[i15] < 0) || (extremeDump && rsiBear);
+            bool momentum =
+                (macdCrossDown && rsiBear) ||
+                (rsiBear && macd15[i15] < 0) ||
+                (extremeDump && rsiBear);
 
             bool ok = (retest && reject && momentum) || (extremeDump && momentum); // cho phép đu extreme
 
@@ -385,14 +447,38 @@ namespace FuturesBot.Services
             // 5. ENTRY OFFSET – đặt entry cao hơn close để tránh đu đáy nến
             decimal rawEntry = last15.Close * (1 + EntryOffsetPercent);
 
-            // 6. SL & TP – dùng swing high + buffer
+            // 6. SL & TP – dùng swing high + EMA89 để tránh bị quét
             decimal swingHigh = PriceActionHelper.FindSwingHigh(candles15m, i15, SwingLookback);
 
             decimal entry = rawEntry;
             if (entry >= swingHigh)
                 entry = (last15.Close + swingHigh) / 2;
 
-            decimal sl = swingHigh + entry * StopBufferPercent;
+            // SL candidate 1: trên swingHigh 0.5% của entry
+            decimal slFromSwing = swingHigh + entry * StopBufferPercent;
+
+            // SL candidate 2: trên EMA89 0.3% (nếu EMA89 nằm trên entry)
+            decimal slFromEma89 = 0m;
+            if (ema89 > entry)
+            {
+                slFromEma89 = ema89 * (1 + Ema89StopExtraPercent);
+            }
+
+            // Chọn SL xa hơn trong các candidate (giá lớn hơn → xa hơn với lệnh short)
+            var slCandidates = new List<decimal>();
+            if (slFromSwing > 0) slCandidates.Add(slFromSwing);
+            if (slFromEma89 > 0) slCandidates.Add(slFromEma89);
+
+            if (slCandidates.Count == 0)
+            {
+                return new TradeSignal
+                {
+                    Type = SignalType.Info,
+                    Reason = $"{symbol.Coin}: Không tìm được SL hợp lệ cho short."
+                };
+            }
+
+            decimal sl = slCandidates.Max();
 
             if (sl <= entry)
             {
@@ -412,7 +498,7 @@ namespace FuturesBot.Services
                 EntryPrice = entry,
                 StopLoss = sl,
                 TakeProfit = tp,
-                Reason = $"{symbol.Coin}: SHORT – trend down + retest EMA kháng cự gần nhất ({nearestResistance:F6}) + rejection + momentum + entryOffset."
+                Reason = $"{symbol.Coin}: SHORT – trend down + retest EMA kháng cự gần nhất ({nearestResistance:F6}) + rejection + momentum + entryOffset (SL dựa trên swing/EMA89)."
             };
         }
 
