@@ -523,29 +523,39 @@ namespace FuturesBot.Services
             decimal ema89 = ema89_15[i15];
             decimal ema200 = ema200_15[i15];
 
-            // 1) Xác định bias sideway theo EMA 15M
+            // 1) XÁC ĐỊNH BIAS SIDEWAY THEO EMA 15M + VỊ TRÍ GIÁ
+            //    - Short bias: giá dưới EMA34, EMA34 thấp nhất -> cấu trúc hơi down
+            //    - Long bias : giá trên EMA34, EMA34 cao nhất -> cấu trúc hơi up
+
             bool shortBias =
-                ema34 < ema89 &&
-                ema89 < ema200;          // cấu trúc down trên 15M (như case SOL)
+                last15.Close < ema34 &&
+                ema34 <= ema89 &&
+                ema34 <= ema200;
 
             bool longBias =
-                ema34 > ema89 &&
-                ema89 > ema200;          // cấu trúc up trên 15M
+                last15.Close > ema34 &&
+                ema34 >= ema89 &&
+                ema34 >= ema200;
 
             if (!shortBias && !longBias)
-                return new TradeSignal(); // không có bias rõ thì thôi
+            {
+                return new TradeSignal
+                {
+                    Type = SignalType.Info,
+                    Reason = $"{symbol.Coin}: SIDEWAY – không có bias rõ (ema34={ema34:F2}, ema89={ema89:F2}, ema200={ema200:F2})."
+                };
+            }
 
-            // 2) Lấy EMA gần nhất làm kháng cự/hỗ trợ để scalp
+            // ========================== SCALP SHORT ===========================
             if (shortBias)
             {
-                // Kháng cự gần nhất phía trên giá: ưu tiên EMA89, sau đó EMA200
+                // Kháng cự gần nhất phía trên giá: ưu tiên EMA89, rồi tới EMA200
                 var resistances = new List<decimal>();
-
                 if (ema89 > last15.Close) resistances.Add(ema89);
                 if (ema200 > last15.Close) resistances.Add(ema200);
 
                 if (resistances.Count == 0)
-                    return new TradeSignal();
+                    return new TradeSignal(); // không có kháng cự để bám
 
                 decimal nearestRes = resistances.Min();
 
@@ -554,26 +564,27 @@ namespace FuturesBot.Services
                     last15.High >= nearestRes * (1 - EmaRetestBand) &&
                     last15.High <= nearestRes * (1 + EmaRetestBand);
 
-                // Nến rejection: râu trên chọt EMA, thân đỏ đóng dưới EMA
+                // Nến rejection: râu trên chọc qua EMA, thân nằm dưới EMA, cho phép đỏ hoặc doji hơi đỏ
+                bool bearBody = last15.Close <= last15.Open; // close <= open
                 bool reject =
-                    last15.Close < last15.Open &&
                     last15.High > nearestRes &&
-                    last15.Close < nearestRes;
+                    last15.Close < nearestRes &&
+                    bearBody;
 
-                // Momemtum đảo chiều: RSI cao rồi gãy xuống, MACD bắt đầu cong xuống
+                // Momentum đảo chiều: RSI trước đó đã hơi cao rồi gãy xuống, MACD cong xuống
                 bool rsiTurnDown =
-                    rsi15[i15] <= rsi15[i15 - 1] &&
-                    rsi15[i15 - 1] >= 60m;                  // trước đó đã nóng rồi
+                    rsi15[i15 - 1] >= 50m &&      // trước đó hơi nóng
+                    rsi15[i15] <= rsi15[i15 - 1];
 
                 bool macdTurnDown =
-                    macd15[i15] <= macd15[i15 - 1];         // histogram yếu đi
+                    macd15[i15] <= macd15[i15 - 1];
 
                 bool momentum = rsiTurnDown && macdTurnDown;
 
                 if (!(touchRes && reject && momentum))
                     return new TradeSignal();
 
-                // ENTRY: đặt cao hơn close 1 chút để không đu đáy
+                // ENTRY: đặt cao hơn close 1 chút để không đu đáy nến
                 decimal rawEntry = last15.Close * (1 + EntryOffsetPercent);
 
                 // SL/TP: scalp nhanh, RR = 1R
@@ -589,7 +600,7 @@ namespace FuturesBot.Services
                     return new TradeSignal();
 
                 decimal risk = sl - entry;
-                decimal tp = entry - risk * RiskRewardSideway;
+                decimal tp = entry - risk * RiskRewardSideway; // RR=1
 
                 return new TradeSignal
                 {
@@ -600,11 +611,11 @@ namespace FuturesBot.Services
                     Reason = $"{symbol.Coin}: SIDEWAY SCALP SHORT – bias down 15M, retest EMA (near={nearestRes:F2}) + rejection + RSI/MACD quay đầu."
                 };
             }
-            else // longBias
-            {
-                // Hỗ trợ gần nhất phía dưới giá: ưu tiên EMA89, sau đó EMA200
-                var supports = new List<decimal>();
 
+            // ========================== SCALP LONG ============================
+            // Hỗ trợ gần nhất phía dưới giá: ưu tiên EMA89, rồi tới EMA200
+            {
+                var supports = new List<decimal>();
                 if (ema89 < last15.Close) supports.Add(ema89);
                 if (ema200 < last15.Close) supports.Add(ema200);
 
@@ -617,14 +628,17 @@ namespace FuturesBot.Services
                     last15.Low <= nearestSup * (1 + EmaRetestBand) &&
                     last15.Low >= nearestSup * (1 - EmaRetestBand);
 
+                // Nến rejection: râu dưới xuyên EMA, thân đóng trên EMA, cho phép xanh hoặc doji hơi xanh
+                bool bullBody = last15.Close >= last15.Open;
                 bool reject =
-                    last15.Close > last15.Open &&
                     last15.Low < nearestSup &&
-                    last15.Close > nearestSup;
+                    last15.Close > nearestSup &&
+                    bullBody;
 
+                // Momentum đảo chiều lên: RSI trước đó hơi thấp rồi bật lên, MACD cong lên
                 bool rsiTurnUp =
-                    rsi15[i15] >= rsi15[i15 - 1] &&
-                    rsi15[i15 - 1] <= 40m;
+                    rsi15[i15 - 1] <= 50m &&
+                    rsi15[i15] >= rsi15[i15 - 1];
 
                 bool macdTurnUp =
                     macd15[i15] >= macd15[i15 - 1];
