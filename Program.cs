@@ -2,29 +2,56 @@ using FuturesBot.Config;
 using FuturesBot.IServices;
 using FuturesBot.Services;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using static FuturesBot.Utils.EnumTypesHelper;
 
 Console.OutputEncoding = System.Text.Encoding.UTF8;
 
-var config = new ConfigurationBuilder()
-    .AddJsonFile("appsettings.json", optional: false, reloadOnChange: false)
-    .Build()
-    .Get<BotConfig>();
+var host = Host
+    .CreateDefaultBuilder()
+    .ConfigureServices((context, services) =>
+    {
+        // đọc config một lần
+        var botConfig = new ConfigurationBuilder()
+            .AddJsonFile("appsettings.json", optional: false, reloadOnChange: true)
+            .Build()
+            .Get<BotConfig>();
+
+        if (botConfig == null)
+            throw new ArgumentNullException(nameof(botConfig));
+
+        // Đăng ký BotConfig cho DI
+        services.AddSingleton(botConfig);
+        services.AddSingleton<IExchangeClientService, BinanceFuturesClientService>();
+        services.AddSingleton<IndicatorService>();
+        services.AddSingleton<RiskManager>();
+        services.AddSingleton<SlackNotifierService>();
+        services.AddSingleton<PnlReporterService>();
+        services.AddSingleton<LiveSyncService>();
+
+        services.AddScoped<OrderManagerService>();        
+        services.AddScoped<TradingStrategy>();
+        services.AddScoped<TradeExecutorService>();        
+    })
+    .Build();
+
+var config = host.Services.GetRequiredService<BotConfig>();
 
 if (config is null)
 {
     throw new ArgumentNullException(nameof(config));
 }
 
-var indicators = new IndicatorService();
-var strategy   = new TradingStrategy(indicators);
-var risk       = new RiskManager(config);
-var notifier   = new SlackNotifierService(config);
-IExchangeClientService exchange = new BinanceFuturesClientService(config);
-var orderManagerService = new OrderManagerService(exchange, notifier);
-var executor   = new TradeExecutorService(exchange, risk, config, notifier, orderManagerService);
-var pnl        = new PnlReporterService(notifier);
-var liveSync   = new LiveSyncService(exchange, pnl);
+var indicators = host.Services.GetRequiredService<IndicatorService>();
+var strategy   = host.Services.GetRequiredService<TradingStrategy>();
+var risk       = host.Services.GetRequiredService<RiskManager>();
+var notifier   = host.Services.GetRequiredService<SlackNotifierService>();
+var exchange = host.Services.GetRequiredService<IExchangeClientService>();
+var orderManagerService = host.Services.GetRequiredService<OrderManagerService>();
+var executor   = host.Services.GetRequiredService<TradeExecutorService>();
+var pnl        = host.Services.GetRequiredService<PnlReporterService>();
+var liveSync   = host.Services.GetRequiredService<LiveSyncService>();
 
 var vnZone = TimeZoneInfo.FindSystemTimeZoneById("Asia/Ho_Chi_Minh");
 var nowVN = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, vnZone);
