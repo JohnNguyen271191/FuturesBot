@@ -46,6 +46,11 @@ namespace FuturesBot.Services
         // SL an toàn quanh EMA89 (0.3% xa hơn EMA89)
         private const decimal Ema89StopExtraPercent = 0.003m;
 
+        // Nến climax + overextended xa EMA gần nhất (tránh vừa vào là đảo)
+        private const int ClimaxLookback = 20;
+        private const decimal ClimaxBodyMultiplier = 1.8m;
+        private const decimal ClimaxVolumeMultiplier = 1.5m;
+        private const decimal OverextendedFromEmaPercent = 0.01m; // 1% xa EMA gần nhất
 
         // =====================================================================
         //                           EXIT SIGNAL
@@ -127,32 +132,52 @@ namespace FuturesBot.Services
             var rsi15 = _indicators.Rsi(candles15m, 6);
             var (macd15, sig15, _) = _indicators.Macd(candles15m, 5, 13, 5);
 
+            decimal ema34_15Now = ema34_15[i15];
+            decimal ema89_15Now = ema89_15[i15];
+            decimal ema200_15Now = ema200_15[i15];
+
+            // ================= FILTER: CLIMAX + OVEREXTENDED = NO TRADE ========
+
+            bool climaxDanger =
+                IsClimaxAwayFromEma(candles15m, i15, ema34_15Now, ema89_15Now, ema200_15Now) ||
+                IsClimaxAwayFromEma(candles15m, i15 - 1, ema34_15Now, ema89_15Now, ema200_15Now);
+
+            if (climaxDanger)
+            {
+                return new TradeSignal
+                {
+                    Type = SignalType.Info,
+                    Reason = $"{symbol.Coin}: Bỏ qua entry vì vừa có nến climax và giá đang quá xa EMA gần nhất (đu đỉnh/đu đáy, chờ retest EMA rồi mới trade).",
+                    Coin = symbol.Coin
+                };
+            }
+
             // =================== XÁC NHẬN TREND =========================
 
             bool upTrend =
                 lastH1.Close > ema34_h1[iH1] &&
                 ema34_h1[iH1] > ema89_h1[iH1] &&
-                last15.Close > ema34_15[i15] &&
-                ema34_15[i15] > ema89_15[i15];
+                last15.Close > ema34_15Now &&
+                ema34_15Now > ema89_15Now;
 
             bool downTrend =
                 lastH1.Close < ema34_h1[iH1] &&
                 ema34_h1[iH1] < ema89_h1[iH1] &&
-                last15.Close < ema34_15[i15] &&
-                ema34_15[i15] < ema89_15[i15];
+                last15.Close < ema34_15Now &&
+                ema34_15Now < ema89_15Now;
 
-            // Extreme cases (đu trend mạnh)
+            // Extreme cases (vẫn giữ để tham khảo – KHÔNG dùng để cho phép entry đu trend)
             bool extremeUp =
-                last15.Close > ema34_15[i15] * (1 + ExtremeEmaBoost) &&
+                last15.Close > ema34_15Now * (1 + ExtremeEmaBoost) &&
                 macd15[i15] > sig15[i15] &&
                 rsi15[i15] > ExtremeRsiHigh;
 
             bool extremeDump =
-                last15.Close < ema34_15[i15] * (1 - ExtremeEmaBoost) &&
+                last15.Close < ema34_15Now * (1 - ExtremeEmaBoost) &&
                 macd15[i15] < sig15[i15] &&
                 rsi15[i15] < ExtremeRsiLow;
 
-            // Không có trend, không extreme -> thử kèo sideway scalp, không có thì đứng im
+            // Không có trend rõ và không extreme -> thử sideway scalp
             if (!upTrend && !downTrend && !extremeUp && !extremeDump)
             {
                 var sidewaySignal = BuildSidewayScalp(
@@ -184,7 +209,7 @@ namespace FuturesBot.Services
             // =================== BUILD LONG / SHORT ======================
 
             // --- LONG ---
-            if (upTrend || extremeUp)
+            if (upTrend /* không dùng extremeUp để cho phép đu trend */)
             {
                 var longSignal = BuildLong(
                     candles15m,
@@ -196,15 +221,14 @@ namespace FuturesBot.Services
                     sig15,
                     last15,
                     prev15,
-                    symbol,
-                    extremeUp);
+                    symbol);
 
                 if (longSignal.Type != SignalType.None)
                     return longSignal;
             }
 
             // --- SHORT ---
-            if (downTrend || extremeDump)
+            if (downTrend /* không dùng extremeDump */)
             {
                 var shortSignal = BuildShort(
                     candles15m,
@@ -216,8 +240,7 @@ namespace FuturesBot.Services
                     sig15,
                     last15,
                     prev15,
-                    symbol,
-                    extremeDump);
+                    symbol);
 
                 if (shortSignal.Type != SignalType.None)
                     return shortSignal;
@@ -241,8 +264,7 @@ namespace FuturesBot.Services
             IReadOnlyList<decimal> sig15,
             Candle last15,
             Candle prev15,
-            Symbol symbol,
-            bool extremeUp)
+            Symbol symbol)
         {
             int i15 = candles15m.Count - 1;
 
@@ -266,8 +288,8 @@ namespace FuturesBot.Services
                 ? supports.Max()
                 : 0m;
 
-            // Nếu không có hỗ trợ hợp lệ và không phải case extreme thì bỏ
-            if (nearestSupport <= 0m && !extremeUp)
+            // Nếu không có hỗ trợ hợp lệ thì bỏ
+            if (nearestSupport <= 0m)
             {
                 return new TradeSignal
                 {
@@ -289,15 +311,15 @@ namespace FuturesBot.Services
                           last15.Close > nearestSupport;
 
             // 4. MOMENTUM MACD + RSI
+            int i15 = candles15m.Count - 1;
             bool macdCrossUp = macd15[i15] > sig15[i15] && macd15[i15 - 1] <= sig15[i15 - 1];
             bool rsiBull = rsi15[i15] > RsiBullThreshold && rsi15[i15] >= rsi15[i15 - 1];
 
             bool momentum =
                 (macdCrossUp && rsiBull) ||
-                (rsiBull && macd15[i15] > 0) ||
-                (extremeUp && rsiBull);
+                (rsiBull && macd15[i15] > 0);
 
-            bool ok = (touchSupport && reject && momentum) || (extremeUp && momentum); // cho phép đu extreme khi rất mạnh
+            bool ok = touchSupport && reject && momentum; // BẮT BUỘC có retest EMA
 
             if (!ok)
             {
@@ -385,8 +407,7 @@ namespace FuturesBot.Services
             IReadOnlyList<decimal> sig15,
             Candle last15,
             Candle prev15,
-            Symbol symbol,
-            bool extremeDump)
+            Symbol symbol)
         {
             int i15 = candles15m.Count - 1;
 
@@ -410,7 +431,7 @@ namespace FuturesBot.Services
                 ? resistances.Min()
                 : 0m;
 
-            if (nearestResistance <= 0m && !extremeDump)
+            if (nearestResistance <= 0m)
             {
                 return new TradeSignal
                 {
@@ -437,10 +458,9 @@ namespace FuturesBot.Services
 
             bool momentum =
                 (macdCrossDown && rsiBear) ||
-                (rsiBear && macd15[i15] < 0) ||
-                (extremeDump && rsiBear);
+                (rsiBear && macd15[i15] < 0);
 
-            bool ok = (retest && reject && momentum) || (extremeDump && momentum); // cho phép đu extreme
+            bool ok = retest && reject && momentum;  // BẮT BUỘC retest EMA
 
             if (!ok)
             {
@@ -535,9 +555,6 @@ namespace FuturesBot.Services
             decimal ema200 = ema200_15[i15];
 
             // 1) XÁC ĐỊNH BIAS SIDEWAY THEO EMA 15M + VỊ TRÍ GIÁ
-            //    - Short bias: giá dưới EMA34, EMA34 thấp nhất -> cấu trúc hơi down
-            //    - Long bias : giá trên EMA34, EMA34 cao nhất -> cấu trúc hơi up
-
             bool shortBias =
                 last15.Close < ema34 &&
                 ema34 <= ema89 &&
@@ -567,7 +584,7 @@ namespace FuturesBot.Services
                 if (ema200 > last15.Close) resistances.Add(ema200);
 
                 if (resistances.Count == 0)
-                    return new TradeSignal(); // không có kháng cự để bám
+                    return new TradeSignal();
 
                 decimal nearestRes = resistances.Min();
 
@@ -576,16 +593,16 @@ namespace FuturesBot.Services
                     last15.High >= nearestRes * (1 - EmaRetestBand) &&
                     last15.High <= nearestRes * (1 + EmaRetestBand);
 
-                // Nến rejection: râu trên chọc qua EMA, thân nằm dưới EMA, cho phép đỏ hoặc doji hơi đỏ
-                bool bearBody = last15.Close <= last15.Open; // close <= open
+                // Nến rejection: râu trên chọc qua EMA, thân nằm dưới EMA
+                bool bearBody = last15.Close <= last15.Open;
                 bool reject =
                     last15.High > nearestRes &&
                     last15.Close < nearestRes &&
                     bearBody;
 
-                // Momentum đảo chiều: RSI trước đó đã hơi cao rồi gãy xuống, MACD cong xuống
+                // Momentum đảo chiều: RSI cao rồi gãy xuống, MACD cong xuống
                 bool rsiTurnDown =
-                    rsi15[i15 - 1] >= 50m &&      // trước đó hơi nóng
+                    rsi15[i15 - 1] >= 50m &&
                     rsi15[i15] <= rsi15[i15 - 1];
 
                 bool macdTurnDown =
@@ -596,10 +613,8 @@ namespace FuturesBot.Services
                 if (!(touchRes && reject && momentum))
                     return new TradeSignal();
 
-                // ENTRY: đặt cao hơn close 1 chút để không đu đáy nến
                 decimal rawEntry = last15.Close * (1 + EntryOffsetPercent);
 
-                // SL/TP: scalp nhanh, RR = 1R
                 decimal swingHigh = PriceActionHelper.FindSwingHigh(candles15m, i15, SwingLookback);
 
                 decimal entry = rawEntry;
@@ -612,7 +627,7 @@ namespace FuturesBot.Services
                     return new TradeSignal();
 
                 decimal risk = sl - entry;
-                decimal tp = entry - risk * RiskRewardSideway; // RR=1
+                decimal tp = entry - risk * RiskRewardSideway;
 
                 return new TradeSignal
                 {
@@ -626,7 +641,6 @@ namespace FuturesBot.Services
             }
 
             // ========================== SCALP LONG ============================
-            // Hỗ trợ gần nhất phía dưới giá: ưu tiên EMA89, rồi tới EMA200
             {
                 var supports = new List<decimal>();
                 if (ema89 < last15.Close) supports.Add(ema89);
@@ -641,14 +655,12 @@ namespace FuturesBot.Services
                     last15.Low <= nearestSup * (1 + EmaRetestBand) &&
                     last15.Low >= nearestSup * (1 - EmaRetestBand);
 
-                // Nến rejection: râu dưới xuyên EMA, thân đóng trên EMA, cho phép xanh hoặc doji hơi xanh
                 bool bullBody = last15.Close >= last15.Open;
                 bool reject =
                     last15.Low < nearestSup &&
                     last15.Close > nearestSup &&
                     bullBody;
 
-                // Momentum đảo chiều lên: RSI trước đó hơi thấp rồi bật lên, MACD cong lên
                 bool rsiTurnUp =
                     rsi15[i15 - 1] <= 50m &&
                     rsi15[i15] >= rsi15[i15 - 1];
@@ -687,6 +699,93 @@ namespace FuturesBot.Services
                     Coin = symbol.Coin
                 };
             }
+        }
+
+        // =====================================================================
+        //                     HELPERS: CLIMAX / EMA
+        // =====================================================================
+
+        private bool IsClimaxCandle(IReadOnlyList<Candle> candles, int index)
+        {
+            if (index <= 0 || index >= candles.Count)
+                return false;
+
+            int start = Math.Max(0, index - ClimaxLookback);
+            int end = index;
+            int count = end - start;
+            if (count <= 3)
+                return false;
+
+            decimal sumBody = 0m;
+            decimal sumVolume = 0m;
+
+            for (int i = start; i < end; i++)
+            {
+                var c = candles[i];
+                sumBody += Math.Abs(c.Close - c.Open);
+                sumVolume += c.Volume;
+            }
+
+            decimal avgBody = sumBody / count;
+            decimal avgVolume = sumVolume / count;
+
+            var last = candles[index];
+            decimal body = Math.Abs(last.Close - last.Open);
+            decimal volume = last.Volume;
+
+            bool bigBody = avgBody > 0 && body >= avgBody * ClimaxBodyMultiplier;
+            bool bigVolume = avgVolume > 0 && volume >= avgVolume * ClimaxVolumeMultiplier;
+
+            return bigBody && bigVolume;
+        }
+
+        private decimal GetNearestEma(decimal price, decimal ema34, decimal ema89, decimal ema200)
+        {
+            var list = new List<decimal>();
+            if (ema34 > 0) list.Add(ema34);
+            if (ema89 > 0) list.Add(ema89);
+            if (ema200 > 0) list.Add(ema200);
+
+            if (list.Count == 0)
+                return 0m;
+
+            decimal nearest = list[0];
+            decimal minDist = Math.Abs(price - nearest);
+
+            for (int i = 1; i < list.Count; i++)
+            {
+                decimal d = Math.Abs(price - list[i]);
+                if (d < minDist)
+                {
+                    minDist = d;
+                    nearest = list[i];
+                }
+            }
+
+            return nearest;
+        }
+
+        // Nến climax + giá đang xa EMA gần nhất => overextended, không trade
+        private bool IsClimaxAwayFromEma(
+            IReadOnlyList<Candle> candles,
+            int index,
+            decimal ema34,
+            decimal ema89,
+            decimal ema200)
+        {
+            if (index <= 0 || index >= candles.Count)
+                return false;
+
+            if (!IsClimaxCandle(candles, index))
+                return false;
+
+            var c = candles[index];
+            decimal nearestEma = GetNearestEma(c.Close, ema34, ema89, ema200);
+            if (nearestEma <= 0)
+                return false;
+
+            var distance = Math.Abs(c.Close - nearestEma) / nearestEma;
+            return distance >= OverextendedFromEmaPercent;
         }
     }
 }
