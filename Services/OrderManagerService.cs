@@ -1,4 +1,4 @@
-﻿using FuturesBot.IServices;
+using FuturesBot.IServices;
 using FuturesBot.Models;
 using static FuturesBot.Utils.EnumTypesHelper;
 
@@ -49,25 +49,29 @@ namespace FuturesBot.Services
             {
                 await Task.Delay(MonitorIntervalMs);
 
-                // 1) Nếu không còn order mở nào nữa
+                // 1) Kiểm tra position + open order
                 var openOrders = await _exchange.GetOpenOrdersAsync(symbol);
-                var position = await _exchange.GetPositionAsync(symbol);
+                var position   = await _exchange.GetPositionAsync(symbol);
 
-                bool hasPosition = position.PositionAmt != 0;
+                bool hasPosition  = position.PositionAmt != 0;
                 bool hasOpenOrder = openOrders.Any();
 
+                // ===== ƯU TIÊN POSITION: nếu đã có vị thế thì chuyển sang monitor POSITION =====
+                if (hasPosition)
+                {
+                    await _notify.SendAsync(
+                        $"[{symbol}] Đã có position (qty={position.PositionAmt}) → chuyển sang monitor POSITION.");
+
+                    // fire & forget
+                    _ = MonitorPositionAsync(signal);
+                    return; // dừng monitor LIMIT
+                }
+
+                // Không còn position + không còn LIMIT nào nữa → dừng monitor LIMIT
                 if (!hasOpenOrder)
                 {
-                    if (hasPosition)
-                    {
-                        await _notify.SendAsync($"[{symbol}] LIMIT đã khớp → chuyển sang monitor POSITION.");
-                        _ = MonitorPositionAsync(signal);
-                    }
-                    else
-                    {
-                        await _notify.SendAsync($"[{symbol}] Không còn LIMIT & không có vị thế → dừng monitor LIMIT.");
-                    }
-
+                    await _notify.SendAsync(
+                        $"[{symbol}] Không còn LIMIT & không có vị thế → dừng monitor LIMIT.");
                     return;
                 }
 
@@ -76,7 +80,7 @@ namespace FuturesBot.Services
                 if (candles.Count == 0)
                     continue;
 
-                var last = candles[^1];
+                var last  = candles[^1];
                 decimal ema34 = ComputeEmaLast(candles, 34);
 
                 bool setupBroken = false;
@@ -92,6 +96,7 @@ namespace FuturesBot.Services
                 }
                 else
                 {
+                    // short: giá phá lên SL hoặc phá EMA34 quá mạnh
                     if (last.Close > signal.StopLoss)
                         setupBroken = true;
 
@@ -115,7 +120,7 @@ namespace FuturesBot.Services
         /// <summary>
         /// Gọi sau khi vào lệnh (MARKET hoặc LIMIT đã khớp).
         /// - Tự động early-exit khi đạt 0.5R nhưng momentum đảo.
-        /// - đóng ngay nếu hard reverse (engulfing phá cấu trúc).
+        /// - Đóng ngay nếu hard reverse (engulfing phá cấu trúc).
         /// - Trailing SL tại 1R và 1.5R.
         /// </summary>
         public async Task MonitorPositionAsync(TradeSignal signal)
@@ -124,8 +129,8 @@ namespace FuturesBot.Services
             bool isLong = signal.Type == SignalType.Long;
 
             decimal entry = signal.EntryPrice.GetValueOrDefault();
-            decimal sl = signal.StopLoss.GetValueOrDefault();
-            decimal tp = signal.TakeProfit.GetValueOrDefault();
+            decimal sl    = signal.StopLoss.GetValueOrDefault();
+            decimal tp    = signal.TakeProfit.GetValueOrDefault();
 
             decimal risk = isLong ? entry - sl : sl - entry;
             if (risk <= 0)
@@ -273,8 +278,8 @@ namespace FuturesBot.Services
                 return;
             }
 
-            string side = isLong ? "SELL" : "BUY";
-            string posSide = isLong ? "LONG" : "SHORT";
+            string side    = isLong ? "SELL"  : "BUY";
+            string posSide = isLong ? "LONG"  : "SHORT";
 
             await _exchange.PlaceStopOnlyAsync(symbol, side, posSide, qty, newSL);
         }
@@ -294,7 +299,7 @@ namespace FuturesBot.Services
                 .Select(c => c.Close)
                 .ToArray();
 
-            decimal k = 2m / (period + 1);
+            decimal k   = 2m / (period + 1);
             decimal ema = closes[0];
 
             for (int i = 1; i < closes.Length; i++)
