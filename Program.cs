@@ -8,21 +8,20 @@ using static FuturesBot.Utils.EnumTypesHelper;
 
 Console.OutputEncoding = System.Text.Encoding.UTF8;
 
+// Create Host
 var host = Host
     .CreateDefaultBuilder()
     .ConfigureServices((context, services) =>
     {
-        // đọc config một lần
+        // Load config once
         var botConfig = new ConfigurationBuilder()
-            .AddJsonFile("appsettings.json", optional: false, reloadOnChange: true)
+            .AddJsonFile("appsettings.json", false, true)
             .Build()
-            .Get<BotConfig>();
+            .Get<BotConfig>() ?? throw new Exception("Cannot load BotConfig");
 
-        if (botConfig == null)
-            throw new ArgumentNullException(nameof(botConfig));
-
-        // Đăng ký BotConfig cho DI
         services.AddSingleton(botConfig);
+
+        // Singleton services
         services.AddSingleton<IExchangeClientService, BinanceFuturesClientService>();
         services.AddSingleton<IndicatorService>();
         services.AddSingleton<RiskManager>();
@@ -30,90 +29,112 @@ var host = Host
         services.AddSingleton<PnlReporterService>();
         services.AddSingleton<LiveSyncService>();
 
-        services.AddScoped<OrderManagerService>();        
+        // Per-symbol scoped services
+        services.AddScoped<OrderManagerService>();
         services.AddScoped<TradingStrategy>();
-        services.AddScoped<TradeExecutorService>();        
+        services.AddScoped<TradeExecutorService>();
     })
     .Build();
 
+// Resolve global services
 var config = host.Services.GetRequiredService<BotConfig>();
+var notifier = host.Services.GetRequiredService<SlackNotifierService>();
+var liveSync = host.Services.GetRequiredService<LiveSyncService>();
+var pnl = host.Services.GetRequiredService<PnlReporterService>();
 
-if (config is null)
-{
-    throw new ArgumentNullException(nameof(config));
-}
-
-var indicators = host.Services.GetRequiredService<IndicatorService>();
-var strategy   = host.Services.GetRequiredService<TradingStrategy>();
-var risk       = host.Services.GetRequiredService<RiskManager>();
-var notifier   = host.Services.GetRequiredService<SlackNotifierService>();
-var exchange = host.Services.GetRequiredService<IExchangeClientService>();
-var orderManagerService = host.Services.GetRequiredService<OrderManagerService>();
-var executor   = host.Services.GetRequiredService<TradeExecutorService>();
-var pnl        = host.Services.GetRequiredService<PnlReporterService>();
-var liveSync   = host.Services.GetRequiredService<LiveSyncService>();
-
-var vnZone = TimeZoneInfo.FindSystemTimeZoneById("Asia/Ho_Chi_Minh");
-var nowVN = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, vnZone);
+var vnTimeZone = TimeZoneInfo.FindSystemTimeZoneById("Asia/Ho_Chi_Minh");
+var nowVN = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, vnTimeZone);
 
 await notifier.SendAsync($"=== FuturesBot {config.Intervals[0].FrameTime.ToUpper()} - {nowVN:dd/MM/yyyy HH:mm:ss} started ===");
 
-// Lưu thời gian cây 15m cuối cùng đã xử lý cho mỗi symbol
-// Key: symbol.Coin (vd: "BTCUSDT"), Value: thời gian đóng nến 15m cuối cùng đã xử lý
-var lastProcessedCandleTime15m = config.Symbols.ToDictionary(s => s.Coin, _ => DateTime.MinValue);
 
-while (true)
+// Launch per-symbol workers
+var tasks = config.Symbols
+    .Select(s => RunSymbolWorkerAsync(s, host, config, notifier, liveSync, pnl))
+    .ToList();
+
+await Task.WhenAll(tasks);
+
+
+// ============================================================================
+// WORKER PER SYMBOL
+// ============================================================================
+
+static async Task RunSymbolWorkerAsync(
+    Symbol symbol,
+    IHost host,
+    BotConfig config,
+    SlackNotifierService notifier,
+    LiveSyncService liveSync,
+    PnlReporterService pnl)
 {
-    foreach (var symbol in config.Symbols)
+    // Each symbol has its own scope + own strategy / executor / order manager
+    using var scope = host.Services.CreateScope();
+
+    var strategy = scope.ServiceProvider.GetRequiredService<TradingStrategy>();
+    var executor = scope.ServiceProvider.GetRequiredService<TradeExecutorService>();
+    var exchange = scope.ServiceProvider.GetRequiredService<IExchangeClientService>();
+
+    DateTime lastProcessedCandle = DateTime.MinValue;
+
+    while (true)
     {
         try
         {
-            // Lấy 200 cây nến gần nhất
+            // Fetch only once per tick
             var candles15m = await exchange.GetRecentCandlesAsync(symbol.Coin, config.Intervals[0].FrameTime, 200);
-
             var candles1h = await exchange.GetRecentCandlesAsync(symbol.Coin, config.Intervals[1].FrameTime, 200);
 
-            if (candles15m is null || candles15m.Count == 0)
-                continue;
-
-            var last15mCandle = candles15m[^1];
-            var last15mTime   = last15mCandle.OpenTime;
-
-            if (lastProcessedCandleTime15m.TryGetValue(symbol.Coin, out var lastTime) && lastTime >= last15mTime)
+            if (candles15m?.Count < 2)
             {
+                await Task.Delay(TimeSpan.FromSeconds(10));
                 continue;
             }
 
-            lastProcessedCandleTime15m[symbol.Coin] = last15mTime;
+            var lastCandle = candles15m[^1];
 
-            var pos = await exchange.GetPositionAsync(symbol.Coin);
-            bool hasLongPosition = pos.PositionAmt > 0;
-            bool hasShortPosition = pos.PositionAmt < 0;
-
-            if (pos.IsLong || pos.IsShort)
+            // Prevent reprocessing same candle
+            if (lastCandle.OpenTime <= lastProcessedCandle)
             {
-                var exitSignal = strategy.GenerateExitSignal(candles15m, hasLongPosition, hasShortPosition, symbol);
+                await Task.Delay(TimeSpan.FromSeconds(3));
+                continue;
+            }
 
-                if (exitSignal.Type == SignalType.CloseLong || exitSignal.Type == SignalType.CloseShort)
+            lastProcessedCandle = lastCandle.OpenTime;
+
+            // Get current position once only
+            var pos = await exchange.GetPositionAsync(symbol.Coin);
+            bool hasLong = pos.PositionAmt > 0;
+            bool hasShort = pos.PositionAmt < 0;
+
+            // Auto-exit logic
+            if (hasLong || hasShort)
+            {
+                var exitSignal = strategy.GenerateExitSignal(
+                    candles15m, hasLong, hasShort, symbol);
+
+                if (exitSignal.Type == SignalType.CloseLong ||
+                    exitSignal.Type == SignalType.CloseShort)
                 {
                     await exchange.ClosePositionAsync(symbol.Coin, pos.PositionAmt);
                     continue;
                 }
             }
 
+            // Entry logic
             var entrySignal = strategy.GenerateSignal(candles15m, candles1h, symbol);
-
             await executor.HandleSignalAsync(entrySignal, symbol);
         }
         catch (Exception ex)
         {
-            await notifier.SendAsync("[ERROR] " + ex);
+            await notifier.SendAsync($"[ERROR] {symbol.Coin}: {ex.Message}");
         }
+
+        // Shared operations
+        await liveSync.SyncAsync(new[] { symbol });
+        await pnl.SendQuickDailySummary();
+
+        // Tick interval
+        await Task.Delay(TimeSpan.FromSeconds(30));
     }
-
-    await liveSync.SyncAsync(config.Symbols);
-
-    await pnl.SendQuickDailySummary();
-
-    await Task.Delay(TimeSpan.FromSeconds(30));
 }
