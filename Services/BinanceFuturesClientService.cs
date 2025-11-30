@@ -122,7 +122,7 @@ namespace FuturesBot.Services
                 ["side"] = sideStr,
                 ["type"] = typeStr,
                 ["quantity"] = qty.ToString(CultureInfo.InvariantCulture),
-                ["recvWindow"] = "5000",
+                ["recvWindow"] = "60000",
                 ["positionSide"] = positionSide,
             };
 
@@ -152,7 +152,7 @@ namespace FuturesBot.Services
                 ["stopPrice"] = sl.ToString(CultureInfo.InvariantCulture),
                 ["closePosition"] = "true",
                 ["timeInForce"] = "GTC",
-                ["recvWindow"] = "5000",
+                ["recvWindow"] = "60000",
                 ["positionSide"] = positionSide
             };
 
@@ -168,7 +168,7 @@ namespace FuturesBot.Services
                 ["stopPrice"] = tp.ToString(CultureInfo.InvariantCulture),
                 ["closePosition"] = "true",
                 ["timeInForce"] = "GTC",
-                ["recvWindow"] = "5000",
+                ["recvWindow"] = "60000",
                 ["positionSide"] = positionSide
             };
 
@@ -251,7 +251,7 @@ namespace FuturesBot.Services
             var posParams = new Dictionary<string, string>
             {
                 ["symbol"] = symbol,
-                ["recvWindow"] = "5000"
+                ["recvWindow"] = "60000"
             };
 
             var posJson = await SignedGetAsync("/fapi/v2/positionRisk", posParams);
@@ -283,7 +283,7 @@ namespace FuturesBot.Services
             var orderParams = new Dictionary<string, string>
             {
                 ["symbol"] = symbol,
-                ["recvWindow"] = "5000"
+                ["recvWindow"] = "60000"
             };
 
             var ordersJson = await SignedGetAsync("/fapi/v1/openOrders", orderParams);
@@ -396,7 +396,7 @@ namespace FuturesBot.Services
                 ["side"] = side,
                 ["type"] = "MARKET",
                 ["quantity"] = Math.Abs(quantity).ToString(CultureInfo.InvariantCulture),
-                ["recvWindow"] = "5000",
+                ["recvWindow"] = "60000",
                 ["positionSide"] = positionSide
             });
         }
@@ -409,7 +409,7 @@ namespace FuturesBot.Services
             var json = await SignedGetAsync("/fapi/v1/openOrders", new Dictionary<string, string>
             {
                 ["symbol"] = symbol,
-                ["recvWindow"] = "5000"
+                ["recvWindow"] = "60000"
             });
 
             var list = new List<OpenOrderInfo>();
@@ -564,9 +564,11 @@ namespace FuturesBot.Services
 
         private long GetBinanceTimestamp()
         {
-            if ((DateTime.UtcNow - _lastTimeSync) > TimeSpan.FromMinutes(30))
+            // lần đầu hoặc sau 5 phút thì sync lại
+            if (_lastTimeSync == DateTime.MinValue ||
+                (DateTime.UtcNow - _lastTimeSync) > TimeSpan.FromMinutes(5))
             {
-                _ = SyncServerTimeAsync();
+                SyncServerTimeAsync().GetAwaiter().GetResult();
             }
 
             var local = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
