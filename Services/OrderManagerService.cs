@@ -188,7 +188,7 @@ namespace FuturesBot.Services
                     await _notify.SendAsync(
                         $"[{symbol}] Early EXIT: RR={rr:F2} >= {EarlyExitRR}, momentum đảo chiều → đóng lệnh.");
 
-                    await _exchange.ClosePositionAsync(symbol, Math.Abs(qty));
+                    await _exchange.ClosePositionAsync(symbol, qty);
                     return;
                 }
 
@@ -198,7 +198,7 @@ namespace FuturesBot.Services
                     await _notify.SendAsync(
                         $"[{symbol}] HARD REVERSE: giá đảo mạnh, RR={rr:F2} → đóng ngay để bảo vệ vốn.");
 
-                    await _exchange.ClosePositionAsync(symbol, Math.Abs(qty));
+                    await _exchange.ClosePositionAsync(symbol, qty);
                     return;
                 }
 
