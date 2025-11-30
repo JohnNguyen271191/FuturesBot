@@ -9,12 +9,14 @@ namespace FuturesBot.Services
         IExchangeClientService exchange,
         RiskManager risk,
         BotConfig config,
-        SlackNotifierService notifier)
+        SlackNotifierService notifier,
+        OrderManagerService orderManagerService)
     {
         private readonly IExchangeClientService _exchange = exchange;
         private readonly RiskManager _risk = risk;
         private readonly BotConfig _config = config;
         private readonly SlackNotifierService _notifier = notifier;
+        private readonly OrderManagerService _orderManagerService = orderManagerService;
 
         public async Task HandleSignalAsync(TradeSignal signal, Symbol symbol)
         {
@@ -81,6 +83,7 @@ PaperMode: {_config.PaperMode}
             if (isOrdered)
             {
                 await _notifier.SendAsync($"[INFO] - {symbol.Coin} - API call sent to place the order (check Binance).");
+                await _orderManagerService.MonitorLimitOrderAsync(signal);
             } else
             {
                 await _notifier.SendAsync($"[ERROR] - {symbol.Coin} - API calln't sent to place the order (check Binance).");

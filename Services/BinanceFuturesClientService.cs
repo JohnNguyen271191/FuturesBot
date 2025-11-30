@@ -401,6 +401,85 @@ namespace FuturesBot.Services
             });
         }
 
+        public async Task<IReadOnlyList<OpenOrderInfo>> GetOpenOrdersAsync(string symbol)
+        {
+            if (_config.PaperMode)
+                return Array.Empty<OpenOrderInfo>();
+
+            var json = await SignedGetAsync("/fapi/v1/openOrders", new Dictionary<string, string>
+            {
+                ["symbol"] = symbol,
+                ["recvWindow"] = "5000"
+            });
+
+            var list = new List<OpenOrderInfo>();
+
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            if (root.ValueKind != JsonValueKind.Array)
+                return list;
+
+            foreach (var el in root.EnumerateArray())
+            {
+                list.Add(new OpenOrderInfo
+                {
+                    Symbol = el.GetProperty("symbol").GetString() ?? symbol,
+                    ClientOrderId = el.GetProperty("clientOrderId").GetString() ?? string.Empty,
+                    OrderId = el.GetProperty("orderId").GetInt64().ToString(),
+                    Side = el.GetProperty("side").GetString() ?? string.Empty,
+                    Type = el.GetProperty("type").GetString() ?? string.Empty,
+                    Price = decimal.Parse(el.GetProperty("price").GetString() ?? "0", CultureInfo.InvariantCulture),
+                    OrigQty = decimal.Parse(el.GetProperty("origQty").GetString() ?? "0", CultureInfo.InvariantCulture),
+                    ExecutedQty = decimal.Parse(el.GetProperty("executedQty").GetString() ?? "0", CultureInfo.InvariantCulture),
+                    StopPrice = decimal.Parse(el.GetProperty("stopPrice").GetString() ?? "0", CultureInfo.InvariantCulture),
+                });
+            }
+
+            return list;
+        }
+
+        public async Task<bool> PlaceStopOnlyAsync(string symbol, string side, string positionSide, decimal quantity, decimal stopPrice)
+        {
+            var rules = await _rulesService.GetRulesAsync(symbol);
+
+            var qty = SymbolRulesService.TruncateToStep(quantity, rules.QtyStep);
+            if (qty < rules.MinQty)
+                qty = rules.MinQty;
+
+            var stop = SymbolRulesService.TruncateToStep(stopPrice, rules.PriceStep);
+
+            // PAPER MODE
+            if (_config.PaperMode)
+            {
+                Console.WriteLine($"[PAPER MODE] PlaceStopOnly {side} {symbol} qty={qty} stop={stop}");
+                return true;
+            }
+
+            var param = new Dictionary<string, string>
+            {
+                ["symbol"] = symbol,
+                ["side"] = side,
+                ["type"] = "STOP_MARKET",
+                ["stopPrice"] = stop.ToString(CultureInfo.InvariantCulture),
+                ["closePosition"] = "true",
+                ["timeInForce"] = "GTC",
+                ["recvWindow"] = "5000",
+                ["positionSide"] = positionSide
+            };
+
+            var resp = await SignedPostAsync("/fapi/v1/order", param);
+
+            if (resp.Contains("[BINANCE ERROR]"))
+            {
+                Console.WriteLine("[PlaceStopOnly ERROR] " + resp);
+                return false;
+            }
+
+            return true;
+        }
+
+
         // ==========================
         //       PRIVATE HELPERS
         // ==========================

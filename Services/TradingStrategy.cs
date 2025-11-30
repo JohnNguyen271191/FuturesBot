@@ -76,7 +76,8 @@ namespace FuturesBot.Services
                 return new TradeSignal
                 {
                     Type = SignalType.CloseLong,
-                    Reason = $"{symbol.Coin}: Đang LONG nhưng giá đóng dưới EMA34 M15 → Exit để bảo vệ vốn."
+                    Reason = $"{symbol.Coin}: Đang LONG nhưng giá đóng dưới EMA34 M15 → Exit để bảo vệ vốn.",
+                    Coin = symbol.Coin
                 };
             }
 
@@ -86,7 +87,8 @@ namespace FuturesBot.Services
                 return new TradeSignal
                 {
                     Type = SignalType.CloseShort,
-                    Reason = $"{symbol.Coin}: Đang SHORT nhưng giá đóng trên EMA34 M15 → Exit để tránh đảo trend."
+                    Reason = $"{symbol.Coin}: Đang SHORT nhưng giá đóng trên EMA34 M15 → Exit để tránh đảo trend.",
+                    Coin = symbol.Coin
                 };
             }
 
@@ -270,7 +272,8 @@ namespace FuturesBot.Services
                 return new TradeSignal
                 {
                     Type = SignalType.Info,
-                    Reason = $"{symbol.Coin}: Uptrend nhưng không có EMA hỗ trợ gần dưới giá để retest."
+                    Reason = $"{symbol.Coin}: Uptrend nhưng không có EMA hỗ trợ gần dưới giá để retest.",
+                    Coin = symbol.Coin
                 };
             }
 
@@ -301,7 +304,8 @@ namespace FuturesBot.Services
                 return new TradeSignal
                 {
                     Type = SignalType.Info,
-                    Reason = $"{symbol.Coin}: H1 Uptrend nhưng setup long chưa đạt (touch={touchSupport}, reject={reject}, momentum={momentum})."
+                    Reason = $"{symbol.Coin}: H1 Uptrend nhưng setup long chưa đạt (touch={touchSupport}, reject={reject}, momentum={momentum}).",
+                    Coin = symbol.Coin
                 };
             }
 
@@ -335,7 +339,8 @@ namespace FuturesBot.Services
                 return new TradeSignal
                 {
                     Type = SignalType.Info,
-                    Reason = $"{symbol.Coin}: Không tìm được SL hợp lệ cho long."
+                    Reason = $"{symbol.Coin}: Không tìm được SL hợp lệ cho long.",
+                    Coin = symbol.Coin
                 };
             }
 
@@ -346,7 +351,8 @@ namespace FuturesBot.Services
                 return new TradeSignal
                 {
                     Type = SignalType.Info,
-                    Reason = $"{symbol.Coin}: SL invalid cho long."
+                    Reason = $"{symbol.Coin}: SL invalid cho long.",
+                    Coin = symbol.Coin
                 };
             }
 
@@ -359,7 +365,8 @@ namespace FuturesBot.Services
                 EntryPrice = entry,
                 StopLoss = sl,
                 TakeProfit = tp,
-                Reason = $"{symbol.Coin}: LONG – trend up + retest EMA hỗ trợ gần nhất ({nearestSupport:F6}) + rejection + momentum + entryOffset (SL dựa trên swing/EMA89)."
+                Reason = $"{symbol.Coin}: LONG – trend up + retest EMA hỗ trợ gần nhất ({nearestSupport:F6}) + rejection + momentum + entryOffset (SL dựa trên swing/EMA89).",
+                Coin = symbol.Coin
             };
         }
 
@@ -408,7 +415,8 @@ namespace FuturesBot.Services
                 return new TradeSignal
                 {
                     Type = SignalType.Info,
-                    Reason = $"{symbol.Coin}: Downtrend nhưng không có EMA kháng cự gần trên giá để retest."
+                    Reason = $"{symbol.Coin}: Downtrend nhưng không có EMA kháng cự gần trên giá để retest.",
+                    Coin = symbol.Coin
                 };
             }
 
@@ -439,7 +447,8 @@ namespace FuturesBot.Services
                 return new TradeSignal
                 {
                     Type = SignalType.Info,
-                    Reason = $"{symbol.Coin}: H1 Downtrend nhưng setup short chưa đạt (retest={retest}, reject={reject}, momentum={momentum})."
+                    Reason = $"{symbol.Coin}: H1 Downtrend nhưng setup short chưa đạt (retest={retest}, reject={reject}, momentum={momentum}).",
+                    Coin = symbol.Coin
                 };
             }
 
@@ -473,7 +482,8 @@ namespace FuturesBot.Services
                 return new TradeSignal
                 {
                     Type = SignalType.Info,
-                    Reason = $"{symbol.Coin}: Không tìm được SL hợp lệ cho short."
+                    Reason = $"{symbol.Coin}: Không tìm được SL hợp lệ cho short.",
+                    Coin = symbol.Coin
                 };
             }
 
@@ -484,7 +494,8 @@ namespace FuturesBot.Services
                 return new TradeSignal
                 {
                     Type = SignalType.Info,
-                    Reason = $"{symbol.Coin}: SL invalid cho short."
+                    Reason = $"{symbol.Coin}: SL invalid cho short.",
+                    Coin = symbol.Coin
                 };
             }
 
@@ -497,7 +508,8 @@ namespace FuturesBot.Services
                 EntryPrice = entry,
                 StopLoss = sl,
                 TakeProfit = tp,
-                Reason = $"{symbol.Coin}: SHORT – trend down + retest EMA kháng cự gần nhất ({nearestResistance:F6}) + rejection + momentum + entryOffset (SL dựa trên swing/EMA89)."
+                Reason = $"{symbol.Coin}: SHORT – trend down + retest EMA kháng cự gần nhất ({nearestResistance:F6}) + rejection + momentum + entryOffset (SL dựa trên swing/EMA89).",
+                Coin = symbol.Coin
             };
         }
 
@@ -541,7 +553,8 @@ namespace FuturesBot.Services
                 return new TradeSignal
                 {
                     Type = SignalType.Info,
-                    Reason = $"{symbol.Coin}: SIDEWAY – không có bias rõ (ema34={ema34:F2}, ema89={ema89:F2}, ema200={ema200:F2})."
+                    Reason = $"{symbol.Coin}: SIDEWAY – không có bias rõ (ema34={ema34:F2}, ema89={ema89:F2}, ema200={ema200:F2}).",
+                    Coin = symbol.Coin
                 };
             }
 
@@ -607,7 +620,8 @@ namespace FuturesBot.Services
                     EntryPrice = entry,
                     StopLoss = sl,
                     TakeProfit = tp,
-                    Reason = $"{symbol.Coin}: SIDEWAY SCALP SHORT – bias down 15M, retest EMA (near={nearestRes:F2}) + rejection + RSI/MACD quay đầu."
+                    Reason = $"{symbol.Coin}: SIDEWAY SCALP SHORT – bias down 15M, retest EMA (near={nearestRes:F2}) + rejection + RSI/MACD quay đầu.",
+                    Coin = symbol.Coin
                 };
             }
 
@@ -669,7 +683,8 @@ namespace FuturesBot.Services
                     EntryPrice = entry,
                     StopLoss = sl,
                     TakeProfit = tp,
-                    Reason = $"{symbol.Coin}: SIDEWAY SCALP LONG – bias up 15M, retest EMA (near={nearestSup:F2}) + rejection + RSI/MACD quay đầu."
+                    Reason = $"{symbol.Coin}: SIDEWAY SCALP LONG – bias up 15M, retest EMA (near={nearestSup:F2}) + rejection + RSI/MACD quay đầu.",
+                    Coin = symbol.Coin
                 };
             }
         }

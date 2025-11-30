@@ -20,5 +20,9 @@ namespace FuturesBot.IServices
         Task CancelAllOpenOrdersAsync(string symbol);
 
         Task ClosePositionAsync(string symbol, decimal quantity);
+
+        Task<IReadOnlyList<OpenOrderInfo>> GetOpenOrdersAsync(string symbol);
+
+        Task<bool> PlaceStopOnlyAsync(string symbol, string side, string positionSide, decimal quantity, decimal stopPrice);
     }
 }

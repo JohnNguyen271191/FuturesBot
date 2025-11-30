@@ -21,7 +21,8 @@ var strategy   = new TradingStrategy(indicators);
 var risk       = new RiskManager(config);
 var notifier   = new SlackNotifierService(config);
 IExchangeClientService exchange = new BinanceFuturesClientService(config);
-var executor   = new TradeExecutorService(exchange, risk, config, notifier);
+var orderManagerService = new OrderManagerService(exchange, notifier);
+var executor   = new TradeExecutorService(exchange, risk, config, notifier, orderManagerService);
 var pnl        = new PnlReporterService(notifier);
 var liveSync   = new LiveSyncService(exchange, pnl);
 
