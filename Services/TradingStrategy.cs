@@ -406,7 +406,14 @@ namespace FuturesBot.Services
             }
 
             if (!shortBias && !longBias)
-                return new TradeSignal();
+            {
+                return new TradeSignal
+                {
+                    Type = SignalType.Info,
+                    Reason = $"{symbol.Coin}: SIDEWAY – không có bias rõ (ema34={ema34:F2}, ema89={ema89:F2}, ema200={ema200:F2}).",
+                    Coin = symbol.Coin
+                };
+            }
 
             // =========== SCALP SHORT =============
             if (shortBias)
