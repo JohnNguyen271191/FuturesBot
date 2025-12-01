@@ -311,7 +311,6 @@ namespace FuturesBot.Services
                           last15.Close > nearestSupport;
 
             // 4. MOMENTUM MACD + RSI
-            int i15 = candles15m.Count - 1;
             bool macdCrossUp = macd15[i15] > sig15[i15] && macd15[i15 - 1] <= sig15[i15 - 1];
             bool rsiBull = rsi15[i15] > RsiBullThreshold && rsi15[i15] >= rsi15[i15 - 1];
 
