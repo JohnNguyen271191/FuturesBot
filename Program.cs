@@ -138,9 +138,8 @@ static async Task RunSymbolWorkerAsync(
         }
         catch (Exception ex)
         {
-            // Quan trọng: catch mọi exception trong worker để loop không chết
             await notifier.SendAsync($"[ERROR] {symbol.Coin}: {ex}");
-            await Task.Delay(TimeSpan.FromSeconds(10));
+            await Task.Delay(TimeSpan.FromSeconds(30));
         }
 
         // Tick interval cho mỗi symbol
@@ -170,7 +169,7 @@ static async Task RunHousekeepingLoopAsync(
             await notifier.SendAsync($"[HOUSEKEEPING ERROR] {ex}");
         }
 
-        // Sync / PnL mỗi 30s (m muốn có thể tăng lên 60s cho nhẹ)
+        // Sync / PnL mỗi 30s
         await Task.Delay(TimeSpan.FromSeconds(30));
     }
 }
