@@ -71,7 +71,6 @@ var housekeepingTask = RunHousekeepingLoopAsync(config.Symbols, liveSync, pnl, n
 workerTasks.Add(housekeepingTask);
 await Task.WhenAll(workerTasks);
 
-
 // ============================================================================
 // WORKER PER SYMBOL
 // ============================================================================
@@ -88,11 +87,14 @@ static async Task RunSymbolWorkerAsync(
     var executor = scope.ServiceProvider.GetRequiredService<TradeExecutorService>();
     var exchange = scope.ServiceProvider.GetRequiredService<IExchangeClientService>();
 
+    // Báo 1 lần khi worker cho coin này được khởi động
+    await notifier.SendAsync($"[INFO] Worker started for {symbol.Coin}");
+
     // Delay random lúc start để các symbol không bắn API cùng lúc
     var startJitterMs = Random.Shared.Next(1000, 8000);
     await Task.Delay(startJitterMs);
 
-    // Chu kỳ loop phụ thuộc timeframe (3m/5m -> ~60s, 15m/1h -> ~60s...)
+    // Chu kỳ loop phụ thuộc timeframe (3m/5m -> ~60s, v.v.)
     var loopDelay = GetLoopDelayFromConfig(config);
 
     DateTime lastProcessedCandle = DateTime.MinValue;
@@ -101,9 +103,11 @@ static async Task RunSymbolWorkerAsync(
     {
         try
         {
-            // Lấy nến (timeframe nhanh + chậm)
-            var candlesFast = await exchange.GetRecentCandlesAsync(symbol.Coin, config.Intervals[0].FrameTime, 200);
-            var candlesSlow = await exchange.GetRecentCandlesAsync(symbol.Coin, config.Intervals[1].FrameTime, 200);
+            // Lấy nến: timeframe nhanh + chậm
+            var candlesFast = await exchange.GetRecentCandlesAsync(
+                symbol.Coin, config.Intervals[0].FrameTime, 200);
+            var candlesSlow = await exchange.GetRecentCandlesAsync(
+                symbol.Coin, config.Intervals[1].FrameTime, 200);
 
             if (candlesFast is null || candlesFast.Count < 2)
             {
@@ -136,6 +140,7 @@ static async Task RunSymbolWorkerAsync(
                     exitSignal.Type == SignalType.CloseShort)
                 {
                     await exchange.ClosePositionAsync(symbol.Coin, pos.PositionAmt);
+
                     // chờ cây mới rồi hãy xử lý tiếp
                     await Task.Delay(loopDelay);
                     continue;
@@ -148,18 +153,37 @@ static async Task RunSymbolWorkerAsync(
         }
         catch (Exception ex)
         {
-            // Nhận diện rate-limit 418 (I'm a teapot)
-            var isRateLimit =
-                ex is HttpRequestException httpEx && httpEx.Message.Contains("418") ||
-                ex.Message.Contains("418 (I'm a teapot)", StringComparison.OrdinalIgnoreCase);
+            // Phân loại lỗi rate-limit 418 / 429
+            var msg = ex.ToString();
 
-            var delay = isRateLimit
-                ? TimeSpan.FromSeconds(60)   // nghỉ lâu hơn khi bị limit
-                : TimeSpan.FromSeconds(15);  // lỗi khác thì nghỉ ngắn
+            bool is418 = msg.Contains("418", StringComparison.OrdinalIgnoreCase)
+                         && msg.Contains("teapot", StringComparison.OrdinalIgnoreCase);
+            bool is429 = msg.Contains("429", StringComparison.OrdinalIgnoreCase)
+                         || msg.Contains("Too Many Requests", StringComparison.OrdinalIgnoreCase);
 
-            await notifier.SendAsync($"[ERROR] {symbol.Coin}: {ex}");
+            string type;
+            TimeSpan delay;
+
+            if (is418)
+            {
+                type = "RATE_LIMIT_418";
+                delay = TimeSpan.FromSeconds(60); // bị block cứng, nghỉ lâu
+            }
+            else if (is429)
+            {
+                type = "RATE_LIMIT_429";
+                delay = TimeSpan.FromSeconds(20); // soft limit, nghỉ vừa vừa
+            }
+            else
+            {
+                type = "ERROR";
+                delay = TimeSpan.FromSeconds(10);
+            }
+
+            await notifier.SendAsync($"[{type}] {symbol.Coin}: {ex.Message}");
 
             await Task.Delay(delay);
+            continue; // skip delay ở cuối vòng, vì đã delay ở đây rồi
         }
 
         // Tick interval cho mỗi symbol (thêm jitter nhẹ tránh trùng)
@@ -190,7 +214,7 @@ static async Task RunHousekeepingLoopAsync(
             await notifier.SendAsync($"[HOUSEKEEPING ERROR] {ex}");
         }
 
-        // Sync / PnL mỗi 30s (ít request, không sao)
+        // Sync / PnL mỗi 30s
         await Task.Delay(TimeSpan.FromSeconds(30));
     }
 }
