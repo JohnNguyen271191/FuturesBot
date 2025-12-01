@@ -1,3 +1,4 @@
+using System.Net.Http;
 using FuturesBot.Config;
 using FuturesBot.IServices;
 using FuturesBot.Services;
@@ -87,28 +88,35 @@ static async Task RunSymbolWorkerAsync(
     var executor = scope.ServiceProvider.GetRequiredService<TradeExecutorService>();
     var exchange = scope.ServiceProvider.GetRequiredService<IExchangeClientService>();
 
+    // Delay random lúc start để các symbol không bắn API cùng lúc
+    var startJitterMs = Random.Shared.Next(1000, 8000);
+    await Task.Delay(startJitterMs);
+
+    // Chu kỳ loop phụ thuộc timeframe (3m/5m -> ~60s, 15m/1h -> ~60s...)
+    var loopDelay = GetLoopDelayFromConfig(config);
+
     DateTime lastProcessedCandle = DateTime.MinValue;
 
     while (true)
     {
         try
         {
-            // Lấy nến
-            var candles15m = await exchange.GetRecentCandlesAsync(symbol.Coin, config.Intervals[0].FrameTime, 200);
-            var candles1h = await exchange.GetRecentCandlesAsync(symbol.Coin, config.Intervals[1].FrameTime, 200);
+            // Lấy nến (timeframe nhanh + chậm)
+            var candlesFast = await exchange.GetRecentCandlesAsync(symbol.Coin, config.Intervals[0].FrameTime, 200);
+            var candlesSlow = await exchange.GetRecentCandlesAsync(symbol.Coin, config.Intervals[1].FrameTime, 200);
 
-            if (candles15m is null || candles15m.Count < 2)
+            if (candlesFast is null || candlesFast.Count < 2)
             {
-                await Task.Delay(TimeSpan.FromSeconds(10));
+                await Task.Delay(loopDelay);
                 continue;
             }
 
-            var lastCandle = candles15m[^1];
+            var lastCandle = candlesFast[^1];
 
             // Không xử lý lại cùng 1 cây
             if (lastCandle.OpenTime <= lastProcessedCandle)
             {
-                await Task.Delay(TimeSpan.FromSeconds(2));
+                await Task.Delay(loopDelay);
                 continue;
             }
 
@@ -122,28 +130,41 @@ static async Task RunSymbolWorkerAsync(
             // EXIT logic
             if (hasLong || hasShort)
             {
-                var exitSignal = strategy.GenerateExitSignal(candles15m, hasLong, hasShort, symbol);
+                var exitSignal = strategy.GenerateExitSignal(candlesFast, hasLong, hasShort, symbol);
 
                 if (exitSignal.Type == SignalType.CloseLong ||
                     exitSignal.Type == SignalType.CloseShort)
                 {
                     await exchange.ClosePositionAsync(symbol.Coin, pos.PositionAmt);
+                    // chờ cây mới rồi hãy xử lý tiếp
+                    await Task.Delay(loopDelay);
                     continue;
                 }
             }
 
             // ENTRY logic
-            var entrySignal = strategy.GenerateSignal(candles15m, candles1h, symbol);
+            var entrySignal = strategy.GenerateSignal(candlesFast, candlesSlow, symbol);
             await executor.HandleSignalAsync(entrySignal, symbol);
         }
         catch (Exception ex)
         {
+            // Nhận diện rate-limit 418 (I'm a teapot)
+            var isRateLimit =
+                ex is HttpRequestException httpEx && httpEx.Message.Contains("418") ||
+                ex.Message.Contains("418 (I'm a teapot)", StringComparison.OrdinalIgnoreCase);
+
+            var delay = isRateLimit
+                ? TimeSpan.FromSeconds(60)   // nghỉ lâu hơn khi bị limit
+                : TimeSpan.FromSeconds(15);  // lỗi khác thì nghỉ ngắn
+
             await notifier.SendAsync($"[ERROR] {symbol.Coin}: {ex}");
-            await Task.Delay(TimeSpan.FromSeconds(15));
+
+            await Task.Delay(delay);
         }
 
-        // Tick interval cho mỗi symbol
-        await Task.Delay(TimeSpan.FromSeconds(15));
+        // Tick interval cho mỗi symbol (thêm jitter nhẹ tránh trùng)
+        var jitterMs = Random.Shared.Next(0, 2000);
+        await Task.Delay(loopDelay + TimeSpan.FromMilliseconds(jitterMs));
     }
 }
 
@@ -169,7 +190,50 @@ static async Task RunHousekeepingLoopAsync(
             await notifier.SendAsync($"[HOUSEKEEPING ERROR] {ex}");
         }
 
-        // Sync / PnL mỗi 30s
+        // Sync / PnL mỗi 30s (ít request, không sao)
         await Task.Delay(TimeSpan.FromSeconds(30));
     }
+}
+
+// ============================================================================
+// HELPERS: chuyển timeframe -> delay hợp lý
+// ============================================================================
+
+static TimeSpan GetLoopDelayFromConfig(BotConfig config)
+{
+    // Lấy thời gian nhỏ nhất trong 2 timeframe (vd 3m và 5m -> 3m)
+    var tfSeconds = config.Intervals
+        .Select(i => ParseFrameTimeToSeconds(i.FrameTime))
+        .Where(s => s > 0)
+        .DefaultIfEmpty(30)
+        .Min();
+
+    // Poll khoảng 1/3 timeframe, clamp trong [10s, 60s]
+    var pollSeconds = Math.Clamp(tfSeconds / 3, 10, 60);
+
+    return TimeSpan.FromSeconds(pollSeconds);
+}
+
+static int ParseFrameTimeToSeconds(string frame)
+{
+    if (string.IsNullOrWhiteSpace(frame)) return 0;
+
+    frame = frame.Trim().ToLowerInvariant();
+
+    return frame switch
+    {
+        "1m" or "m1" => 60,
+        "3m" or "m3" => 3 * 60,
+        "5m" or "m5" => 5 * 60,
+        "15m" or "m15" => 15 * 60,
+        "30m" or "m30" => 30 * 60,
+
+        "1h" or "h1" => 60 * 60,
+        "2h" or "h2" => 2 * 60 * 60,
+        "4h" or "h4" => 4 * 60 * 60,
+
+        "1d" or "d1" => 24 * 60 * 60,
+
+        _ => 0 // nếu không parse được thì để 0, sẽ dùng default 30s
+    };
 }
