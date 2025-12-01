@@ -37,7 +37,7 @@ namespace FuturesBot.Services
 
         /// <summary>
         /// Gọi sau khi đã gửi LIMIT order.
-        /// - Nếu setup bị phá (giá phá SL hoặc phá EMA34 mạnh) → CancelAllOpenOrders.
+        /// - Nếu setup bị phá (giá phá SL hoặc phá EMA “ranh giới” theo entry) → CancelAllOpenOrders.
         /// - Nếu LIMIT khớp (có positionAmt != 0) → tự động chuyển sang MonitorPositionAsync.
         /// </summary>
         public async Task MonitorLimitOrderAsync(TradeSignal signal)
@@ -83,32 +83,52 @@ namespace FuturesBot.Services
                     continue;
 
                 var last  = candles[^1];
+
+                // EMA động
                 decimal ema34 = ComputeEmaLast(candles, 34);
+                decimal ema89 = ComputeEmaLast(candles, 89);
+                decimal ema200 = ComputeEmaLast(candles, 200);
+
+                decimal entry = signal.EntryPrice ?? last.Close;
+
+                // Ranh giới “đảo trend” tùy theo vị trí entry so với EMA
+                decimal boundary = isLong
+                    ? GetDynamicBoundaryForLong(entry, ema34, ema89, ema200)
+                    : GetDynamicBoundaryForShort(entry, ema34, ema89, ema200);
 
                 bool setupBroken = false;
 
                 if (isLong)
                 {
-                    // giá phá xuống SL hoặc phá EMA34 quá mạnh
+                    // phá xuống SL
                     if (last.Close < signal.StopLoss)
                         setupBroken = true;
 
-                    if (last.Close < ema34 * (1 - EmaBreakTolerance))
+                    // Long: chỉ coi là hỏng setup khi giá đóng dưới EMA boundary khá sâu
+                    if (boundary > 0 &&
+                        last.Close < boundary * (1 - EmaBreakTolerance))
+                    {
                         setupBroken = true;
+                    }
                 }
                 else
                 {
-                    // short: giá phá lên SL hoặc phá EMA34 quá mạnh
+                    // Short: phá lên SL
                     if (last.Close > signal.StopLoss)
                         setupBroken = true;
 
-                    if (last.Close > ema34 * (1 + EmaBreakTolerance))
+                    // Short: chỉ coi là hỏng setup khi giá đóng trên EMA boundary khá sâu
+                    if (boundary > 0 &&
+                        last.Close > boundary * (1 + EmaBreakTolerance))
+                    {
                         setupBroken = true;
+                    }
                 }
 
                 if (setupBroken)
                 {
-                    await _notify.SendAsync($"[{symbol}] Setup bị phá → Hủy LIMIT.");
+                    await _notify.SendAsync(
+                        $"[{symbol}] Setup bị phá (EMA boundary={boundary:F6}) → Hủy LIMIT.");
                     await _exchange.CancelAllOpenOrdersAsync(symbol);
                     return;
                 }
@@ -121,8 +141,8 @@ namespace FuturesBot.Services
 
         /// <summary>
         /// Gọi sau khi vào lệnh (MARKET hoặc LIMIT đã khớp).
-        /// - Tự động early-exit khi đạt 0.5R nhưng momentum đảo.
-        /// - Đóng ngay nếu hard reverse (engulfing phá cấu trúc).
+        /// - Tự động early-exit khi đạt 0.5R nhưng momentum đảo (nến ngược màu + vol).
+        /// - Đóng ngay nếu hard reverse (giá phá EMA boundary ngược chiều).
         /// - Trailing SL tại 1R và 1.5R.
         /// </summary>
         public async Task MonitorPositionAsync(TradeSignal signal)
@@ -182,7 +202,7 @@ namespace FuturesBot.Services
                 if (candles.Count < 3)
                     continue;
 
-                var (reverse, hardReverse) = CheckMomentumReversal(candles, isLong);
+                var (reverse, hardReverse) = CheckMomentumReversal(candles, isLong, entry);
 
                 // EARLY EXIT: đã lãi >= 0.5R nhưng momentum đảo
                 if (rr >= EarlyExitRR && reverse)
@@ -194,11 +214,11 @@ namespace FuturesBot.Services
                     return;
                 }
 
-                // HARD REVERSE: nến engulfing phá cấu trúc, cắt sớm để tránh đảo trend mạnh
-                if (hardReverse && rr >= -HardReverseRR) // cho phép cắt sớm, lỗ nhỏ hoặc hòa
+                // HARD REVERSE: giá phá EMA boundary ngược chiều, RR chưa lỗ quá -0.2R
+                if (hardReverse && rr >= -HardReverseRR)
                 {
                     await _notify.SendAsync(
-                        $"[{symbol}] HARD REVERSE: giá đảo mạnh, RR={rr:F2} → đóng ngay để bảo vệ vốn.");
+                        $"[{symbol}] HARD REVERSE (phá EMA boundary ngược trend), RR={rr:F2} → đóng ngay để bảo vệ vốn.");
 
                     await _exchange.ClosePositionAsync(symbol, qty);
                     return;
@@ -233,28 +253,52 @@ namespace FuturesBot.Services
 
         /// <summary>
         /// reverse = momentum yếu đi / đảo màu + vol cao
-        /// hardReverse = nến engulfing phá high/low của nến trước
+        /// hardReverse = giá phá EMA boundary ngược chiều (dùng EMA dynamic theo entry)
         /// </summary>
-        private (bool reverse, bool hardReverse) CheckMomentumReversal(IReadOnlyList<Candle> candles15m, bool isLong)
+        private (bool reverse, bool hardReverse) CheckMomentumReversal(
+            IReadOnlyList<Candle> candles15m,
+            bool isLong,
+            decimal entryPrice)
         {
             int i = candles15m.Count - 1;
             var c0 = candles15m[i];     // nến hiện tại
             var c1 = candles15m[i - 1]; // nến trước
 
-            bool reverse = false;
+            // EMA tại nến hiện tại
+            decimal ema34 = ComputeEmaLast(candles15m, 34);
+            decimal ema89 = ComputeEmaLast(candles15m, 89);
+            decimal ema200 = ComputeEmaLast(candles15m, 200);
+
+            decimal boundary = isLong
+                ? GetDynamicBoundaryForLong(entryPrice, ema34, ema89, ema200)
+                : GetDynamicBoundaryForShort(entryPrice, ema34, ema89, ema200);
+
+            bool reverse;
             bool hard = false;
 
             if (isLong)
             {
-                // nến đỏ, vol không nhỏ hơn quá nhiều so với trước
+                // Long: nến đỏ + vol không quá nhỏ → dấu hiệu chốt lời / đảo nhẹ
                 reverse = c0.Close < c0.Open && c0.Volume >= c1.Volume * 0.8m;
-                // giá đóng dưới đáy nến trước → engulfing giảm
-                hard = c0.Close < c1.Low;
+
+                if (boundary > 0)
+                {
+                    // Hard reverse: giá đóng dưới EMA boundary khá sâu
+                    bool breakDown = c0.Close < boundary * (1 - EmaBreakTolerance);
+                    hard = breakDown;
+                }
             }
             else
             {
+                // Short: nến xanh + vol không quá nhỏ
                 reverse = c0.Close > c0.Open && c0.Volume >= c1.Volume * 0.8m;
-                hard = c0.Close > c1.High;
+
+                if (boundary > 0)
+                {
+                    // Hard reverse: giá đóng trên EMA boundary khá sâu
+                    bool breakUp = c0.Close > boundary * (1 + EmaBreakTolerance);
+                    hard = breakUp;
+                }
             }
 
             return (reverse, hard);
@@ -310,6 +354,56 @@ namespace FuturesBot.Services
             }
 
             return ema;
+        }
+
+        // =====================================================================
+        //           HELPER: EMA BOUNDARY ĐỘNG CHO LONG / SHORT
+        // =====================================================================
+
+        /// <summary>
+        /// Short: lấy EMA gần nhất phía TRÊN entry (nếu có).
+        /// Ví dụ downtrend: entry giữa 34–89 → boundary = EMA89.
+        /// </summary>
+        private static decimal GetDynamicBoundaryForShort(decimal entry, decimal ema34, decimal ema89, decimal ema200)
+        {
+            var emas = new List<decimal>();
+            if (ema34 > 0) emas.Add(ema34);
+            if (ema89 > 0) emas.Add(ema89);
+            if (ema200 > 0) emas.Add(ema200);
+
+            if (emas.Count == 0)
+                return 0m;
+
+            // EMA >= entry, chọn cái nhỏ nhất (gần entry nhất phía trên)
+            var candidate = emas
+                .Where(e => e >= entry)
+                .OrderBy(e => e)
+                .FirstOrDefault();
+
+            return candidate == 0m ? 0m : candidate;
+        }
+
+        /// <summary>
+        /// Long: lấy EMA gần nhất phía DƯỚI entry (nếu có).
+        /// Ví dụ uptrend: entry giữa 89–34 → boundary = EMA89.
+        /// </summary>
+        private static decimal GetDynamicBoundaryForLong(decimal entry, decimal ema34, decimal ema89, decimal ema200)
+        {
+            var emas = new List<decimal>();
+            if (ema34 > 0) emas.Add(ema34);
+            if (ema89 > 0) emas.Add(ema89);
+            if (ema200 > 0) emas.Add(ema200);
+
+            if (emas.Count == 0)
+                return 0m;
+
+            // EMA <= entry, chọn cái lớn nhất (gần entry nhất phía dưới)
+            var candidate = emas
+                .Where(e => e <= entry)
+                .OrderByDescending(e => e)
+                .FirstOrDefault();
+
+            return candidate == 0m ? 0m : candidate;
         }
     }
 }
