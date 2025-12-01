@@ -166,8 +166,8 @@ namespace FuturesBot.Services
             bool strongVolume = avgVol > 0 &&
                                 last15.Volume >= avgVol;
 
-            if (!strongVolume && !extremeUp && !extremeDump)
-                return new TradeSignal();
+            //if (!strongVolume && !extremeUp && !extremeDump)
+            //    return new TradeSignal();
             // ==== BUILD LONG ====
             if (upTrend)
             {
