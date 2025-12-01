@@ -18,6 +18,9 @@ namespace FuturesBot.Services
     /// - Khi đang có vị thế:
     ///       LONG  => nếu đóng dưới EMA34 M15 => EXIT LONG
     ///       SHORT => nếu đóng trên EMA34 M15 => EXIT SHORT
+    /// - Sideway scalp:
+    ///       + Dùng khi H1 có bias rõ nhưng M15 chưa align / đang sideway quanh EMA
+    ///       + Chỉ trade theo hướng bias H1 (H1 down chỉ short, H1 up chỉ long)
     /// </summary>
     public class TradingStrategy(IndicatorService indicators) : IStrategyService
     {
@@ -41,8 +44,8 @@ namespace FuturesBot.Services
         private const decimal ExtremeEmaBoost = 0.01m;       // 1%
 
         // Entry offset để tránh đỉnh/đáy
-        private const decimal EntryOffsetPercent = 0.003m;   // 0.3%
-        private const decimal EntryOffsetPercentForScal = 0.001m;  // 0.1%
+        private const decimal EntryOffsetPercent = 0.003m;          // 0.3% cho trend
+        private const decimal EntryOffsetPercentForScal = 0.001m;   // 0.1% cho scalp
 
         // SL an toàn quanh EMA89 (0.3% xa hơn EMA89)
         private const decimal Ema89StopExtraPercent = 0.003m;
@@ -153,7 +156,12 @@ namespace FuturesBot.Services
                 };
             }
 
-            // =================== XÁC NHẬN TREND =========================
+            // =================== XÁC NHẬN TREND H1 (BIAS) ======================
+
+            bool h1BiasUp = ema34_h1[iH1] > ema89_h1[iH1];
+            bool h1BiasDown = ema34_h1[iH1] < ema89_h1[iH1];
+
+            // =================== XÁC NHẬN TREND MẠNH (H1 + M15) ===============
 
             bool upTrend =
                 lastH1.Close > ema34_h1[iH1] &&
@@ -178,24 +186,49 @@ namespace FuturesBot.Services
                 macd15[i15] < sig15[i15] &&
                 rsi15[i15] < ExtremeRsiLow;
 
-            // Không có trend rõ và không extreme -> thử sideway scalp
-            if (!upTrend && !downTrend && !extremeUp && !extremeDump)
+            // =================== SIDEWAY / PULLBACK SCALP ======================
+            //
+            // Logic:
+            // - Nếu không extreme
+            // - Và:
+            //    + Hoặc: không có upTrend/downTrend rõ
+            //    + Hoặc: H1 có bias nhưng giá M15 đang "kẹt" giữa các EMA (pullback)
+            //   → ưu tiên thử sideway scalp theo hướng H1
+            // ===================================================================
+
+            if (!extremeUp && !extremeDump)
             {
-                var sidewaySignal = BuildSidewayScalp(
-                    candles15m,
-                    ema34_15,
-                    ema89_15,
-                    ema200_15,
-                    rsi15,
-                    macd15,
-                    sig15,
-                    last15,
-                    symbol);
+                bool m15PullbackDown =
+                    h1BiasDown &&
+                    ema34_15Now <= last15.Close &&
+                    last15.Close <= ema89_15Now;   // giá nằm giữa EMA34-EMA89 trong H1 downtrend
 
-                if (sidewaySignal.Type != SignalType.None)
-                    return sidewaySignal;
+                bool m15PullbackUp =
+                    h1BiasUp &&
+                    ema89_15Now <= last15.Close &&
+                    last15.Close <= ema34_15Now;   // giá nằm giữa EMA89-EMA34 trong H1 uptrend
 
-                return new TradeSignal();
+                bool shouldTrySideway =
+                    (!upTrend && !downTrend) || m15PullbackDown || m15PullbackUp;
+
+                if (shouldTrySideway)
+                {
+                    var sidewaySignal = BuildSidewayScalp(
+                        candles15m,
+                        ema34_15,
+                        ema89_15,
+                        ema200_15,
+                        rsi15,
+                        macd15,
+                        sig15,
+                        last15,
+                        symbol,
+                        h1BiasUp,
+                        h1BiasDown);
+
+                    if (sidewaySignal.Type != SignalType.None)
+                        return sidewaySignal;
+                }
             }
 
             // =================== VOLUME LỌC PULLBACK =====================
@@ -207,7 +240,7 @@ namespace FuturesBot.Services
             if (!strongVolume && !extremeUp && !extremeDump)
                 return new TradeSignal();
 
-            // =================== BUILD LONG / SHORT ======================
+            // =================== BUILD LONG / SHORT (THEO TREND MẠNH) =========
 
             // --- LONG ---
             if (upTrend /* không dùng extremeUp để cho phép đu trend */)
@@ -546,7 +579,9 @@ namespace FuturesBot.Services
             IReadOnlyList<decimal> macd15,
             IReadOnlyList<decimal> sig15,
             Candle last15,
-            Symbol symbol)
+            Symbol symbol,
+            bool h1BiasUp,
+            bool h1BiasDown)
         {
             int i15 = candles15m.Count - 1;
 
@@ -554,14 +589,34 @@ namespace FuturesBot.Services
             decimal ema89 = ema89_15[i15];
             decimal ema200 = ema200_15[i15];
 
-            // 1) XÁC ĐỊNH BIAS SIDEWAY THEO EMA 15M + VỊ TRÍ GIÁ
-            bool shortBias =
+            // 1) BIAS EMA 15M (không dùng giá)
+            bool shortBias15 =
                 ema34 <= ema89 &&
                 ema34 <= ema200;
 
-            bool longBias =
+            bool longBias15 =
                 ema34 >= ema89 &&
                 ema34 >= ema200;
+
+            // 2) Ưu tiên bias theo H1
+            bool shortBias;
+            bool longBias;
+
+            if (h1BiasDown)
+            {
+                shortBias = true;
+                longBias = false;
+            }
+            else if (h1BiasUp)
+            {
+                longBias = true;
+                shortBias = false;
+            }
+            else
+            {
+                shortBias = shortBias15;
+                longBias = longBias15;
+            }
 
             if (!shortBias && !longBias)
             {
@@ -598,15 +653,15 @@ namespace FuturesBot.Services
                     last15.Close < nearestRes &&
                     bearBody;
 
-                // Momentum đảo chiều: RSI cao rồi gãy xuống, MACD cong xuống
+                // Momentum đảo chiều: RSI cao + bắt đầu gãy, MACD cong/đứng
+                bool rsiHigh = rsi15[i15] >= 55m;
                 bool rsiTurnDown =
-                    rsi15[i15 - 1] >= 50m &&
                     rsi15[i15] <= rsi15[i15 - 1];
 
-                bool macdTurnDown =
+                bool macdDownOrFlat =
                     macd15[i15] <= macd15[i15 - 1];
 
-                bool momentum = rsiTurnDown && macdTurnDown;
+                bool momentum = rsiHigh && (rsiTurnDown || macdDownOrFlat);
 
                 if (!(touchRes && reject && momentum))
                     return new TradeSignal();
@@ -633,7 +688,7 @@ namespace FuturesBot.Services
                     EntryPrice = entry,
                     StopLoss = sl,
                     TakeProfit = tp,
-                    Reason = $"{symbol.Coin}: SIDEWAY SCALP SHORT – bias down 15M, retest EMA (near={nearestRes:F2}) + rejection + RSI/MACD quay đầu.",
+                    Reason = $"{symbol.Coin}: SIDEWAY SCALP SHORT – bias down (H1) + retest EMA (near={nearestRes:F2}) + rejection + RSI/MACD quay đầu.",
                     Coin = symbol.Coin
                 };
             }
@@ -659,14 +714,14 @@ namespace FuturesBot.Services
                     last15.Close > nearestSup &&
                     bullBody;
 
+                bool rsiHighEnough = rsi15[i15] >= 45m;
                 bool rsiTurnUp =
-                    rsi15[i15 - 1] <= 50m &&
                     rsi15[i15] >= rsi15[i15 - 1];
 
-                bool macdTurnUp =
+                bool macdUpOrFlat =
                     macd15[i15] >= macd15[i15 - 1];
 
-                bool momentum = rsiTurnUp && macdTurnUp;
+                bool momentum = rsiHighEnough && (rsiTurnUp || macdUpOrFlat);
 
                 if (!(touchSup && reject && momentum))
                     return new TradeSignal();
@@ -693,7 +748,7 @@ namespace FuturesBot.Services
                     EntryPrice = entry,
                     StopLoss = sl,
                     TakeProfit = tp,
-                    Reason = $"{symbol.Coin}: SIDEWAY SCALP LONG – bias up 15M, retest EMA (near={nearestSup:F2}) + rejection + RSI/MACD quay đầu.",
+                    Reason = $"{symbol.Coin}: SIDEWAY SCALP LONG – bias up (H1) + retest EMA (near={nearestSup:F2}) + rejection + RSI/MACD quay đầu.",
                     Coin = symbol.Coin
                 };
             }
