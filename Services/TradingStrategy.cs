@@ -154,19 +154,27 @@ namespace FuturesBot.Services
 
             // =================== XÁC NHẬN TREND =========================
 
-            bool upTrend =
+            // Trend H1 (bias chính)
+            bool h1UpTrend =
                 lastH1.Close > ema34_h1[iH1] &&
-                ema34_h1[iH1] > ema89_h1[iH1] &&
+                ema34_h1[iH1] > ema89_h1[iH1];
+
+            bool h1DownTrend =
+                lastH1.Close < ema34_h1[iH1] &&
+                ema34_h1[iH1] < ema89_h1[iH1];
+
+            // Trend kết hợp H1 + M15 (entry chuẩn theo trend)
+            bool upTrend =
+                h1UpTrend &&
                 last15.Close > ema34_15Now &&
                 ema34_15Now > ema89_15Now;
 
             bool downTrend =
-                lastH1.Close < ema34_h1[iH1] &&
-                ema34_h1[iH1] < ema89_h1[iH1] &&
+                h1DownTrend &&
                 last15.Close < ema34_15Now &&
                 ema34_15Now < ema89_15Now;
 
-            // Extreme cases (vẫn giữ để tham khảo – KHÔNG dùng để cho phép entry đu trend)
+            // Extreme cases (vẫn giữ để filter, không dùng để đu trend)
             bool extremeUp =
                 last15.Close > ema34_15Now * (1 + ExtremeEmaBoost) &&
                 macd15[i15] > sig15[i15] &&
@@ -177,7 +185,7 @@ namespace FuturesBot.Services
                 macd15[i15] < sig15[i15] &&
                 rsi15[i15] < ExtremeRsiLow;
 
-            // Không có trend rõ và không extreme -> thử sideway scalp
+            // Không có trend rõ (M15 chưa align) và không extreme -> dùng SIDEWAY SCALP
             if (!upTrend && !downTrend && !extremeUp && !extremeDump)
             {
                 var sidewaySignal = BuildSidewayScalp(
@@ -189,7 +197,9 @@ namespace FuturesBot.Services
                     macd15,
                     sig15,
                     last15,
-                    symbol);
+                    symbol,
+                    h1UpTrend,
+                    h1DownTrend);
 
                 if (sidewaySignal.Type != SignalType.None)
                     return sidewaySignal;
@@ -209,7 +219,7 @@ namespace FuturesBot.Services
             // =================== BUILD LONG / SHORT ======================
 
             // --- LONG ---
-            if (upTrend /* không dùng extremeUp để cho phép đu trend */)
+            if (upTrend)
             {
                 var longSignal = BuildLong(
                     candles15m,
@@ -228,7 +238,7 @@ namespace FuturesBot.Services
             }
 
             // --- SHORT ---
-            if (downTrend /* không dùng extremeDump */)
+            if (downTrend)
             {
                 var shortSignal = BuildShort(
                     candles15m,
@@ -545,7 +555,9 @@ namespace FuturesBot.Services
             IReadOnlyList<decimal> macd15,
             IReadOnlyList<decimal> sig15,
             Candle last15,
-            Symbol symbol)
+            Symbol symbol,
+            bool h1UpTrend,
+            bool h1DownTrend)
         {
             int i15 = candles15m.Count - 1;
 
@@ -553,16 +565,39 @@ namespace FuturesBot.Services
             decimal ema89 = ema89_15[i15];
             decimal ema200 = ema200_15[i15];
 
-            // 1) XÁC ĐỊNH BIAS SIDEWAY THEO EMA 15M + VỊ TRÍ GIÁ
-            bool shortBias =
+            // 1) BIAS EMA TRÊN 15M
+            bool shortBias15 =
                 last15.Close < ema34 &&
                 ema34 <= ema89 &&
                 ema34 <= ema200;
 
-            bool longBias =
+            bool longBias15 =
                 last15.Close > ema34 &&
                 ema34 >= ema89 &&
                 ema34 >= ema200;
+
+            // 2) ƯU TIÊN BIAS THEO TREND H1
+            bool shortBias;
+            bool longBias;
+
+            if (h1DownTrend)
+            {
+                // H1 down → chỉ scalp SHORT, không LONG ngược trend
+                shortBias = true;
+                longBias = false;
+            }
+            else if (h1UpTrend)
+            {
+                // H1 up → chỉ scalp LONG
+                longBias = true;
+                shortBias = false;
+            }
+            else
+            {
+                // Không có trend H1 rõ → dùng bias 15m
+                shortBias = shortBias15;
+                longBias = longBias15;
+            }
 
             if (!shortBias && !longBias)
             {
@@ -634,12 +669,13 @@ namespace FuturesBot.Services
                     EntryPrice = entry,
                     StopLoss = sl,
                     TakeProfit = tp,
-                    Reason = $"{symbol.Coin}: SIDEWAY SCALP SHORT – bias down 15M, retest EMA (near={nearestRes:F2}) + rejection + RSI/MACD quay đầu.",
+                    Reason = $"{symbol.Coin}: SIDEWAY SCALP SHORT – H1 downtrend, retest EMA (near={nearestRes:F2}) + rejection + RSI/MACD quay đầu.",
                     Coin = symbol.Coin
                 };
             }
 
             // ========================== SCALP LONG ============================
+            // (Chỉ dùng khi H1 uptrend)
             {
                 var supports = new List<decimal>();
                 if (ema89 < last15.Close) supports.Add(ema89);
@@ -694,7 +730,7 @@ namespace FuturesBot.Services
                     EntryPrice = entry,
                     StopLoss = sl,
                     TakeProfit = tp,
-                    Reason = $"{symbol.Coin}: SIDEWAY SCALP LONG – bias up 15M, retest EMA (near={nearestSup:F2}) + rejection + RSI/MACD quay đầu.",
+                    Reason = $"{symbol.Coin}: SIDEWAY SCALP LONG – H1 uptrend, retest EMA (near={nearestSup:F2}) + rejection + RSI/MACD quay đầu.",
                     Coin = symbol.Coin
                 };
             }
