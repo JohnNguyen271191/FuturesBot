@@ -108,7 +108,7 @@ static async Task RunSymbolWorkerAsync(
             // Không xử lý lại cùng 1 cây
             if (lastCandle.OpenTime <= lastProcessedCandle)
             {
-                await Task.Delay(TimeSpan.FromSeconds(5));
+                await Task.Delay(TimeSpan.FromSeconds(2));
                 continue;
             }
 
@@ -139,11 +139,11 @@ static async Task RunSymbolWorkerAsync(
         catch (Exception ex)
         {
             await notifier.SendAsync($"[ERROR] {symbol.Coin}: {ex}");
-            await Task.Delay(TimeSpan.FromSeconds(30));
+            await Task.Delay(TimeSpan.FromSeconds(5));
         }
 
         // Tick interval cho mỗi symbol
-        await Task.Delay(TimeSpan.FromSeconds(30));
+        await Task.Delay(TimeSpan.FromSeconds(5));
     }
 }
 

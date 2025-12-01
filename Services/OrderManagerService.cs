@@ -1,3 +1,4 @@
+using FuturesBot.Config;
 using FuturesBot.IServices;
 using FuturesBot.Models;
 using static FuturesBot.Utils.EnumTypesHelper;
@@ -19,10 +20,11 @@ namespace FuturesBot.Services
     /// 3) Hoặc trong MonitorLimitOrderAsync, khi phát hiện vị thế đã mở
     ///    thì tự gọi MonitorPositionAsync.
     /// </summary>
-    public class OrderManagerService(IExchangeClientService exchange, SlackNotifierService notify)
+    public class OrderManagerService(IExchangeClientService exchange, SlackNotifierService notify, BotConfig config)
     {
         private readonly IExchangeClientService _exchange = exchange;
         private readonly SlackNotifierService _notify = notify;
+        private readonly BotConfig _botConfig = config;
 
         private const int MonitorIntervalMs = 3000;   // 3 giây
         private const decimal EarlyExitRR = 0.5m;     // chốt non khi đạt >= 0.5R và momentum đảo
@@ -76,7 +78,7 @@ namespace FuturesBot.Services
                 }
 
                 // 2) Còn LIMIT đang chờ → kiểm tra setup còn hợp lệ không
-                var candles = await _exchange.GetRecentCandlesAsync(symbol, "15m", 80);
+                var candles = await _exchange.GetRecentCandlesAsync(symbol, _botConfig.Intervals[0].FrameTime, 80);
                 if (candles.Count == 0)
                     continue;
 
@@ -176,7 +178,7 @@ namespace FuturesBot.Services
                     : (entry - price) / risk;
 
                 // 3) Xem momentum 15m để quyết định early-exit / hard reverse
-                var candles = await _exchange.GetRecentCandlesAsync(symbol, "15m", 40);
+                var candles = await _exchange.GetRecentCandlesAsync(symbol, _botConfig.Intervals[0].FrameTime, 40);
                 if (candles.Count < 3)
                     continue;
 
