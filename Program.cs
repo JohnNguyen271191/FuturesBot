@@ -129,11 +129,11 @@ static async Task RunSymbolWorkerAsync(
             await notifier.SendAsync($"[ERROR] {symbol.Coin}: {ex}");
         }
 
-        // Các tác vụ chia sẻ, luôn chạy mỗi vòng (khoảng 30s/lần)
+        // Các tác vụ chia sẻ, luôn chạy mỗi vòng (khoảng 10s/lần)
         await liveSync.SyncAsync(new[] { symbol });
         await pnl.SendQuickDailySummary();
 
         // Tick interval
-        await Task.Delay(TimeSpan.FromSeconds(30));
+        await Task.Delay(TimeSpan.FromSeconds(10));
     }
 }
