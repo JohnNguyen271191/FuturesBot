@@ -42,6 +42,7 @@ namespace FuturesBot.Services
 
         // Entry offset để tránh đỉnh/đáy
         private const decimal EntryOffsetPercent = 0.003m;   // 0.3%
+        private const decimal EntryOffsetPercentForScal = 0.001m;  // 0.1%
 
         // SL an toàn quanh EMA89 (0.3% xa hơn EMA89)
         private const decimal Ema89StopExtraPercent = 0.003m;
@@ -610,7 +611,7 @@ namespace FuturesBot.Services
                 if (!(touchRes && reject && momentum))
                     return new TradeSignal();
 
-                decimal rawEntry = last15.Close * (1 + EntryOffsetPercent);
+                decimal rawEntry = last15.Close * (1 + EntryOffsetPercentForScal);
 
                 decimal swingHigh = PriceActionHelper.FindSwingHigh(candles15m, i15, SwingLookback);
 
@@ -670,7 +671,7 @@ namespace FuturesBot.Services
                 if (!(touchSup && reject && momentum))
                     return new TradeSignal();
 
-                decimal rawEntry = last15.Close * (1 - EntryOffsetPercent);
+                decimal rawEntry = last15.Close * (1 - EntryOffsetPercentForScal);
 
                 decimal swingLow = PriceActionHelper.FindSwingLow(candles15m, i15, SwingLookback);
 
