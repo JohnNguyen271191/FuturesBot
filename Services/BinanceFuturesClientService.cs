@@ -479,6 +479,39 @@ namespace FuturesBot.Services
             return true;
         }
 
+        public async Task<NetPnlResult> GetNetPnlAsync(string symbol)
+        {
+            var result = new NetPnlResult();
+
+            // 1️⃣ Lấy unrealized PnL từ PositionRisk
+            var pos = await GetPositionAsync(symbol);
+
+            // 2️⃣ Lấy các record mới nhất từ /income trong 24 giờ
+            var since = DateTime.UtcNow.AddDays(-1);
+
+            var incomeList = await GetIncomeAsync(symbol, since);
+
+            // 3️⃣ Tách theo loại income
+            foreach (var i in incomeList)
+            {
+                switch (i.IncomeType)
+                {
+                    case "REALIZED_PNL":
+                        result.Realized += i.Income;
+                        break;
+
+                    case "COMMISSION":
+                        result.Commission += Math.Abs(i.Income); // commission luôn âm
+                        break;
+
+                    case "FUNDING_FEE":
+                        result.Funding += i.Income; // funding có thể âm hoặc dương
+                        break;
+                }
+            }
+
+            return result;
+        }        
 
         // ==========================
         //       PRIVATE HELPERS
@@ -573,6 +606,39 @@ namespace FuturesBot.Services
 
             var local = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             return local - _serverTimeOffsetMs;
+        }
+
+        private async Task<List<IncomeRecord>> GetIncomeAsync(string symbol, DateTime startTime)
+        {
+            var query = new Dictionary<string, string>
+            {
+                ["symbol"] = symbol,
+                ["limit"] = "1000",
+                ["startTime"] = new DateTimeOffset(startTime)
+                                    .ToUnixTimeMilliseconds()
+                                    .ToString()
+            };
+
+            var json = await SignedGetAsync("/fapi/v1/income", query);
+
+            var list = new List<IncomeRecord>();
+            using var doc = JsonDocument.Parse(json);
+
+            foreach (var el in doc.RootElement.EnumerateArray())
+            {
+                list.Add(new IncomeRecord
+                {
+                    Symbol = el.GetProperty("symbol").GetString() ?? "",
+                    IncomeType = el.GetProperty("incomeType").GetString() ?? "",
+                    Income = decimal.Parse(
+                                    el.GetProperty("income").GetString() ?? "0",
+                                    CultureInfo.InvariantCulture),
+                    Time = DateTimeOffset.FromUnixTimeMilliseconds(
+                                    el.GetProperty("time").GetInt64()).UtcDateTime
+                });
+            }
+
+            return list;
         }
     }
 }

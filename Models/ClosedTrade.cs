@@ -12,10 +12,7 @@ namespace FuturesBot.Models
         public DateTime OpenTime { get; set; }
         public DateTime CloseTime { get; set; }
 
-        public decimal PnlUSDT =>
-            Side == SignalType.Long
-                ? (Exit - Entry) * Quantity
-                : (Entry - Exit) * Quantity;
+        public decimal PnlUSDT { get; set; }
 
         public decimal RMultiple { get; set; }  // +1.5, -1.0, v.v.
     }

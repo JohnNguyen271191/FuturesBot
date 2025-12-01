@@ -46,6 +46,8 @@ namespace FuturesBot.Services
                     var side = last.IsLong ? SignalType.Long : SignalType.Short;
                     var qty = Math.Abs(last.PositionAmt);
 
+                    var netPnlAsync = await exchange.GetNetPnlAsync(symbol.Coin);
+
                     var closed = new ClosedTrade
                     {
                         Symbol = symbol.Coin,
@@ -54,7 +56,8 @@ namespace FuturesBot.Services
                         Exit = exitPrice,
                         Quantity = qty,
                         OpenTime = state.LastChangeTime,
-                        CloseTime = DateTime.UtcNow
+                        CloseTime = DateTime.UtcNow,
+                        PnlUSDT = netPnlAsync.Net
                     };
 
                     await _pnl.RegisterClosedTradeAsync(closed);
