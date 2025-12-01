@@ -64,41 +64,75 @@ namespace FuturesBot.Services
         /// Exit: nếu đang LONG và đóng dưới EMA34 → ExitLong
         ///        nếu đang SHORT và đóng trên EMA34 → ExitShort
         /// </summary>
-        public TradeSignal GenerateExitSignal(
-            IReadOnlyList<Candle> candles15m,
-            bool hasLongPosition,
-            bool hasShortPosition,
-            Symbol symbol)
+        public TradeSignal GenerateExitSignal(IReadOnlyList<Candle> candles15m, bool hasLongPosition, bool hasShortPosition, Symbol symbol)
         {
-            if (candles15m == null || candles15m.Count < 40)
+            if (candles15m == null || candles15m.Count < 200)
                 return new TradeSignal();
 
             int i15 = candles15m.Count - 1;
             var last15 = candles15m[i15];
 
+            // Tính EMA 34 / 89 / 200 M15
             var ema34_15 = _indicators.Ema(candles15m, 34);
-            decimal ema34Now = ema34_15[i15];
+            var ema89_15 = _indicators.Ema(candles15m, 89);
+            var ema200_15 = _indicators.Ema(candles15m, 200);
 
-            // LONG → giá đóng dưới EMA34 => EXIT
-            if (hasLongPosition && last15.Close < ema34Now)
+            decimal ema34Now = ema34_15[i15];
+            decimal ema89Now = ema89_15[i15];
+            decimal ema200Now = ema200_15[i15];
+
+            // ===== LONG: dùng EMA gần nhất bên dưới giá =====
+            if (hasLongPosition)
             {
-                return new TradeSignal
+                var supports = new List<decimal>();
+
+                if (ema34Now <= last15.Close) supports.Add(ema34Now);
+                if (ema89Now <= last15.Close) supports.Add(ema89Now);
+                if (ema200Now <= last15.Close) supports.Add(ema200Now);
+
+                decimal? dynamicSupportEma = null;
+                if (supports.Count > 0)
                 {
-                    Type = SignalType.CloseLong,
-                    Reason = $"{symbol.Coin}: Đang LONG nhưng giá đóng dưới EMA34 M15 → Exit để bảo vệ vốn.",
-                    Coin = symbol.Coin
-                };
+                    // EMA gần nhất bên dưới giá (max trong số <= price)
+                    dynamicSupportEma = supports.Max();
+                }
+
+                if (dynamicSupportEma.HasValue && last15.Close < dynamicSupportEma.Value)
+                {
+                    return new TradeSignal
+                    {
+                        Type = SignalType.CloseLong,
+                        Reason = $"{symbol.Coin}: Đang LONG, giá đóng dưới EMA{DetectEmaPeriod(dynamicSupportEma.Value, ema34Now, ema89Now, ema200Now)} M15 (dynamic support) → Exit để bảo vệ vốn.",
+                        Coin = symbol.Coin
+                    };
+                }
             }
 
-            // SHORT → giá đóng trên EMA34 => EXIT
-            if (hasShortPosition && last15.Close > ema34Now)
+            // ===== SHORT: dùng EMA gần nhất bên trên giá =====
+            if (hasShortPosition)
             {
-                return new TradeSignal
+                var resistances = new List<decimal>();
+
+                if (ema34Now >= last15.Close) resistances.Add(ema34Now);
+                if (ema89Now >= last15.Close) resistances.Add(ema89Now);
+                if (ema200Now >= last15.Close) resistances.Add(ema200Now);
+
+                decimal? dynamicResistEma = null;
+                if (resistances.Count > 0)
                 {
-                    Type = SignalType.CloseShort,
-                    Reason = $"{symbol.Coin}: Đang SHORT nhưng giá đóng trên EMA34 M15 → Exit để tránh đảo trend.",
-                    Coin = symbol.Coin
-                };
+                    // EMA gần nhất bên trên giá (min trong số >= price)
+                    dynamicResistEma = resistances.Min();
+                }
+
+                if (dynamicResistEma.HasValue && last15.Close > dynamicResistEma.Value)
+                {
+                    return new TradeSignal
+                    {
+                        Type = SignalType.CloseShort,
+                        Reason = $"{symbol.Coin}: Đang SHORT, giá đóng trên EMA{DetectEmaPeriod(dynamicResistEma.Value, ema34Now, ema89Now, ema200Now)} M15 (dynamic resistance) → Exit để tránh đảo trend.",
+                        Coin = symbol.Coin
+                    };
+                }
             }
 
             return new TradeSignal();
@@ -839,6 +873,19 @@ namespace FuturesBot.Services
 
             var distance = Math.Abs(c.Close - nearestEma) / nearestEma;
             return distance >= OverextendedFromEmaPercent;
+        }
+
+        private int DetectEmaPeriod(decimal target, decimal ema34, decimal ema89, decimal ema200)
+        {
+            var diff34 = Math.Abs(target - ema34);
+            var diff89 = Math.Abs(target - ema89);
+            var diff200 = Math.Abs(target - ema200);
+
+            var min = Math.Min(diff34, Math.Min(diff89, diff200));
+
+            if (min == diff34) return 34;
+            if (min == diff89) return 89;
+            return 200;
         }
     }
 }

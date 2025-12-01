@@ -97,24 +97,24 @@ static async Task RunSymbolWorkerAsync(
                 {
                     lastProcessedCandle = lastCandle.OpenTime;
 
-                    // Lấy position 1 lần
-                    //var pos = await exchange.GetPositionAsync(symbol.Coin);
-                    //bool hasLong = pos.PositionAmt > 0;
-                    //bool hasShort = pos.PositionAmt < 0;
+                    //Lấy position 1 lần
+                    var pos = await exchange.GetPositionAsync(symbol.Coin);
+                    bool hasLong = pos.PositionAmt > 0;
+                    bool hasShort = pos.PositionAmt < 0;
 
-                    // EXIT logic
-                    //if (hasLong || hasShort)
-                    //{
-                    //    var exitSignal = strategy.GenerateExitSignal(
-                    //        candles15m, hasLong, hasShort, symbol);
+                    //EXIT logic
+                    if (hasLong || hasShort)
+                    {
+                        var exitSignal = strategy.GenerateExitSignal(
+                            candles15m, hasLong, hasShort, symbol);
 
-                    //    if (exitSignal.Type == SignalType.CloseLong ||
-                    //        exitSignal.Type == SignalType.CloseShort)
-                    //    {
-                    //        await exchange.ClosePositionAsync(symbol.Coin, pos.PositionAmt);
-                    //        // không continue; vẫn cho liveSync/pnl chạy bên dưới
-                    //    }
-                    //}
+                        if (exitSignal.Type == SignalType.CloseLong ||
+                            exitSignal.Type == SignalType.CloseShort)
+                        {
+                            await exchange.ClosePositionAsync(symbol.Coin, pos.PositionAmt);
+                            // không continue; vẫn cho liveSync/pnl chạy bên dưới
+                        }
+                    }
 
                     // ENTRY logic
                     var entrySignal = strategy.GenerateSignal(candles15m, candles1h, symbol);
