@@ -56,8 +56,7 @@ namespace FuturesBot.Services
                         Exit = exitPrice,
                         Quantity = qty,
                         OpenTime = state.LastChangeTime,
-                        CloseTime = DateTime.UtcNow,
-                        PnlUSDT += netPnlAsync.Commission
+                        CloseTime = DateTime.UtcNow
                     };
 
                     await _pnl.RegisterClosedTradeAsync(closed);
