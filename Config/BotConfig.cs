@@ -34,5 +34,6 @@
         public int Id { get; set; }
         public string Coin { get; set; } = "";
         public int Leverage { get; set; } = 50;
+        public bool IsMajor { get; set; } = false;
     }
 }

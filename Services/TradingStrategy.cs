@@ -21,6 +21,9 @@ namespace FuturesBot.Services
     /// - Sideway scalp:
     ///       + Dùng khi H1 có bias rõ nhưng M15 chưa align / đang sideway quanh EMA
     ///       + Chỉ trade theo hướng bias H1 (H1 down chỉ short, H1 up chỉ long)
+    /// - Tối ưu BTC/ETH vs Altcoin:
+    ///       + BTC/ETH: cho phép trend trade + sideway scalp
+    ///       + Altcoin: chỉ trend trade, thêm filter Volume / EMA slope H1, bỏ sideway scalp
     /// </summary>
     public class TradingStrategy(IndicatorService indicators) : IStrategyService
     {
@@ -55,6 +58,16 @@ namespace FuturesBot.Services
         private const decimal ClimaxBodyMultiplier = 1.8m;
         private const decimal ClimaxVolumeMultiplier = 1.5m;
         private const decimal OverextendedFromEmaPercent = 0.01m; // 1% xa EMA gần nhất
+
+        // ========================= NEW: BTC vs ALT CONFIG ====================
+
+        // Volume M15 (ước lượng USDT = Close * Volume) tối thiểu cho trade
+        private const decimal MinMajorVolumeUsd15m = 20_000_000m; // BTC/ETH
+        private const decimal MinAltVolumeUsd15m = 5_000_000m;    // Altcoin
+
+        // Độ dốc EMA34 H1 tối thiểu cho Altcoin (tránh alt sideway)
+        private const int EmaSlopeLookbackH1 = 3;
+        private const decimal MinAltEmaSlopeH1 = 0.003m; // 0.3%
 
         // =====================================================================
         //                           EXIT SIGNAL
@@ -174,6 +187,59 @@ namespace FuturesBot.Services
             decimal ema89_15Now = ema89_15[i15];
             decimal ema200_15Now = ema200_15[i15];
 
+            // =================== NEW: BTC vs ALT FILTERS =======================
+
+            bool isMajor = symbol.IsMajor;
+            decimal volUsd15 = last15.Close * last15.Volume;
+
+            if (isMajor)
+            {
+                // Major coin mà vol M15 quá thấp (hiếm khi xảy ra) thì bỏ
+                if (volUsd15 < MinMajorVolumeUsd15m)
+                {
+                    return new TradeSignal
+                    {
+                        Type = SignalType.Info,
+                        Reason = $"{symbol.Coin}: Volume M15 quá thấp ({volUsd15:F0} USDT) → bỏ qua để tránh slippage.",
+                        Coin = symbol.Coin
+                    };
+                }
+            }
+            else
+            {
+                // ALT: kiểm tra thanh khoản M15
+                if (volUsd15 < MinAltVolumeUsd15m)
+                {
+                    return new TradeSignal
+                    {
+                        Type = SignalType.Info,
+                        Reason = $"{symbol.Coin}: Altcoin volume M15 yếu ({volUsd15:F0} USDT) → bỏ qua, tránh bị pump-dump/slippage.",
+                        Coin = symbol.Coin
+                    };
+                }
+
+                // ALT: EMA34 H1 phải có độ dốc đủ (tránh alt sideway rác)
+                if (iH1 >= EmaSlopeLookbackH1)
+                {
+                    decimal ema34NowH1 = ema34_h1[iH1];
+                    decimal ema34Prev = ema34_h1[iH1 - EmaSlopeLookbackH1];
+
+                    if (ema34Prev > 0)
+                    {
+                        decimal slope = Math.Abs(ema34NowH1 - ema34Prev) / ema34Prev;
+                        if (slope < MinAltEmaSlopeH1)
+                        {
+                            return new TradeSignal
+                            {
+                                Type = SignalType.Info,
+                                Reason = $"{symbol.Coin}: Altcoin đang sideway, EMA34 H1 gần như đi ngang (slope={slope:P2}) → chỉ trade khi trend rõ để tránh nhiễu.",
+                                Coin = symbol.Coin
+                            };
+                        }
+                    }
+                }
+            }
+
             // ================= FILTER: CLIMAX + OVEREXTENDED = NO TRADE ========
 
             bool climaxDanger =
@@ -222,12 +288,8 @@ namespace FuturesBot.Services
 
             // =================== SIDEWAY / PULLBACK SCALP ======================
             //
-            // Logic:
-            // - Nếu không extreme
-            // - Và:
-            //    + Hoặc: không có upTrend/downTrend rõ
-            //    + Hoặc: H1 có bias nhưng giá M15 đang "kẹt" giữa các EMA (pullback)
-            //   → ưu tiên thử sideway scalp theo hướng H1
+            // - BTC/ETH: vẫn cho phép sideway scalp như cũ.
+            // - ALTCOIN: KHÔNG sideway scalp nữa, chỉ cho trade khi upTrend/downTrend rõ.
             // ===================================================================
 
             if (!extremeUp && !extremeDump)
@@ -245,7 +307,8 @@ namespace FuturesBot.Services
                 bool shouldTrySideway =
                     (!upTrend && !downTrend) || m15PullbackDown || m15PullbackUp;
 
-                if (shouldTrySideway)
+                // ======= BTC/ETH: cho phép sideway scalp =======
+                if (isMajor && shouldTrySideway)
                 {
                     var sidewaySignal = BuildSidewayScalp(
                         candles15m,
@@ -262,6 +325,16 @@ namespace FuturesBot.Services
 
                     if (sidewaySignal.Type != SignalType.None)
                         return sidewaySignal;
+                }
+                // ======= ALTCOIN: nếu chỉ sideway/pullback mà chưa có trend rõ → bỏ qua =======
+                else if (!isMajor && shouldTrySideway && !upTrend && !downTrend)
+                {
+                    return new TradeSignal
+                    {
+                        Type = SignalType.Info,
+                        Reason = $"{symbol.Coin}: Altcoin đang sideway/pullback, H1+M15 chưa align trend rõ → bỏ qua, không scalp để tránh nhiễu.",
+                        Coin = symbol.Coin
+                    };
                 }
             }
 
@@ -789,7 +862,7 @@ namespace FuturesBot.Services
         }
 
         // =====================================================================
-        //                     HELPERS: CLIMAX / EMA
+        //                     HELPERS: CLIMAX / EMA / SYMBOL
         // =====================================================================
 
         private bool IsClimaxCandle(IReadOnlyList<Candle> candles, int index)

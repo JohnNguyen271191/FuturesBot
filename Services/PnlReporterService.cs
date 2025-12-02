@@ -43,10 +43,9 @@ PnL   : {trade.PnlUSDT:F2} USDT";
                 .Where(t => t.CloseTime.Date == _currentDay)
                 .ToList();
 
-            if (!tradesToday.Any()) return;
+            if (tradesToday.Count == 0) return;
 
             var totalPnl = tradesToday.Sum(t => t.PnlUSDT);
-            var totalR = tradesToday.Sum(t => t.RMultiple);
             var wins = tradesToday.Count(t => t.PnlUSDT > 0);
             var losses = tradesToday.Count(t => t.PnlUSDT < 0);
 

@@ -29,7 +29,7 @@ namespace FuturesBot.Services
         private const int MonitorIntervalMs = 3000;   // 3 giây
         private const decimal EarlyExitRR = 0.5m;     // chốt non khi đạt >= 0.5R và momentum đảo
         private const decimal HardReverseRR = 0.2m;   // nếu đảo trend mạnh và RR >= 0.2 thì đóng ngay
-        private const decimal EmaBreakTolerance = 0.003m; // ~0.3%
+        private const decimal EmaBreakTolerance = 0.001m; // ~0.3%
 
         // =====================================================================
         //                  MONITOR LIMIT ORDER (CHỜ KHỚP)

@@ -613,7 +613,7 @@ namespace FuturesBot.Services
             var query = new Dictionary<string, string>
             {
                 ["symbol"] = symbol,
-                ["limit"] = "1000",
+                ["limit"] = "100",
                 ["startTime"] = new DateTimeOffset(startTime)
                                     .ToUnixTimeMilliseconds()
                                     .ToString()
