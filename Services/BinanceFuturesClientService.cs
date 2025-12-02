@@ -501,7 +501,7 @@ namespace FuturesBot.Services
                         break;
 
                     case "COMMISSION":
-                        result.Commission += Math.Abs(i.Income); // commission luôn âm
+                        result.Commission += i.Income; // commission luôn âm
                         break;
 
                     case "FUNDING_FEE":
