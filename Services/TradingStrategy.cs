@@ -73,7 +73,7 @@ namespace FuturesBot.Services
 
         // Volume M15 (ước lượng USDT = Close * Volume) tối thiểu cho trade
         private const decimal MinMajorVolumeUsd15m = 2_000_000m; // BTC
-        private const decimal MinAltVolumeUsd15m = 1_000_000m;    // Altcoin
+        private const decimal MinAltVolumeUsd15m = 1_000_000m;   // Altcoin
 
         // Độ dốc EMA34 H1 tối thiểu cho Altcoin (tránh alt sideway)
         private const int EmaSlopeLookbackH1 = 3;
@@ -96,7 +96,11 @@ namespace FuturesBot.Services
             if (candles15m == null || candles15m.Count < 200)
                 return new TradeSignal();
 
-            int i15 = candles15m.Count - 1;
+            // Dùng nến 15m ĐÃ ĐÓNG gần nhất
+            int i15 = candles15m.Count - 2;
+            if (i15 <= 0)
+                return new TradeSignal();
+
             var last15 = candles15m[i15];
 
             // Tính EMA 34 / 89 / 200 M15
@@ -179,8 +183,12 @@ namespace FuturesBot.Services
             if (candles15m.Count < MinBars || candles1h.Count < MinBars)
                 return new TradeSignal();
 
-            int i15 = candles15m.Count - 1;
-            int iH1 = candles1h.Count - 1;
+            // Dùng nến đã đóng: M15 & H1
+            int i15 = candles15m.Count - 2;
+            int iH1 = candles1h.Count - 2;
+
+            if (i15 <= 0 || iH1 <= 0)
+                return new TradeSignal();
 
             var last15 = candles15m[i15];
             var prev15 = candles15m[i15 - 1];
@@ -211,12 +219,11 @@ namespace FuturesBot.Services
             decimal rrSideway = isMajor ? RiskRewardSidewayMajor : RiskRewardSideway;
             bool allowSideway = isMajor; // chỉ Major được sideway scalp
 
-            // Volume ước lượng trên M15
+            // Volume ước lượng trên M15 (nến đã đóng)
             decimal volUsd15 = last15.Close * last15.Volume;
 
             if (isMajor)
             {
-                // Major coin mà vol M15 quá thấp (hiếm khi xảy ra) thì bỏ
                 if (volUsd15 < MinMajorVolumeUsd15m)
                 {
                     return new TradeSignal
@@ -230,7 +237,6 @@ namespace FuturesBot.Services
             }
             else
             {
-                // ALT: kiểm tra thanh khoản M15
                 if (volUsd15 < MinAltVolumeUsd15m)
                 {
                     return new TradeSignal
@@ -301,7 +307,7 @@ namespace FuturesBot.Services
                 last15.Close < ema34_15Now &&
                 ema34_15Now < ema89_15Now;
 
-            // Extreme cases (vẫn giữ để tham khảo – KHÔNG dùng để cho phép entry đu trend)
+            // Extreme cases (tham khảo – KHÔNG cho phép đu trend)
             bool extremeUp =
                 last15.Close > ema34_15Now * (1 + ExtremeEmaBoost) &&
                 macd15[i15] > sig15[i15] &&
@@ -313,27 +319,23 @@ namespace FuturesBot.Services
                 rsi15[i15] < ExtremeRsiLow;
 
             // =================== SIDEWAY / PULLBACK SCALP ======================
-            //
-            // - Major (BTC/ETH): cho phép sideway scalp.
-            // - Altcoin: KHÔNG sideway scalp nữa, chỉ cho trade khi upTrend/downTrend rõ.
-            // ===================================================================
 
             if (!extremeUp && !extremeDump)
             {
                 bool m15PullbackDown =
                     h1BiasDown &&
                     ema34_15Now <= last15.Close &&
-                    last15.Close <= ema89_15Now;   // giá nằm giữa EMA34-EMA89 trong H1 downtrend
+                    last15.Close <= ema89_15Now;
 
                 bool m15PullbackUp =
                     h1BiasUp &&
                     ema89_15Now <= last15.Close &&
-                    last15.Close <= ema34_15Now;   // giá nằm giữa EMA89-EMA34 trong H1 uptrend
+                    last15.Close <= ema34_15Now;
 
                 bool shouldTrySideway =
                     (!upTrend && !downTrend) || m15PullbackDown || m15PullbackUp;
 
-                // ======= Major: cho phép sideway scalp =======
+                // Major: cho phép sideway scalp
                 if (allowSideway && shouldTrySideway)
                 {
                     var sidewaySignal = BuildSidewayScalp(
@@ -353,7 +355,7 @@ namespace FuturesBot.Services
                     if (sidewaySignal.Type != SignalType.None)
                         return sidewaySignal;
                 }
-                // ======= Altcoin: nếu chỉ sideway/pullback mà chưa có trend rõ → bỏ qua =======
+                // Altcoin: nếu chỉ sideway/pullback mà chưa có trend rõ → bỏ qua
                 else if (!isMajor && shouldTrySideway && !upTrend && !downTrend)
                 {
                     return new TradeSignal
@@ -371,14 +373,12 @@ namespace FuturesBot.Services
             decimal avgVol = PriceActionHelper.AverageVolume(candles15m, i15 - 1, PullbackVolumeLookback);
             bool strongVolume = avgVol > 0 && last15.Volume >= avgVol;
 
-            // Nếu volume quá yếu và không phải case extreme thì bỏ qua
             if (!strongVolume && !extremeUp && !extremeDump)
                 return new TradeSignal();
 
             // =================== BUILD LONG / SHORT (THEO TREND MẠNH) =========
 
-            // --- LONG ---
-            if (upTrend /* không dùng extremeUp để cho phép đu trend */)
+            if (upTrend)
             {
                 var longSignal = BuildLong(
                     candles15m,
@@ -397,8 +397,7 @@ namespace FuturesBot.Services
                     return longSignal;
             }
 
-            // --- SHORT ---
-            if (downTrend /* không dùng extremeDump */)
+            if (downTrend)
             {
                 var shortSignal = BuildShort(
                     candles15m,
@@ -437,29 +436,25 @@ namespace FuturesBot.Services
             Symbol symbol,
             decimal riskRewardTrend)
         {
-            int i15 = candles15m.Count - 1;
+            int i15 = candles15m.Count - 2;
+            if (i15 <= 0) return new TradeSignal();
 
             decimal ema34 = ema34_15[i15];
             decimal ema89 = ema89_15[i15];
             decimal ema200 = ema200_15[i15];
 
-            // 1. XÁC ĐỊNH HỖ TRỢ GẦN NHẤT (EMA 34/89/200 ở dưới giá)
+            // 1. HỖ TRỢ GẦN NHẤT
             var supports = new List<decimal>();
 
             if (ema34 < last15.Close)
                 supports.Add(ema34);
-
             if (ema89 > 0 && ema89 < last15.Close)
                 supports.Add(ema89);
-
             if (ema200 > 0 && ema200 < last15.Close)
                 supports.Add(ema200);
 
-            decimal nearestSupport = supports.Count > 0
-                ? supports.Max()
-                : 0m;
+            decimal nearestSupport = supports.Count > 0 ? supports.Max() : 0m;
 
-            // Nếu không có hỗ trợ hợp lệ thì bỏ
             if (nearestSupport <= 0m)
             {
                 return new TradeSignal
@@ -470,18 +465,18 @@ namespace FuturesBot.Services
                 };
             }
 
-            // 2. RETEST HỖ TRỢ (giá chạm band quanh EMA gần nhất)
+            // 2. RETEST HỖ TRỢ
             bool touchSupport = nearestSupport > 0m &&
                                 last15.Low <= nearestSupport * (1 + EmaRetestBand) &&
                                 last15.Low >= nearestSupport * (1 - EmaRetestBand);
 
-            // 3. NẾN REJECTION (đuôi dưới chọc EMA, thân xanh đóng trên EMA)
+            // 3. NẾN REJECTION
             bool reject = nearestSupport > 0m &&
                           last15.Close > last15.Open &&
                           last15.Low < nearestSupport &&
                           last15.Close > nearestSupport;
 
-            // 4. MOMENTUM MACD + RSI
+            // 4. MOMENTUM
             bool macdCrossUp = macd15[i15] > sig15[i15] && macd15[i15 - 1] <= sig15[i15 - 1];
             bool rsiBull = rsi15[i15] > RsiBullThreshold && rsi15[i15] >= rsi15[i15 - 1];
 
@@ -489,7 +484,7 @@ namespace FuturesBot.Services
                 (macdCrossUp && rsiBull) ||
                 (rsiBull && macd15[i15] > 0);
 
-            bool ok = touchSupport && reject && momentum; // BẮT BUỘC có retest EMA
+            bool ok = touchSupport && reject && momentum;
 
             if (!ok)
             {
@@ -502,27 +497,24 @@ namespace FuturesBot.Services
                 };
             }
 
-            // 5. ENTRY OFFSET – đặt entry thấp hơn close 1 chút để tránh đu đỉnh
+            // 5. ENTRY OFFSET
             decimal rawEntry = last15.Close * (1 - EntryOffsetPercent);
 
-            // 6. SL & TP – dùng swing low + EMA89 để tránh bị quét
+            // 6. SL & TP
             decimal swingLow = PriceActionHelper.FindSwingLow(candles15m, i15, SwingLookback);
 
             decimal entry = rawEntry;
             if (entry <= swingLow)
                 entry = (last15.Close + swingLow) / 2;
 
-            // SL candidate 1: dưới swingLow 0.5% của entry
             decimal slFromSwing = swingLow - entry * StopBufferPercent;
 
-            // SL candidate 2: dưới EMA89 0.3% (nếu EMA89 nằm dưới entry)
             decimal slFromEma89 = 0m;
             if (ema89 > 0 && ema89 < entry)
             {
                 slFromEma89 = ema89 * (1 - Ema89StopExtraPercent);
             }
 
-            // Chọn SL sâu hơn trong các candidate (giá nhỏ hơn → sâu hơn)
             var slCandidates = new List<decimal>();
             if (slFromSwing > 0) slCandidates.Add(slFromSwing);
             if (slFromEma89 > 0) slCandidates.Add(slFromEma89);
@@ -581,27 +573,24 @@ namespace FuturesBot.Services
             Symbol symbol,
             decimal riskRewardTrend)
         {
-            int i15 = candles15m.Count - 1;
+            int i15 = candles15m.Count - 2;
+            if (i15 <= 0) return new TradeSignal();
 
             decimal ema34 = ema34_15[i15];
             decimal ema89 = ema89_15[i15];
             decimal ema200 = ema200_15[i15];
 
-            // 1. XÁC ĐỊNH KHÁNG CỰ GẦN NHẤT (EMA 34/89/200 ở trên giá)
+            // 1. KHÁNG CỰ GẦN NHẤT
             var resistances = new List<decimal>();
 
             if (ema34 > last15.Close)
                 resistances.Add(ema34);
-
             if (ema89 > last15.Close)
                 resistances.Add(ema89);
-
             if (ema200 > last15.Close)
                 resistances.Add(ema200);
 
-            decimal nearestResistance = resistances.Count > 0
-                ? resistances.Min()
-                : 0m;
+            decimal nearestResistance = resistances.Count > 0 ? resistances.Min() : 0m;
 
             if (nearestResistance <= 0m)
             {
@@ -618,13 +607,13 @@ namespace FuturesBot.Services
                           last15.High >= nearestResistance * (1 - EmaRetestBand) &&
                           last15.High <= nearestResistance * (1 + EmaRetestBand);
 
-            // 3. NẾN REJECTION (đuôi trên chọc EMA, thân đỏ đóng dưới EMA)
+            // 3. NẾN REJECTION
             bool reject = nearestResistance > 0m &&
                           last15.Close < last15.Open &&
                           last15.High > nearestResistance &&
                           last15.Close < nearestResistance;
 
-            // 4. MOMENTUM MACD + RSI
+            // 4. MOMENTUM
             bool macdCrossDown = macd15[i15] < sig15[i15] && macd15[i15 - 1] >= sig15[i15 - 1];
             bool rsiBear = rsi15[i15] < RsiBearThreshold && rsi15[i15] <= rsi15[i15 - 1];
 
@@ -632,7 +621,7 @@ namespace FuturesBot.Services
                 (macdCrossDown && rsiBear) ||
                 (rsiBear && macd15[i15] < 0);
 
-            bool ok = retest && reject && momentum;  // BẮT BUỘC retest EMA
+            bool ok = retest && reject && momentum;
 
             if (!ok)
             {
@@ -645,27 +634,24 @@ namespace FuturesBot.Services
                 };
             }
 
-            // 5. ENTRY OFFSET – đặt entry cao hơn close để tránh đu đáy nến
+            // 5. ENTRY OFFSET
             decimal rawEntry = last15.Close * (1 + EntryOffsetPercent);
 
-            // 6. SL & TP – dùng swing high + EMA89 để tránh bị quét
+            // 6. SL & TP
             decimal swingHigh = PriceActionHelper.FindSwingHigh(candles15m, i15, SwingLookback);
 
             decimal entry = rawEntry;
             if (entry >= swingHigh)
                 entry = (last15.Close + swingHigh) / 2;
 
-            // SL candidate 1: trên swingHigh 0.5% của entry
             decimal slFromSwing = swingHigh + entry * StopBufferPercent;
 
-            // SL candidate 2: trên EMA89 0.3% (nếu EMA89 nằm trên entry)
             decimal slFromEma89 = 0m;
             if (ema89 > entry)
             {
                 slFromEma89 = ema89 * (1 + Ema89StopExtraPercent);
             }
 
-            // Chọn SL xa hơn trong các candidate (giá lớn hơn → xa hơn với lệnh short)
             var slCandidates = new List<decimal>();
             if (slFromSwing > 0) slCandidates.Add(slFromSwing);
             if (slFromEma89 > 0) slCandidates.Add(slFromEma89);
@@ -725,13 +711,14 @@ namespace FuturesBot.Services
             bool h1BiasDown,
             decimal riskRewardSideway)
         {
-            int i15 = candles15m.Count - 1;
+            int i15 = candles15m.Count - 2;
+            if (i15 <= 0) return new TradeSignal();
 
             decimal ema34 = ema34_15[i15];
             decimal ema89 = ema89_15[i15];
             decimal ema200 = ema200_15[i15];
 
-            // 1) BIAS EMA 15M (không dùng giá)
+            // 1) BIAS EMA 15M
             bool shortBias15 =
                 ema34 <= ema89 &&
                 ema34 <= ema200;
@@ -774,7 +761,6 @@ namespace FuturesBot.Services
             // ========================== SCALP SHORT ===========================
             if (shortBias)
             {
-                // Kháng cự gần nhất phía trên giá: ưu tiên EMA89, rồi tới EMA200
                 var resistances = new List<decimal>();
                 if (ema89 > last15.Close) resistances.Add(ema89);
                 if (ema200 > last15.Close) resistances.Add(ema200);
@@ -784,25 +770,20 @@ namespace FuturesBot.Services
 
                 decimal nearestRes = resistances.Min();
 
-                // Giá phải chạm vùng quanh kháng cự
                 bool touchRes =
                     last15.High >= nearestRes * (1 - EmaRetestBand) &&
                     last15.High <= nearestRes * (1 + EmaRetestBand);
 
-                // Nến rejection: râu trên chọc qua EMA, thân nằm dưới EMA
                 bool bearBody = last15.Close <= last15.Open;
                 bool reject =
                     last15.High > nearestRes &&
                     last15.Close < nearestRes &&
                     bearBody;
 
-                // Momentum đảo chiều: RSI cao + bắt đầu gãy, MACD cong/đứng
                 bool rsiHigh = rsi15[i15] >= 55m;
-                bool rsiTurnDown =
-                    rsi15[i15] <= rsi15[i15 - 1];
+                bool rsiTurnDown = rsi15[i15] <= rsi15[i15 - 1];
 
-                bool macdDownOrFlat =
-                    macd15[i15] <= macd15[i15 - 1];
+                bool macdDownOrFlat = macd15[i15] <= macd15[i15 - 1];
 
                 bool momentum = rsiHigh && (rsiTurnDown || macdDownOrFlat);
 
@@ -859,11 +840,9 @@ namespace FuturesBot.Services
                     bullBody;
 
                 bool rsiHighEnough = rsi15[i15] >= 45m;
-                bool rsiTurnUp =
-                    rsi15[i15] >= rsi15[i15 - 1];
+                bool rsiTurnUp = rsi15[i15] >= rsi15[i15 - 1];
 
-                bool macdUpOrFlat =
-                    macd15[i15] >= macd15[i15 - 1];
+                bool macdUpOrFlat = macd15[i15] >= macd15[i15 - 1];
 
                 bool momentum = rsiHighEnough && (rsiTurnUp || macdUpOrFlat);
 
@@ -963,7 +942,6 @@ namespace FuturesBot.Services
             return nearest;
         }
 
-        // Nến climax + giá đang xa EMA gần nhất => overextended, không trade
         private bool IsClimaxAwayFromEma(
             IReadOnlyList<Candle> candles,
             int index,
