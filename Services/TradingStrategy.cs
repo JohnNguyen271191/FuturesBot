@@ -1,3 +1,6 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
 using FuturesBot.Config;
 using FuturesBot.IServices;
 using FuturesBot.Models;
@@ -12,12 +15,12 @@ namespace FuturesBot.Services
     /// - Khi đã có trend:
     ///     + LONG: chờ giá retest EMA gần nhất phía dưới (34/89/200) + rejection + momentum
     ///     + SHORT: chờ giá retest EMA gần nhất phía trên (34/89/200) + rejection + momentum
-    /// - Momentum MACD + RSI
+    /// - Momentum MACD + RSI (mềm hơn để không bỏ lỡ quá nhiều kèo đẹp)
     /// - Entry offset để tránh vào đúng đỉnh/đáy (giảm rủi ro)
     /// - SL theo swing + buffer (ưu tiên sâu hơn quanh EMA89)
     /// - Khi đang có vị thế:
-    ///       LONG  => nếu đóng dưới EMA34 M15 => EXIT LONG
-    ///       SHORT => nếu đóng trên EMA34 M15 => EXIT SHORT
+    ///       LONG  => nếu đóng dưới EMA dynamic M15 phía dưới giá → EXIT LONG
+    ///       SHORT => nếu đóng trên EMA dynamic M15 phía trên giá → EXIT SHORT
     /// - Sideway scalp:
     ///       + Dùng khi H1 có bias rõ nhưng M15 chưa align / đang sideway quanh EMA
     ///       + Chỉ trade theo hướng bias H1 (H1 down chỉ short, H1 up chỉ long)
@@ -436,6 +439,7 @@ namespace FuturesBot.Services
             Symbol symbol,
             decimal riskRewardTrend)
         {
+            // dùng nến 15m đã đóng
             int i15 = candles15m.Count - 2;
             if (i15 <= 0) return new TradeSignal();
 
@@ -443,7 +447,7 @@ namespace FuturesBot.Services
             decimal ema89 = ema89_15[i15];
             decimal ema200 = ema200_15[i15];
 
-            // 1. HỖ TRỢ GẦN NHẤT
+            // 1. HỖ TRỢ GẦN NHẤT (EMA dưới giá)
             var supports = new List<decimal>();
 
             if (ema34 < last15.Close)
@@ -465,26 +469,35 @@ namespace FuturesBot.Services
                 };
             }
 
-            // 2. RETEST HỖ TRỢ
-            bool touchSupport = nearestSupport > 0m &&
-                                last15.Low <= nearestSupport * (1 + EmaRetestBand) &&
-                                last15.Low >= nearestSupport * (1 - EmaRetestBand);
+            // 2. RETEST HỖ TRỢ (giá chạm band quanh EMA)
+            bool touchSupport =
+                nearestSupport > 0m &&
+                last15.Low <= nearestSupport * (1 + EmaRetestBand) &&
+                last15.Low >= nearestSupport * (1 - EmaRetestBand);
 
-            // 3. NẾN REJECTION
-            bool reject = nearestSupport > 0m &&
-                          last15.Close > last15.Open &&
-                          last15.Low < nearestSupport &&
-                          last15.Close > nearestSupport;
+            // 3. NẾN REJECTION (đuôi dưới xuyên EMA, thân xanh đóng trên EMA)
+            bool reject =
+                nearestSupport > 0m &&
+                last15.Close > last15.Open &&
+                last15.Low < nearestSupport &&
+                last15.Close > nearestSupport;
 
-            // 4. MOMENTUM
+            // 4. MOMENTUM MACD + RSI (mềm hơn)
             bool macdCrossUp = macd15[i15] > sig15[i15] && macd15[i15 - 1] <= sig15[i15 - 1];
             bool rsiBull = rsi15[i15] > RsiBullThreshold && rsi15[i15] >= rsi15[i15 - 1];
 
-            bool momentum =
-                (macdCrossUp && rsiBull) ||
-                (rsiBull && macd15[i15] > 0);
+            // mềm: RSI > 50 + đang quay lên, MACD không còn giảm
+            bool rsiBullSoft = rsi15[i15] > 50m && rsi15[i15] >= rsi15[i15 - 1];
+            bool macdUpOrFlat = macd15[i15] >= macd15[i15 - 1];
 
-            bool ok = touchSupport && reject && momentum;
+            bool momentum =
+                (macdCrossUp && rsiBull) ||          // momentum mạnh
+                (rsiBull && macd15[i15] > 0) ||      // RSI bull + MACD dương
+                (rsiBullSoft && macdUpOrFlat);       // momentum mềm
+
+            // 5. CHECK SETUP:
+            //    BẮT BUỘC phải retest EMA, sau đó cần REJECT HOẶC MOMENTUM
+            bool ok = touchSupport && (reject || momentum);
 
             if (!ok)
             {
@@ -497,18 +510,20 @@ namespace FuturesBot.Services
                 };
             }
 
-            // 5. ENTRY OFFSET
+            // 6. ENTRY OFFSET – tránh đu đỉnh
             decimal rawEntry = last15.Close * (1 - EntryOffsetPercent);
 
-            // 6. SL & TP
+            // 7. SL & TP – swing low + EMA89
             decimal swingLow = PriceActionHelper.FindSwingLow(candles15m, i15, SwingLookback);
 
             decimal entry = rawEntry;
             if (entry <= swingLow)
                 entry = (last15.Close + swingLow) / 2;
 
+            // SL candidate 1: dưới swingLow 0.5% của entry
             decimal slFromSwing = swingLow - entry * StopBufferPercent;
 
+            // SL candidate 2: dưới EMA89 0.3% (nếu EMA89 < entry)
             decimal slFromEma89 = 0m;
             if (ema89 > 0 && ema89 < entry)
             {
@@ -551,7 +566,7 @@ namespace FuturesBot.Services
                 StopLoss = sl,
                 TakeProfit = tp,
                 Reason =
-                    $"{symbol.Coin}: LONG – trend up + retest EMA hỗ trợ gần nhất ({nearestSupport:F6}) + rejection + momentum + entryOffset (SL dựa trên swing/EMA89).",
+                    $"{symbol.Coin}: LONG – trend up + retest EMA hỗ trợ gần nhất ({nearestSupport:F6}) + (rejection hoặc momentum) + entryOffset (SL dựa trên swing/EMA89).",
                 Coin = symbol.Coin
             };
         }
@@ -573,6 +588,7 @@ namespace FuturesBot.Services
             Symbol symbol,
             decimal riskRewardTrend)
         {
+            // dùng nến 15m đã đóng
             int i15 = candles15m.Count - 2;
             if (i15 <= 0) return new TradeSignal();
 
@@ -580,7 +596,7 @@ namespace FuturesBot.Services
             decimal ema89 = ema89_15[i15];
             decimal ema200 = ema200_15[i15];
 
-            // 1. KHÁNG CỰ GẦN NHẤT
+            // 1. KHÁNG CỰ GẦN NHẤT (EMA trên giá)
             var resistances = new List<decimal>();
 
             if (ema34 > last15.Close)
@@ -603,25 +619,34 @@ namespace FuturesBot.Services
             }
 
             // 2. RETEST KHÁNG CỰ
-            bool retest = nearestResistance > 0m &&
-                          last15.High >= nearestResistance * (1 - EmaRetestBand) &&
-                          last15.High <= nearestResistance * (1 + EmaRetestBand);
+            bool retest =
+                nearestResistance > 0m &&
+                last15.High >= nearestResistance * (1 - EmaRetestBand) &&
+                last15.High <= nearestResistance * (1 + EmaRetestBand);
 
-            // 3. NẾN REJECTION
-            bool reject = nearestResistance > 0m &&
-                          last15.Close < last15.Open &&
-                          last15.High > nearestResistance &&
-                          last15.Close < nearestResistance;
+            // 3. NẾN REJECTION (đuôi trên xuyên EMA, thân đỏ đóng dưới EMA)
+            bool reject =
+                nearestResistance > 0m &&
+                last15.Close < last15.Open &&
+                last15.High > nearestResistance &&
+                last15.Close < nearestResistance;
 
             // 4. MOMENTUM
             bool macdCrossDown = macd15[i15] < sig15[i15] && macd15[i15 - 1] >= sig15[i15 - 1];
             bool rsiBear = rsi15[i15] < RsiBearThreshold && rsi15[i15] <= rsi15[i15 - 1];
 
-            bool momentum =
-                (macdCrossDown && rsiBear) ||
-                (rsiBear && macd15[i15] < 0);
+            // mềm: RSI < 50 + đang quay xuống, MACD không còn tăng
+            bool rsiBearSoft = rsi15[i15] < 50m && rsi15[i15] <= rsi15[i15 - 1];
+            bool macdDownOrFlat = macd15[i15] <= macd15[i15 - 1];
 
-            bool ok = retest && reject && momentum;
+            bool momentum =
+                (macdCrossDown && rsiBear) ||        // momentum mạnh
+                (rsiBear && macd15[i15] < 0) ||      // RSI bear + MACD âm
+                (rsiBearSoft && macdDownOrFlat);     // momentum mềm
+
+            // 5. CHECK SETUP:
+            //    BẮT BUỘC retest EMA, sau đó cần REJECT HOẶC MOMENTUM
+            bool ok = retest && (reject || momentum);
 
             if (!ok)
             {
@@ -634,18 +659,20 @@ namespace FuturesBot.Services
                 };
             }
 
-            // 5. ENTRY OFFSET
+            // 6. ENTRY OFFSET – tránh đu đáy
             decimal rawEntry = last15.Close * (1 + EntryOffsetPercent);
 
-            // 6. SL & TP
+            // 7. SL & TP – swing high + EMA89
             decimal swingHigh = PriceActionHelper.FindSwingHigh(candles15m, i15, SwingLookback);
 
             decimal entry = rawEntry;
             if (entry >= swingHigh)
                 entry = (last15.Close + swingHigh) / 2;
 
+            // SL candidate 1: trên swingHigh 0.5% của entry
             decimal slFromSwing = swingHigh + entry * StopBufferPercent;
 
+            // SL candidate 2: trên EMA89 0.3% (nếu EMA89 > entry)
             decimal slFromEma89 = 0m;
             if (ema89 > entry)
             {
@@ -688,7 +715,7 @@ namespace FuturesBot.Services
                 StopLoss = sl,
                 TakeProfit = tp,
                 Reason =
-                    $"{symbol.Coin}: SHORT – trend down + retest EMA kháng cự gần nhất ({nearestResistance:F6}) + rejection + momentum + entryOffset (SL dựa trên swing/EMA89).",
+                    $"{symbol.Coin}: SHORT – trend down + retest EMA kháng cự gần nhất ({nearestResistance:F6}) + (rejection hoặc momentum) + entryOffset (SL dựa trên swing/EMA89).",
                 Coin = symbol.Coin
             };
         }
