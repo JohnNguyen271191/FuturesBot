@@ -14,16 +14,18 @@ namespace FuturesBot.Services
     ///     + SHORT: chờ giá retest EMA gần nhất phía trên (34/89/200) + rejection + momentum
     /// - Momentum MACD + RSI
     /// - Entry offset để tránh vào đúng đỉnh/đáy (giảm rủi ro)
-    /// - SL theo swing + buffer (ưu tiên sâu hơn quanh EMA89), TP = 1.5R
+    /// - SL theo swing + buffer (ưu tiên sâu hơn quanh EMA89)
     /// - Khi đang có vị thế:
     ///       LONG  => nếu đóng dưới EMA34 M15 => EXIT LONG
     ///       SHORT => nếu đóng trên EMA34 M15 => EXIT SHORT
     /// - Sideway scalp:
     ///       + Dùng khi H1 có bias rõ nhưng M15 chưa align / đang sideway quanh EMA
     ///       + Chỉ trade theo hướng bias H1 (H1 down chỉ short, H1 up chỉ long)
-    /// - Tối ưu BTC/ETH vs Altcoin:
-    ///       + BTC/ETH: cho phép trend trade + sideway scalp
-    ///       + Altcoin: chỉ trend trade, thêm filter Volume / EMA slope H1, bỏ sideway scalp
+    /// - Tối ưu BTC/ETH vs Altcoin (symbol.IsMajor):
+    ///       + IsMajor = true (BTC/ETH): cho phép trend trade + sideway scalp,
+    ///         RR trend riêng (RiskRewardMajor), RR sideway (RiskRewardSidewayMajor).
+    ///       + IsMajor = false (Altcoin): chỉ trend trade, thêm filter Volume / EMA slope H1,
+    ///         bỏ sideway scalp, RR trend dùng RiskReward.
     /// </summary>
     public class TradingStrategy(IndicatorService indicators) : IStrategyService
     {
@@ -37,8 +39,16 @@ namespace FuturesBot.Services
 
         private const decimal EmaRetestBand = 0.002m;        // ±0.2%
         private const decimal StopBufferPercent = 0.005m;    // 0.5%
+
+        // RR default cho Altcoin (trend)
         private const decimal RiskReward = 1.5m;             // TP = SL * 1.5
+
+        // RR cho sideway scalp (cơ bản)
         private const decimal RiskRewardSideway = 1m;        // TP = SL * 1 cho scalp nhanh
+
+        // RR cho Major (BTC/ETH)
+        private const decimal RiskRewardMajor = 2.0m;        // RR trend cho BTC/ETH
+        private const decimal RiskRewardSidewayMajor = 1.0m; // RR sideway cho BTC/ETH
 
         private const decimal RsiBullThreshold = 55m;
         private const decimal RsiBearThreshold = 45m;
@@ -62,8 +72,8 @@ namespace FuturesBot.Services
         // ========================= NEW: BTC vs ALT CONFIG ====================
 
         // Volume M15 (ước lượng USDT = Close * Volume) tối thiểu cho trade
-        private const decimal MinMajorVolumeUsd15m = 20_000_000m; // BTC/ETH
-        private const decimal MinAltVolumeUsd15m = 5_000_000m;    // Altcoin
+        private const decimal MinMajorVolumeUsd15m = 20_000_000m; // BTC
+        private const decimal MinAltVolumeUsd15m = 3_000_000m;    // Altcoin
 
         // Độ dốc EMA34 H1 tối thiểu cho Altcoin (tránh alt sideway)
         private const int EmaSlopeLookbackH1 = 3;
@@ -74,10 +84,14 @@ namespace FuturesBot.Services
         // =====================================================================
 
         /// <summary>
-        /// Exit: nếu đang LONG và đóng dưới EMA34 → ExitLong
-        ///        nếu đang SHORT và đóng trên EMA34 → ExitShort
+        /// Exit: nếu đang LONG và đóng dưới EMA dynamic bên dưới giá → ExitLong
+        ///        nếu đang SHORT và đóng trên EMA dynamic bên trên giá → ExitShort
         /// </summary>
-        public TradeSignal GenerateExitSignal(IReadOnlyList<Candle> candles15m, bool hasLongPosition, bool hasShortPosition, Symbol symbol)
+        public TradeSignal GenerateExitSignal(
+            IReadOnlyList<Candle> candles15m,
+            bool hasLongPosition,
+            bool hasShortPosition,
+            Symbol symbol)
         {
             if (candles15m == null || candles15m.Count < 200)
                 return new TradeSignal();
@@ -115,7 +129,8 @@ namespace FuturesBot.Services
                     return new TradeSignal
                     {
                         Type = SignalType.CloseLong,
-                        Reason = $"{symbol.Coin}: Đang LONG, giá đóng dưới EMA{DetectEmaPeriod(dynamicSupportEma.Value, ema34Now, ema89Now, ema200Now)} M15 (dynamic support) → Exit để bảo vệ vốn.",
+                        Reason =
+                            $"{symbol.Coin}: Đang LONG, giá đóng dưới EMA{DetectEmaPeriod(dynamicSupportEma.Value, ema34Now, ema89Now, ema200Now)} M15 (dynamic support) → Exit để bảo vệ vốn.",
                         Coin = symbol.Coin
                     };
                 }
@@ -142,7 +157,8 @@ namespace FuturesBot.Services
                     return new TradeSignal
                     {
                         Type = SignalType.CloseShort,
-                        Reason = $"{symbol.Coin}: Đang SHORT, giá đóng trên EMA{DetectEmaPeriod(dynamicResistEma.Value, ema34Now, ema89Now, ema200Now)} M15 (dynamic resistance) → Exit để tránh đảo trend.",
+                        Reason =
+                            $"{symbol.Coin}: Đang SHORT, giá đóng trên EMA{DetectEmaPeriod(dynamicResistEma.Value, ema34Now, ema89Now, ema200Now)} M15 (dynamic resistance) → Exit để tránh đảo trend.",
                         Coin = symbol.Coin
                     };
                 }
@@ -150,7 +166,6 @@ namespace FuturesBot.Services
 
             return new TradeSignal();
         }
-
 
         // =====================================================================
         //                           ENTRY SIGNAL
@@ -187,9 +202,16 @@ namespace FuturesBot.Services
             decimal ema89_15Now = ema89_15[i15];
             decimal ema200_15Now = ema200_15[i15];
 
-            // =================== NEW: BTC vs ALT FILTERS =======================
+            // =================== NEW: BTC vs ALT PROFILE =======================
 
-            bool isMajor = symbol.IsMajor;
+            bool isMajor = symbol.IsMajor; // BTC/ETH = true, Alt = false
+
+            // RR theo profile
+            decimal rrTrend = isMajor ? RiskRewardMajor : RiskReward;
+            decimal rrSideway = isMajor ? RiskRewardSidewayMajor : RiskRewardSideway;
+            bool allowSideway = isMajor; // chỉ Major được sideway scalp
+
+            // Volume ước lượng trên M15
             decimal volUsd15 = last15.Close * last15.Volume;
 
             if (isMajor)
@@ -200,7 +222,8 @@ namespace FuturesBot.Services
                     return new TradeSignal
                     {
                         Type = SignalType.Info,
-                        Reason = $"{symbol.Coin}: Volume M15 quá thấp ({volUsd15:F0} USDT) → bỏ qua để tránh slippage.",
+                        Reason =
+                            $"{symbol.Coin}: Volume M15 quá thấp ({volUsd15:F0} USDT) → bỏ qua để tránh slippage.",
                         Coin = symbol.Coin
                     };
                 }
@@ -213,7 +236,8 @@ namespace FuturesBot.Services
                     return new TradeSignal
                     {
                         Type = SignalType.Info,
-                        Reason = $"{symbol.Coin}: Altcoin volume M15 yếu ({volUsd15:F0} USDT) → bỏ qua, tránh bị pump-dump/slippage.",
+                        Reason =
+                            $"{symbol.Coin}: Altcoin volume M15 yếu ({volUsd15:F0} USDT) → bỏ qua, tránh bị pump-dump/slippage.",
                         Coin = symbol.Coin
                     };
                 }
@@ -232,7 +256,8 @@ namespace FuturesBot.Services
                             return new TradeSignal
                             {
                                 Type = SignalType.Info,
-                                Reason = $"{symbol.Coin}: Altcoin đang sideway, EMA34 H1 gần như đi ngang (slope={slope:P2}) → chỉ trade khi trend rõ để tránh nhiễu.",
+                                Reason =
+                                    $"{symbol.Coin}: Altcoin đang sideway, EMA34 H1 gần như đi ngang (slope={slope:P2}) → chỉ trade khi trend rõ để tránh nhiễu.",
                                 Coin = symbol.Coin
                             };
                         }
@@ -251,7 +276,8 @@ namespace FuturesBot.Services
                 return new TradeSignal
                 {
                     Type = SignalType.Info,
-                    Reason = $"{symbol.Coin}: Bỏ qua entry vì vừa có nến climax và giá đang quá xa EMA gần nhất (đu đỉnh/đu đáy, chờ retest EMA rồi mới trade).",
+                    Reason =
+                        $"{symbol.Coin}: Bỏ qua entry vì vừa có nến climax và giá đang quá xa EMA gần nhất (đu đỉnh/đu đáy, chờ retest EMA rồi mới trade).",
                     Coin = symbol.Coin
                 };
             }
@@ -288,8 +314,8 @@ namespace FuturesBot.Services
 
             // =================== SIDEWAY / PULLBACK SCALP ======================
             //
-            // - BTC/ETH: vẫn cho phép sideway scalp như cũ.
-            // - ALTCOIN: KHÔNG sideway scalp nữa, chỉ cho trade khi upTrend/downTrend rõ.
+            // - Major (BTC/ETH): cho phép sideway scalp.
+            // - Altcoin: KHÔNG sideway scalp nữa, chỉ cho trade khi upTrend/downTrend rõ.
             // ===================================================================
 
             if (!extremeUp && !extremeDump)
@@ -307,8 +333,8 @@ namespace FuturesBot.Services
                 bool shouldTrySideway =
                     (!upTrend && !downTrend) || m15PullbackDown || m15PullbackUp;
 
-                // ======= BTC/ETH: cho phép sideway scalp =======
-                if (isMajor && shouldTrySideway)
+                // ======= Major: cho phép sideway scalp =======
+                if (allowSideway && shouldTrySideway)
                 {
                     var sidewaySignal = BuildSidewayScalp(
                         candles15m,
@@ -321,18 +347,20 @@ namespace FuturesBot.Services
                         last15,
                         symbol,
                         h1BiasUp,
-                        h1BiasDown);
+                        h1BiasDown,
+                        rrSideway);
 
                     if (sidewaySignal.Type != SignalType.None)
                         return sidewaySignal;
                 }
-                // ======= ALTCOIN: nếu chỉ sideway/pullback mà chưa có trend rõ → bỏ qua =======
+                // ======= Altcoin: nếu chỉ sideway/pullback mà chưa có trend rõ → bỏ qua =======
                 else if (!isMajor && shouldTrySideway && !upTrend && !downTrend)
                 {
                     return new TradeSignal
                     {
                         Type = SignalType.Info,
-                        Reason = $"{symbol.Coin}: Altcoin đang sideway/pullback, H1+M15 chưa align trend rõ → bỏ qua, không scalp để tránh nhiễu.",
+                        Reason =
+                            $"{symbol.Coin}: Altcoin đang sideway/pullback, H1+M15 chưa align trend rõ → bỏ qua, không scalp để tránh nhiễu.",
                         Coin = symbol.Coin
                     };
                 }
@@ -362,7 +390,8 @@ namespace FuturesBot.Services
                     sig15,
                     last15,
                     prev15,
-                    symbol);
+                    symbol,
+                    rrTrend);
 
                 if (longSignal.Type != SignalType.None)
                     return longSignal;
@@ -381,7 +410,8 @@ namespace FuturesBot.Services
                     sig15,
                     last15,
                     prev15,
-                    symbol);
+                    symbol,
+                    rrTrend);
 
                 if (shortSignal.Type != SignalType.None)
                     return shortSignal;
@@ -389,7 +419,6 @@ namespace FuturesBot.Services
 
             return new TradeSignal();
         }
-
 
         // =====================================================================
         //                              LONG
@@ -405,7 +434,8 @@ namespace FuturesBot.Services
             IReadOnlyList<decimal> sig15,
             Candle last15,
             Candle prev15,
-            Symbol symbol)
+            Symbol symbol,
+            decimal riskRewardTrend)
         {
             int i15 = candles15m.Count - 1;
 
@@ -466,7 +496,8 @@ namespace FuturesBot.Services
                 return new TradeSignal
                 {
                     Type = SignalType.Info,
-                    Reason = $"{symbol.Coin}: H1 Uptrend nhưng setup long chưa đạt (touch={touchSupport}, reject={reject}, momentum={momentum}).",
+                    Reason =
+                        $"{symbol.Coin}: H1 Uptrend nhưng setup long chưa đạt (touch={touchSupport}, reject={reject}, momentum={momentum}).",
                     Coin = symbol.Coin
                 };
             }
@@ -519,7 +550,7 @@ namespace FuturesBot.Services
             }
 
             decimal risk = entry - sl;
-            decimal tp = entry + risk * RiskReward;
+            decimal tp = entry + risk * riskRewardTrend;
 
             return new TradeSignal
             {
@@ -527,11 +558,11 @@ namespace FuturesBot.Services
                 EntryPrice = entry,
                 StopLoss = sl,
                 TakeProfit = tp,
-                Reason = $"{symbol.Coin}: LONG – trend up + retest EMA hỗ trợ gần nhất ({nearestSupport:F6}) + rejection + momentum + entryOffset (SL dựa trên swing/EMA89).",
+                Reason =
+                    $"{symbol.Coin}: LONG – trend up + retest EMA hỗ trợ gần nhất ({nearestSupport:F6}) + rejection + momentum + entryOffset (SL dựa trên swing/EMA89).",
                 Coin = symbol.Coin
             };
         }
-
 
         // =====================================================================
         //                              SHORT
@@ -547,7 +578,8 @@ namespace FuturesBot.Services
             IReadOnlyList<decimal> sig15,
             Candle last15,
             Candle prev15,
-            Symbol symbol)
+            Symbol symbol,
+            decimal riskRewardTrend)
         {
             int i15 = candles15m.Count - 1;
 
@@ -607,7 +639,8 @@ namespace FuturesBot.Services
                 return new TradeSignal
                 {
                     Type = SignalType.Info,
-                    Reason = $"{symbol.Coin}: H1 Downtrend nhưng setup short chưa đạt (retest={retest}, reject={reject}, momentum={momentum}).",
+                    Reason =
+                        $"{symbol.Coin}: H1 Downtrend nhưng setup short chưa đạt (retest={retest}, reject={reject}, momentum={momentum}).",
                     Coin = symbol.Coin
                 };
             }
@@ -660,7 +693,7 @@ namespace FuturesBot.Services
             }
 
             decimal risk = sl - entry;
-            decimal tp = entry - risk * RiskReward;
+            decimal tp = entry - risk * riskRewardTrend;
 
             return new TradeSignal
             {
@@ -668,7 +701,8 @@ namespace FuturesBot.Services
                 EntryPrice = entry,
                 StopLoss = sl,
                 TakeProfit = tp,
-                Reason = $"{symbol.Coin}: SHORT – trend down + retest EMA kháng cự gần nhất ({nearestResistance:F6}) + rejection + momentum + entryOffset (SL dựa trên swing/EMA89).",
+                Reason =
+                    $"{symbol.Coin}: SHORT – trend down + retest EMA kháng cự gần nhất ({nearestResistance:F6}) + rejection + momentum + entryOffset (SL dựa trên swing/EMA89).",
                 Coin = symbol.Coin
             };
         }
@@ -688,7 +722,8 @@ namespace FuturesBot.Services
             Candle last15,
             Symbol symbol,
             bool h1BiasUp,
-            bool h1BiasDown)
+            bool h1BiasDown,
+            decimal riskRewardSideway)
         {
             int i15 = candles15m.Count - 1;
 
@@ -730,7 +765,8 @@ namespace FuturesBot.Services
                 return new TradeSignal
                 {
                     Type = SignalType.Info,
-                    Reason = $"{symbol.Coin}: SIDEWAY – không có bias rõ (ema34={ema34:F2}, ema89={ema89:F2}, ema200={ema200:F2}).",
+                    Reason =
+                        $"{symbol.Coin}: SIDEWAY – không có bias rõ (ema34={ema34:F2}, ema89={ema89:F2}, ema200={ema200:F2}).",
                     Coin = symbol.Coin
                 };
             }
@@ -787,7 +823,7 @@ namespace FuturesBot.Services
                     return new TradeSignal();
 
                 decimal risk = sl - entry;
-                decimal tp = entry - risk * RiskRewardSideway;
+                decimal tp = entry - risk * riskRewardSideway;
 
                 return new TradeSignal
                 {
@@ -795,7 +831,8 @@ namespace FuturesBot.Services
                     EntryPrice = entry,
                     StopLoss = sl,
                     TakeProfit = tp,
-                    Reason = $"{symbol.Coin}: SIDEWAY SCALP SHORT – bias down (H1) + retest EMA (near={nearestRes:F2}) + rejection + RSI/MACD quay đầu.",
+                    Reason =
+                        $"{symbol.Coin}: SIDEWAY SCALP SHORT – bias down (H1) + retest EMA (near={nearestRes:F2}) + rejection + RSI/MACD quay đầu.",
                     Coin = symbol.Coin
                 };
             }
@@ -847,7 +884,7 @@ namespace FuturesBot.Services
                     return new TradeSignal();
 
                 decimal risk = entry - sl;
-                decimal tp = entry + risk * RiskRewardSideway;
+                decimal tp = entry + risk * riskRewardSideway;
 
                 return new TradeSignal
                 {
@@ -855,7 +892,8 @@ namespace FuturesBot.Services
                     EntryPrice = entry,
                     StopLoss = sl,
                     TakeProfit = tp,
-                    Reason = $"{symbol.Coin}: SIDEWAY SCALP LONG – bias up (H1) + retest EMA (near={nearestSup:F2}) + rejection + RSI/MACD quay đầu.",
+                    Reason =
+                        $"{symbol.Coin}: SIDEWAY SCALP LONG – bias up (H1) + retest EMA (near={nearestSup:F2}) + rejection + RSI/MACD quay đầu.",
                     Coin = symbol.Coin
                 };
             }
