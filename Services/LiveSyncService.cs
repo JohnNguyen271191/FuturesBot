@@ -1,16 +1,12 @@
 ﻿using FuturesBot.Config;
 using FuturesBot.IServices;
 using FuturesBot.Models;
-using System.Drawing;
 using static FuturesBot.Utils.EnumTypesHelper;
 
 namespace FuturesBot.Services
 {
     public class LiveSyncService(IExchangeClientService exchange, PnlReporterService pnl)
     {
-        private readonly IExchangeClientService _exchange = exchange;
-        private readonly PnlReporterService _pnl = pnl;
-
         private class PositionState
         {
             public PositionInfo LastPosition { get; set; } = new();
@@ -29,7 +25,7 @@ namespace FuturesBot.Services
                     _states[symbol.Coin] = state;
                 }
 
-                var pos = await _exchange.GetPositionAsync(symbol.Coin);
+                var pos = await exchange.GetPositionAsync(symbol.Coin);
 
                 bool wasOpen = !state.LastPosition.IsFlat;
                 bool nowFlat = pos.IsFlat;
@@ -38,7 +34,7 @@ namespace FuturesBot.Services
                 {
                     var last = state.LastPosition;
 
-                    var lastTrade = await _exchange.GetLastUserTradeAsync(
+                    var lastTrade = await exchange.GetLastUserTradeAsync(
                         symbol.Coin,
                         state.LastChangeTime.AddMinutes(-1));
 
@@ -63,8 +59,8 @@ namespace FuturesBot.Services
                                     : (last.EntryPrice - exitPrice) * qty) + netPnlAsync.Commission
                     };
 
-                    await _pnl.RegisterClosedTradeAsync(closed);
-                    await _exchange.CancelAllOpenOrdersAsync(symbol.Coin);
+                    await pnl.RegisterClosedTradeAsync(closed);
+                    await exchange.CancelAllOpenOrdersAsync(symbol.Coin);
                 }
 
                 if (pos.PositionAmt != state.LastPosition.PositionAmt ||

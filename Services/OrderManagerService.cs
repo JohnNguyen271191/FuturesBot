@@ -171,8 +171,7 @@ namespace FuturesBot.Services
                     {
                         // thường là do API trả tạm thời sai hoặc đang đóng/mở lại,
                         // mình không dừng monitor để khỏi bị lệch như case DOGE.
-                        await _notify.SendAsync(
-                            $"[{symbol}] WARNING: qty=0 nhưng còn {openOrders.Count} open orders → tiếp tục monitor.");
+                        await _notify.SendAsync($"[{symbol}] WARNING: qty=0 nhưng còn {openOrders?.Count} open orders → tiếp tục monitor.");
                         continue;
                     }
                 }
