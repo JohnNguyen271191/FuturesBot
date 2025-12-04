@@ -1,6 +1,7 @@
 ﻿using FuturesBot.Config;
 using FuturesBot.IServices;
 using FuturesBot.Models;
+using System.Drawing;
 using static FuturesBot.Utils.EnumTypesHelper;
 
 namespace FuturesBot.Services
@@ -57,7 +58,9 @@ namespace FuturesBot.Services
                         Quantity = qty,
                         OpenTime = state.LastChangeTime,
                         CloseTime = DateTime.UtcNow,
-                        PnlUSDT = netPnlAsync.Net
+                        PnlUSDT = (side == SignalType.Long
+                                    ? (exitPrice - last.EntryPrice) * qty
+                                    : (last.EntryPrice - exitPrice) * qty) + netPnlAsync.Commission
                     };
 
                     await _pnl.RegisterClosedTradeAsync(closed);

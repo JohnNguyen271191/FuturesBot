@@ -94,6 +94,14 @@ namespace FuturesBot.Services
             if (qty < rules.MinQty)
                 qty = rules.MinQty;
 
+            decimal notional = entryPrice * qty;
+            if (notional < rules.MinNotional)
+            {
+                qty = SymbolRulesService.TruncateToStep(rules.MinNotional, rules.QtyStep);
+                if (qty < rules.MinQty)
+                    qty = rules.MinQty;
+            }
+
             var entry = SymbolRulesService.TruncateToStep(entryPrice, rules.PriceStep);
             var sl = SymbolRulesService.TruncateToStep(stopLoss, rules.PriceStep);
             var tp = SymbolRulesService.TruncateToStep(takeProfit, rules.PriceStep);
@@ -464,7 +472,7 @@ namespace FuturesBot.Services
                 ["stopPrice"] = stop.ToString(CultureInfo.InvariantCulture),
                 ["closePosition"] = "true",
                 ["timeInForce"] = "GTC",
-                ["recvWindow"] = "5000",
+                ["recvWindow"] = "60000",
                 ["positionSide"] = positionSide
             };
 
@@ -523,7 +531,7 @@ namespace FuturesBot.Services
             {
                 ["symbol"] = symbol,
                 ["leverage"] = leverage.ToString(),
-                ["recvWindow"] = "5000"
+                ["recvWindow"] = "60000"
             };
 
             var resp = await SignedPostAsync("/fapi/v1/leverage", param);
