@@ -34,9 +34,8 @@ namespace FuturesBot.Services
                 {
                     pos = await exchange.GetPositionAsync(symbol.Coin);
                 }
-                catch (Exception ex)
+                catch
                 {
-                    await pnl.LogDebugAsync($"{symbol.Coin}: GetPositionAsync FAILED → skip sync cycle. Err: {ex.Message}");
                     continue; // Không xử lý gì nếu lấy position lỗi
                 }
 
@@ -50,7 +49,6 @@ namespace FuturesBot.Services
 
                 if (invalid)
                 {
-                    await pnl.LogDebugAsync($"{symbol.Coin}: INVALID position snapshot (0,0,0) → skip this cycle.");
                     continue;
                 }
 
@@ -66,18 +64,16 @@ namespace FuturesBot.Services
                     PositionInfo pos2;
                     try
                     {
-                        await Task.Delay(80); // delay nhẹ cho chắc
+                        await Task.Delay(80);
                         pos2 = await exchange.GetPositionAsync(symbol.Coin);
                     }
                     catch
                     {
-                        await pnl.LogDebugAsync($"{symbol.Coin}: Double-check position FAILED → skip closing.");
                         continue;
                     }
 
                     if (!pos2.IsFlat)
                     {
-                        await pnl.LogDebugAsync($"{symbol.Coin}: False flat detected → skip closing.");
                         continue;
                     }
 
@@ -111,8 +107,6 @@ namespace FuturesBot.Services
 
                     await pnl.RegisterClosedTradeAsync(closed);
                     await exchange.CancelAllOpenOrdersAsync(symbol.Coin);
-
-                    await pnl.LogDebugAsync($"{symbol.Coin}: CLOSED TRADE OK (confirmed).");
                 }
 
                 // ===============================
