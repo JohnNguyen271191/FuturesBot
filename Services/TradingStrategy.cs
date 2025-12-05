@@ -17,7 +17,7 @@ namespace FuturesBot.Services
     ///     + SHORT: chờ giá retest EMA gần nhất phía trên (34/89/200) + rejection + momentum
     /// - Momentum MACD + RSI (mềm hơn để không bỏ lỡ quá nhiều kèo đẹp)
     /// - Entry offset để tránh vào đúng đỉnh/đáy (giảm rủi ro)
-    /// - SL theo swing + buffer (ưu tiên sâu hơn quanh EMA89)
+    /// - SL theo EMA gần nhất (dynamic) + buffer
     /// - Khi đang có vị thế:
     ///       LONG  => nếu đóng dưới EMA dynamic M15 phía dưới giá → EXIT LONG
     ///       SHORT => nếu đóng trên EMA dynamic M15 phía trên giá → EXIT SHORT
@@ -59,11 +59,16 @@ namespace FuturesBot.Services
         private const decimal ExtremeRsiLow = 30m;
         private const decimal ExtremeEmaBoost = 0.01m;       // 1%
 
-        // Entry offset để tránh đỉnh/đáy
+        // Entry offset để tránh đỉnh/đáy (trend)
         private const decimal EntryOffsetPercent = 0.003m;          // 0.3% cho trend
+
+        // Entry offset cho scalp
         private const decimal EntryOffsetPercentForScal = 0.001m;   // 0.1% cho scalp
 
-        // SL an toàn quanh EMA89 (0.3% xa hơn EMA89)
+        // SL an toàn quanh EMA gần nhất (cho trend dynamic EMA)
+        private const decimal AnchorSlBufferPercent = 0.0015m;      // 0.15%
+
+        // SL an toàn quanh EMA89 (0.3% xa hơn EMA89) – vẫn dùng cho 1 số chỗ cũ
         private const decimal Ema89StopExtraPercent = 0.003m;
 
         // Nến climax + overextended xa EMA gần nhất (tránh vừa vào là đảo)
@@ -127,7 +132,6 @@ namespace FuturesBot.Services
                 decimal? dynamicSupportEma = null;
                 if (supports.Count > 0)
                 {
-                    // EMA gần nhất bên dưới giá (max trong số <= price)
                     dynamicSupportEma = supports.Max();
                 }
 
@@ -154,7 +158,6 @@ namespace FuturesBot.Services
                 decimal? dynamicResistEma = null;
                 if (resistances.Count > 0)
                 {
-                    // EMA gần nhất bên trên giá (min trong số >= price)
                     dynamicResistEma = resistances.Min();
                 }
 
@@ -413,7 +416,7 @@ namespace FuturesBot.Services
         }
 
         // =====================================================================
-        //                              LONG
+        //                              LONG (DYNAMIC EMA)
         // =====================================================================
 
         private TradeSignal BuildLong(
@@ -429,7 +432,6 @@ namespace FuturesBot.Services
             Symbol symbol,
             decimal riskRewardTrend)
         {
-            // dùng nến 15m đã đóng
             int i15 = candles15m.Count - 2;
             if (i15 <= 0) return new TradeSignal();
 
@@ -437,19 +439,13 @@ namespace FuturesBot.Services
             decimal ema89 = ema89_15[i15];
             decimal ema200 = ema200_15[i15];
 
-            // 1. HỖ TRỢ GẦN NHẤT (EMA dưới giá)
+            // 1. HỖ TRỢ GẦN NHẤT (EMA dưới giá) – dynamic: 34/89/200 cái nào gần nhất phía dưới
             var supports = new List<decimal>();
+            if (ema34 < last15.Close) supports.Add(ema34);
+            if (ema89 > 0 && ema89 < last15.Close) supports.Add(ema89);
+            if (ema200 > 0 && ema200 < last15.Close) supports.Add(ema200);
 
-            if (ema34 < last15.Close)
-                supports.Add(ema34);
-            if (ema89 > 0 && ema89 < last15.Close)
-                supports.Add(ema89);
-            if (ema200 > 0 && ema200 < last15.Close)
-                supports.Add(ema200);
-
-            decimal nearestSupport = supports.Count > 0 ? supports.Max() : 0m;
-
-            if (nearestSupport <= 0m)
+            if (supports.Count == 0)
             {
                 return new TradeSignal
                 {
@@ -458,6 +454,8 @@ namespace FuturesBot.Services
                     Coin = symbol.Coin
                 };
             }
+
+            decimal nearestSupport = supports.Max(); // EMA gần nhất phía dưới giá
 
             // 2. RETEST HỖ TRỢ (giá chạm band quanh EMA)
             bool touchSupport =
@@ -475,20 +473,15 @@ namespace FuturesBot.Services
             // 4. MOMENTUM MACD + RSI (mềm hơn)
             bool macdCrossUp = macd15[i15] > sig15[i15] && macd15[i15 - 1] <= sig15[i15 - 1];
             bool rsiBull = rsi15[i15] > RsiBullThreshold && rsi15[i15] >= rsi15[i15 - 1];
-
-            // mềm: RSI > 50 + đang quay lên, MACD không còn giảm
             bool rsiBullSoft = rsi15[i15] > 50m && rsi15[i15] >= rsi15[i15 - 1];
             bool macdUpOrFlat = macd15[i15] >= macd15[i15 - 1];
 
             bool momentum =
-                (macdCrossUp && rsiBull) ||          // momentum mạnh
-                (rsiBull && macd15[i15] > 0) ||      // RSI bull + MACD dương
-                (rsiBullSoft && macdUpOrFlat);       // momentum mềm
+                (macdCrossUp && rsiBull) ||
+                (rsiBull && macd15[i15] > 0) ||
+                (rsiBullSoft && macdUpOrFlat);
 
-            // 5. CHECK SETUP:
-            //    BẮT BUỘC phải retest EMA, sau đó cần REJECT HOẶC MOMENTUM
             bool ok = touchSupport && (reject || momentum);
-
             if (!ok)
             {
                 return new TradeSignal
@@ -499,68 +492,39 @@ namespace FuturesBot.Services
                 };
             }
 
-            // 6. ENTRY OFFSET – tránh đu đỉnh
-            decimal rawEntry = last15.Close * (1 - EntryOffsetPercent);
+            // 5. ENTRY & SL DYNAMIC THEO EMA GẦN NHẤT
+            //    Entry cao hơn EMA 1 chút, SL thấp hơn EMA 1 chút
+            decimal anchor = nearestSupport;
 
-            // 7. SL & TP – swing low + EMA89
-            decimal swingLow = PriceActionHelper.FindSwingLow(candles15m, i15, SwingLookback);
-
-            decimal entry = rawEntry;
-            if (entry <= swingLow)
-                entry = (last15.Close + swingLow) / 2;
-
-            // SL candidate 1: dưới swingLow 0.5% của entry
-            decimal slFromSwing = swingLow - entry * StopBufferPercent;
-
-            // SL candidate 2: dưới EMA89 0.3% (nếu EMA89 < entry)
-            decimal slFromEma89 = 0m;
-            if (ema89 > 0 && ema89 < entry)
-            {
-                slFromEma89 = ema89 * (1 - Ema89StopExtraPercent);
-            }
-
-            var slCandidates = new List<decimal>();
-            if (slFromSwing > 0) slCandidates.Add(slFromSwing);
-            if (slFromEma89 > 0) slCandidates.Add(slFromEma89);
-
-            if (slCandidates.Count == 0)
-            {
-                return new TradeSignal
-                {
-                    Type = SignalType.None,
-                    Reason = $"{symbol.Coin}: Không tìm được SL hợp lệ cho long.",
-                    Coin = symbol.Coin
-                };
-            }
-
-            decimal sl = slCandidates.Min();
+            decimal entry = anchor * (1m + EntryOffsetPercent);       // tránh vào đúng EMA
+            decimal sl    = anchor * (1m - AnchorSlBufferPercent);    // SL dưới EMA gần nhất
 
             if (sl >= entry || sl <= 0)
             {
                 return new TradeSignal
                 {
                     Type = SignalType.None,
-                    Reason = $"{symbol.Coin}: SL invalid cho long.",
+                    Reason = $"{symbol.Coin}: SL invalid cho long (entry={entry:F4}, sl={sl:F4}).",
                     Coin = symbol.Coin
                 };
             }
 
             decimal risk = entry - sl;
-            decimal tp = entry + risk * riskRewardTrend;
+            decimal tp   = entry + risk * riskRewardTrend;
 
             return new TradeSignal
             {
-                Type = SignalType.Long,
+                Type       = SignalType.Long,
                 EntryPrice = entry,
-                StopLoss = sl,
+                StopLoss   = sl,
                 TakeProfit = tp,
-                Reason = $"{symbol.Coin}: LONG – trend up + retest EMA hỗ trợ gần nhất ({nearestSupport:F6}) + (rejection hoặc momentum) + entryOffset (SL dựa trên swing/EMA89).",
-                Coin = symbol.Coin
+                Reason     = $"{symbol.Coin}: LONG – trend up + retest EMA hỗ trợ gần nhất ({nearestSupport:F6}) + (rejection/momentum) + entryOffset; SL đặt dưới EMA gần nhất.",
+                Coin       = symbol.Coin
             };
         }
 
         // =====================================================================
-        //                              SHORT
+        //                              SHORT (DYNAMIC EMA)
         // =====================================================================
 
         private TradeSignal BuildShort(
@@ -576,7 +540,6 @@ namespace FuturesBot.Services
             Symbol symbol,
             decimal riskRewardTrend)
         {
-            // dùng nến 15m đã đóng
             int i15 = candles15m.Count - 2;
             if (i15 <= 0) return new TradeSignal();
 
@@ -584,19 +547,13 @@ namespace FuturesBot.Services
             decimal ema89 = ema89_15[i15];
             decimal ema200 = ema200_15[i15];
 
-            // 1. KHÁNG CỰ GẦN NHẤT (EMA trên giá)
+            // 1. KHÁNG CỰ GẦN NHẤT (EMA trên giá) – dynamic: 34/89/200 cái nào gần nhất phía trên
             var resistances = new List<decimal>();
+            if (ema34 > last15.Close) resistances.Add(ema34);
+            if (ema89 > last15.Close) resistances.Add(ema89);
+            if (ema200 > last15.Close) resistances.Add(ema200);
 
-            if (ema34 > last15.Close)
-                resistances.Add(ema34);
-            if (ema89 > last15.Close)
-                resistances.Add(ema89);
-            if (ema200 > last15.Close)
-                resistances.Add(ema200);
-
-            decimal nearestResistance = resistances.Count > 0 ? resistances.Min() : 0m;
-
-            if (nearestResistance <= 0m)
+            if (resistances.Count == 0)
             {
                 return new TradeSignal
                 {
@@ -605,6 +562,8 @@ namespace FuturesBot.Services
                     Coin = symbol.Coin
                 };
             }
+
+            decimal nearestResistance = resistances.Min(); // EMA gần nhất phía trên giá
 
             // 2. RETEST KHÁNG CỰ
             bool retest =
@@ -622,20 +581,15 @@ namespace FuturesBot.Services
             // 4. MOMENTUM
             bool macdCrossDown = macd15[i15] < sig15[i15] && macd15[i15 - 1] >= sig15[i15 - 1];
             bool rsiBear = rsi15[i15] < RsiBearThreshold && rsi15[i15] <= rsi15[i15 - 1];
-
-            // mềm: RSI < 50 + đang quay xuống, MACD không còn tăng
             bool rsiBearSoft = rsi15[i15] < 50m && rsi15[i15] <= rsi15[i15 - 1];
             bool macdDownOrFlat = macd15[i15] <= macd15[i15 - 1];
 
             bool momentum =
-                (macdCrossDown && rsiBear) ||        // momentum mạnh
-                (rsiBear && macd15[i15] < 0) ||      // RSI bear + MACD âm
-                (rsiBearSoft && macdDownOrFlat);     // momentum mềm
+                (macdCrossDown && rsiBear) ||
+                (rsiBear && macd15[i15] < 0) ||
+                (rsiBearSoft && macdDownOrFlat);
 
-            // 5. CHECK SETUP:
-            //    BẮT BUỘC retest EMA, sau đó cần REJECT HOẶC MOMENTUM
             bool ok = retest && (reject || momentum);
-
             if (!ok)
             {
                 return new TradeSignal
@@ -646,63 +600,34 @@ namespace FuturesBot.Services
                 };
             }
 
-            // 6. ENTRY OFFSET – tránh đu đáy
-            decimal rawEntry = last15.Close * (1 + EntryOffsetPercent);
+            // 5. ENTRY & SL DYNAMIC THEO EMA GẦN NHẤT
+            //    Entry thấp hơn EMA 1 chút, SL cao hơn EMA 1 chút
+            decimal anchor = nearestResistance;
 
-            // 7. SL & TP – swing high + EMA89
-            decimal swingHigh = PriceActionHelper.FindSwingHigh(candles15m, i15, SwingLookback);
-
-            decimal entry = rawEntry;
-            if (entry >= swingHigh)
-                entry = (last15.Close + swingHigh) / 2;
-
-            // SL candidate 1: trên swingHigh 0.5% của entry
-            decimal slFromSwing = swingHigh + entry * StopBufferPercent;
-
-            // SL candidate 2: trên EMA89 0.3% (nếu EMA89 > entry)
-            decimal slFromEma89 = 0m;
-            if (ema89 > entry)
-            {
-                slFromEma89 = ema89 * (1 + Ema89StopExtraPercent);
-            }
-
-            var slCandidates = new List<decimal>();
-            if (slFromSwing > 0) slCandidates.Add(slFromSwing);
-            if (slFromEma89 > 0) slCandidates.Add(slFromEma89);
-
-            if (slCandidates.Count == 0)
-            {
-                return new TradeSignal
-                {
-                    Type = SignalType.None,
-                    Reason = $"{symbol.Coin}: Không tìm được SL hợp lệ cho short.",
-                    Coin = symbol.Coin
-                };
-            }
-
-            decimal sl = slCandidates.Max();
+            decimal entry = anchor * (1m - EntryOffsetPercent);       // tránh vào đúng EMA
+            decimal sl    = anchor * (1m + AnchorSlBufferPercent);    // SL trên EMA gần nhất
 
             if (sl <= entry)
             {
                 return new TradeSignal
                 {
                     Type = SignalType.None,
-                    Reason = $"{symbol.Coin}: SL invalid cho short.",
+                    Reason = $"{symbol.Coin}: SL invalid cho short (entry={entry:F4}, sl={sl:F4}).",
                     Coin = symbol.Coin
                 };
             }
 
             decimal risk = sl - entry;
-            decimal tp = entry - risk * riskRewardTrend;
+            decimal tp   = entry - risk * riskRewardTrend;
 
             return new TradeSignal
             {
-                Type = SignalType.Short,
+                Type       = SignalType.Short,
                 EntryPrice = entry,
-                StopLoss = sl,
+                StopLoss   = sl,
                 TakeProfit = tp,
-                Reason = $"{symbol.Coin}: SHORT – trend down + retest EMA kháng cự gần nhất ({nearestResistance:F6}) + (rejection hoặc momentum) + entryOffset (SL dựa trên swing/EMA89).",
-                Coin = symbol.Coin
+                Reason     = $"{symbol.Coin}: SHORT – trend down + retest EMA kháng cự gần nhất ({nearestResistance:F6}) + (rejection/momentum) + entryOffset; SL đặt trên EMA gần nhất.",
+                Coin       = symbol.Coin
             };
         }
 
@@ -733,7 +658,6 @@ namespace FuturesBot.Services
 
             // 1) BIAS EMA 15M
             bool shortBias15 = ema34 <= ema89 && ema34 <= ema200;
-
             bool longBias15 = ema34 >= ema89 && ema34 >= ema200;
 
             // 2) Ưu tiên bias theo H1
@@ -788,9 +712,9 @@ namespace FuturesBot.Services
                 bool rsiHigh = rsi15[i15] >= 55m;
                 bool rsiTurnDown = rsi15[i15] <= rsi15[i15 - 1];
 
-                bool macdDownOrFlat = macd15[i15] <= macd15[i15 - 1];
+                bool macdDownOrFlatScalp = macd15[i15] <= macd15[i15 - 1];
 
-                bool momentum = rsiHigh && (rsiTurnDown || macdDownOrFlat);
+                bool momentum = rsiHigh && (rsiTurnDown || macdDownOrFlatScalp);
 
                 if (!(touchRes && reject && momentum))
                     return new TradeSignal();
@@ -843,9 +767,9 @@ namespace FuturesBot.Services
                 bool rsiHighEnough = rsi15[i15] >= 45m;
                 bool rsiTurnUp = rsi15[i15] >= rsi15[i15 - 1];
 
-                bool macdUpOrFlat = macd15[i15] >= macd15[i15 - 1];
+                bool macdUpOrFlatScalp = macd15[i15] >= macd15[i15 - 1];
 
-                bool momentum = rsiHighEnough && (rsiTurnUp || macdUpOrFlat);
+                bool momentum = rsiHighEnough && (rsiTurnUp || macdUpOrFlatScalp);
 
                 if (!(touchSup && reject && momentum))
                     return new TradeSignal();
