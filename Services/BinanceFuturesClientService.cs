@@ -187,69 +187,67 @@ namespace FuturesBot.Services
         }
 
         public async Task<PositionInfo> GetPositionAsync(string symbol)
+{
+    string json;
+    try
+    {
+        json = await SignedGetAsync("/fapi/v2/positionRisk", new Dictionary<string, string>
         {
-            var json = await SignedGetAsync("/fapi/v2/positionRisk", new Dictionary<string, string>
-            {
-                ["symbol"] = symbol
-            });
+            ["symbol"] = symbol
+        });
+    }
+    catch (Exception ex)
+    {
+        throw new Exception($"GetPositionAsync API error for {symbol}: {ex.Message}");
+    }
 
-            using var doc = JsonDocument.Parse(json);
-            var root = doc.RootElement;
+    using var doc = JsonDocument.Parse(json);
+    var root = doc.RootElement;
 
-            if (root.ValueKind == JsonValueKind.Array && root.GetArrayLength() > 0)
-            {
-                JsonElement? chosen = null;
+    if (root.ValueKind != JsonValueKind.Array || root.GetArrayLength() == 0)
+    {
+        throw new Exception($"GetPositionAsync empty array for {symbol}. Raw json: {json}");
+    }
 
-                // 1) Ưu tiên phần tử có positionAmt != 0 (đang có lệnh)
-                foreach (var el in root.EnumerateArray())
-                {
-                    var sym = el.GetProperty("symbol").GetString();
-                    if (!string.Equals(sym, symbol, StringComparison.OrdinalIgnoreCase))
-                        continue;
+    JsonElement? chosen = null;
 
-                    var amtStr = el.GetProperty("positionAmt").GetString() ?? "0";
-                    var amt = decimal.Parse(amtStr, CultureInfo.InvariantCulture);
+    foreach (var el in root.EnumerateArray())
+    {
+        var sym = el.GetProperty("symbol").GetString();
+        if (!string.Equals(sym, symbol, StringComparison.OrdinalIgnoreCase))
+            continue;
 
-                    if (amt != 0)
-                    {
-                        chosen = el;
-                        break;
-                    }
+        var amtStr = el.GetProperty("positionAmt").GetString() ?? "0";
+        var amt = decimal.Parse(amtStr, CultureInfo.InvariantCulture);
 
-                    // nếu chưa chọn gì thì tạm giữ lại (phòng khi không có lệnh)
-                    chosen ??= el;
-                }
-
-                if (chosen.HasValue)
-                {
-                    var el = chosen.Value;
-
-                    string sym = el.GetProperty("symbol").GetString() ?? symbol;
-                    decimal positionAmt = decimal.Parse(el.GetProperty("positionAmt").GetString() ?? "0", CultureInfo.InvariantCulture);
-                    decimal entryPrice = decimal.Parse(el.GetProperty("entryPrice").GetString() ?? "0", CultureInfo.InvariantCulture);
-                    decimal markPrice = decimal.Parse(el.GetProperty("markPrice").GetString() ?? "0", CultureInfo.InvariantCulture);
-                    long updateMs = el.GetProperty("updateTime").GetInt64();
-
-                    return new PositionInfo
-                    {
-                        Symbol = sym,
-                        PositionAmt = positionAmt,
-                        EntryPrice = entryPrice,
-                        MarkPrice = markPrice,
-                        UpdateTime = DateTimeOffset.FromUnixTimeMilliseconds(updateMs).UtcDateTime
-                    };
-                }
-            }
-
-            return new PositionInfo
-            {
-                Symbol = symbol,
-                PositionAmt = 0,
-                EntryPrice = 0,
-                MarkPrice = 0,
-                UpdateTime = DateTime.UtcNow
-            };
+        if (amt != 0)
+        {
+            chosen = el;
+            break;
         }
+
+        chosen ??= el; // giữ lại nếu không có positionAmt != 0
+    }
+
+    if (!chosen.HasValue)
+        throw new Exception($"GetPositionAsync cannot find symbol {symbol} in array.");
+
+    var elx = chosen.Value;
+
+    decimal positionAmt = decimal.Parse(elx.GetProperty("positionAmt").GetString() ?? "0", CultureInfo.InvariantCulture);
+    decimal entryPrice  = decimal.Parse(elx.GetProperty("entryPrice").GetString() ?? "0", CultureInfo.InvariantCulture);
+    decimal markPrice   = decimal.Parse(elx.GetProperty("markPrice").GetString() ?? "0", CultureInfo.InvariantCulture);
+    long updateMs       = elx.GetProperty("updateTime").GetInt64();
+
+    return new PositionInfo
+    {
+        Symbol = symbol,
+        PositionAmt = positionAmt,
+        EntryPrice = entryPrice,
+        MarkPrice = markPrice,
+        UpdateTime = DateTimeOffset.FromUnixTimeMilliseconds(updateMs).UtcDateTime
+    };
+}
 
         public async Task<bool> HasOpenPositionOrOrderAsync(string symbol)
         {
