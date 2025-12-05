@@ -1,4 +1,4 @@
-﻿using FuturesBot.Config;
+using FuturesBot.Config;
 using FuturesBot.IServices;
 using FuturesBot.Models;
 using static FuturesBot.Utils.EnumTypesHelper;
@@ -25,13 +25,62 @@ namespace FuturesBot.Services
                     _states[symbol.Coin] = state;
                 }
 
-                var pos = await exchange.GetPositionAsync(symbol.Coin);
+                PositionInfo pos;
+
+                // ===============================
+                // 1) LẤY POSITION – SAFE MODE
+                // ===============================
+                try
+                {
+                    pos = await exchange.GetPositionAsync(symbol.Coin);
+                }
+                catch (Exception ex)
+                {
+                    await pnl.LogDebugAsync($"{symbol.Coin}: GetPositionAsync FAILED → skip sync cycle. Err: {ex.Message}");
+                    continue; // Không xử lý gì nếu lấy position lỗi
+                }
+
+                // ===============================
+                // 2) VALIDATE POSITION
+                // ===============================
+                bool invalid =
+                    pos.PositionAmt == 0 &&
+                    pos.EntryPrice == 0 &&
+                    pos.MarkPrice == 0;
+
+                if (invalid)
+                {
+                    await pnl.LogDebugAsync($"{symbol.Coin}: INVALID position snapshot (0,0,0) → skip this cycle.");
+                    continue;
+                }
 
                 bool wasOpen = !state.LastPosition.IsFlat;
                 bool nowFlat = pos.IsFlat;
 
+                // ===============================
+                // 3) XỬ LÝ ĐÓNG LỆNH THẬT
+                // ===============================
                 if (wasOpen && nowFlat)
                 {
+                    // DOUBLE CONFIRM – tránh close ảo
+                    PositionInfo pos2;
+                    try
+                    {
+                        await Task.Delay(80); // delay nhẹ cho chắc
+                        pos2 = await exchange.GetPositionAsync(symbol.Coin);
+                    }
+                    catch
+                    {
+                        await pnl.LogDebugAsync($"{symbol.Coin}: Double-check position FAILED → skip closing.");
+                        continue;
+                    }
+
+                    if (!pos2.IsFlat)
+                    {
+                        await pnl.LogDebugAsync($"{symbol.Coin}: False flat detected → skip closing.");
+                        continue;
+                    }
+
                     var last = state.LastPosition;
 
                     var lastTrade = await exchange.GetLastUserTradeAsync(
@@ -41,7 +90,7 @@ namespace FuturesBot.Services
                     decimal exitPrice = lastTrade?.Price ?? pos.MarkPrice;
 
                     var side = last.IsLong ? SignalType.Long : SignalType.Short;
-                    var qty = Math.Abs(last.PositionAmt);
+                    var qty  = Math.Abs(last.PositionAmt);
 
                     var netPnlAsync = await exchange.GetNetPnlAsync(symbol.Coin);
 
@@ -56,15 +105,21 @@ namespace FuturesBot.Services
                         CloseTime = DateTime.UtcNow,
                         PnlUSDT = (side == SignalType.Long
                                     ? (exitPrice - last.EntryPrice) * qty
-                                    : (last.EntryPrice - exitPrice) * qty) + netPnlAsync.Commission
+                                    : (last.EntryPrice - exitPrice) * qty)
+                                    + netPnlAsync.Commission
                     };
 
                     await pnl.RegisterClosedTradeAsync(closed);
                     await exchange.CancelAllOpenOrdersAsync(symbol.Coin);
+
+                    await pnl.LogDebugAsync($"{symbol.Coin}: CLOSED TRADE OK (confirmed).");
                 }
 
+                // ===============================
+                // 4) CẬP NHẬT TRẠNG THÁI
+                // ===============================
                 if (pos.PositionAmt != state.LastPosition.PositionAmt ||
-                    pos.EntryPrice != state.LastPosition.EntryPrice)
+                    pos.EntryPrice   != state.LastPosition.EntryPrice)
                 {
                     state.LastPosition = pos;
                     state.LastChangeTime = DateTime.UtcNow;
