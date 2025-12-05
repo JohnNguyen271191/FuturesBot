@@ -29,6 +29,9 @@ namespace FuturesBot.Services
     ///         RR trend riêng (RiskRewardMajor), RR sideway (RiskRewardSidewayMajor).
     ///       + IsMajor = false (Altcoin): chỉ trend trade, thêm filter Volume / EMA slope H1,
     ///         bỏ sideway scalp, RR trend dùng RiskReward.
+    /// - V2 bổ sung:
+    ///       + Filter SIDEWAY mạnh (EMA34 & EMA89 dính nhau + EMA34 gần như đi ngang).
+    ///       + Altcoin gặp sideway H1/M15 → NO TRADE để né nhiễu.
     /// </summary>
     public class TradingStrategy(IndicatorService indicators) : IStrategyService
     {
@@ -86,6 +89,11 @@ namespace FuturesBot.Services
         // Độ dốc EMA34 H1 tối thiểu cho Altcoin (tránh alt sideway)
         private const int EmaSlopeLookbackH1 = 3;
         private const decimal MinAltEmaSlopeH1 = 0.003m; // 0.3%
+
+        // SIDEWAY FILTER (V2)
+        private const int SidewaySlopeLookback = 10;
+        private const decimal SidewayEmaDistThreshold = 0.0015m; // 0.15%
+        private const decimal SidewaySlopeThreshold = 0.002m;    // 0.2%
 
         // =====================================================================
         //                           EXIT SIGNAL
@@ -269,6 +277,22 @@ namespace FuturesBot.Services
                 }
             }
 
+            // =================== SIDEWAY FILTER (V2) ===========================
+
+            bool sideway15 = IsSideway(candles15m, ema34_15, ema89_15);
+            bool sidewayH1 = IsSideway(candles1h, ema34_h1, ema89_h1);
+
+            // Altcoin gặp sideway mạnh H1 hoặc M15 → bỏ qua hết, không trend, không scalp
+            if (!isMajor && (sideway15 || sidewayH1))
+            {
+                return new TradeSignal
+                {
+                    Type = SignalType.None,
+                    Reason = $"{symbol.Coin}: Altcoin đang SIDEWAY mạnh (EMA34 & EMA89 dính nhau / EMA34 đi ngang) trên {(sidewayH1 ? "H1" : "M15")} → NO TRADE (V2).",
+                    Coin = symbol.Coin
+                };
+            }
+
             // ================= FILTER: CLIMAX + OVEREXTENDED = NO TRADE ========
 
             bool climaxDanger =
@@ -330,7 +354,7 @@ namespace FuturesBot.Services
                     last15.Close <= ema34_15Now;
 
                 bool shouldTrySideway =
-                    (!upTrend && !downTrend) || m15PullbackDown || m15PullbackUp;
+                    (!upTrend && !downTrend) || m15PullbackDown || m15PullbackUp || sideway15;
 
                 // Major: cho phép sideway scalp
                 if (allowSideway && shouldTrySideway)
@@ -497,7 +521,7 @@ namespace FuturesBot.Services
             decimal anchor = nearestSupport;
 
             decimal entry = anchor * (1m + EntryOffsetPercent);       // tránh vào đúng EMA
-            decimal sl    = anchor * (1m - AnchorSlBufferPercent);    // SL dưới EMA gần nhất
+            decimal sl = anchor * (1m - AnchorSlBufferPercent);    // SL dưới EMA gần nhất
 
             if (sl >= entry || sl <= 0)
             {
@@ -510,16 +534,16 @@ namespace FuturesBot.Services
             }
 
             decimal risk = entry - sl;
-            decimal tp   = entry + risk * riskRewardTrend;
+            decimal tp = entry + risk * riskRewardTrend;
 
             return new TradeSignal
             {
-                Type       = SignalType.Long,
+                Type = SignalType.Long,
                 EntryPrice = entry,
-                StopLoss   = sl,
+                StopLoss = sl,
                 TakeProfit = tp,
-                Reason     = $"{symbol.Coin}: LONG – trend up + retest EMA hỗ trợ gần nhất ({nearestSupport:F6}) + (rejection/momentum) + entryOffset; SL đặt dưới EMA gần nhất.",
-                Coin       = symbol.Coin
+                Reason = $"{symbol.Coin}: LONG – trend up + retest EMA hỗ trợ gần nhất ({nearestSupport:F6}) + (rejection/momentum) + entryOffset; SL đặt dưới EMA gần nhất.",
+                Coin = symbol.Coin
             };
         }
 
@@ -605,7 +629,7 @@ namespace FuturesBot.Services
             decimal anchor = nearestResistance;
 
             decimal entry = anchor * (1m - EntryOffsetPercent);       // tránh vào đúng EMA
-            decimal sl    = anchor * (1m + AnchorSlBufferPercent);    // SL trên EMA gần nhất
+            decimal sl = anchor * (1m + AnchorSlBufferPercent);    // SL trên EMA gần nhất
 
             if (sl <= entry)
             {
@@ -618,16 +642,16 @@ namespace FuturesBot.Services
             }
 
             decimal risk = sl - entry;
-            decimal tp   = entry - risk * riskRewardTrend;
+            decimal tp = entry - risk * riskRewardTrend;
 
             return new TradeSignal
             {
-                Type       = SignalType.Short,
+                Type = SignalType.Short,
                 EntryPrice = entry,
-                StopLoss   = sl,
+                StopLoss = sl,
                 TakeProfit = tp,
-                Reason     = $"{symbol.Coin}: SHORT – trend down + retest EMA kháng cự gần nhất ({nearestResistance:F6}) + (rejection/momentum) + entryOffset; SL đặt trên EMA gần nhất.",
-                Coin       = symbol.Coin
+                Reason = $"{symbol.Coin}: SHORT – trend down + retest EMA kháng cự gần nhất ({nearestResistance:F6}) + (rejection/momentum) + entryOffset; SL đặt trên EMA gần nhất.",
+                Coin = symbol.Coin
             };
         }
 
@@ -803,7 +827,7 @@ namespace FuturesBot.Services
         }
 
         // =====================================================================
-        //                     HELPERS: CLIMAX / EMA / SYMBOL
+        //                     HELPERS: CLIMAX / EMA / SYMBOL / SIDEWAY
         // =====================================================================
 
         private bool IsClimaxCandle(IReadOnlyList<Candle> candles, int index)
@@ -899,6 +923,35 @@ namespace FuturesBot.Services
             if (min == diff34) return 34;
             if (min == diff89) return 89;
             return 200;
+        }
+
+        /// <summary>
+        /// SIDEWAY mạnh khi:
+        /// - EMA34 và EMA89 rất gần nhau (dưới ngưỡng % so với giá).
+        /// - EMA34 trong ~10 cây gần nhất gần như đi ngang (slope nhỏ).
+        /// </summary>
+        private bool IsSideway(IReadOnlyList<Candle> candles, IReadOnlyList<decimal> ema34, IReadOnlyList<decimal> ema89)
+        {
+            if (candles.Count < SidewaySlopeLookback + 5)
+                return false;
+
+            int idx = candles.Count - 2; // dùng nến đã đóng
+            var price = candles[idx].Close;
+
+            decimal dist = Math.Abs(ema34[idx] - ema89[idx]) / price;
+            if (dist < SidewayEmaDistThreshold)
+                return true;
+
+            int start = Math.Max(0, idx - SidewaySlopeLookback);
+            decimal emaStart = ema34[start];
+            decimal emaEnd = ema34[idx];
+
+            if (emaStart <= 0)
+                return false;
+
+            decimal slope = (emaEnd - emaStart) / emaStart;
+
+            return Math.Abs(slope) < SidewaySlopeThreshold;
         }
     }
 }
