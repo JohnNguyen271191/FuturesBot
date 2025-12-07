@@ -99,10 +99,12 @@ namespace FuturesBot.Services
                         Quantity = qty,
                         OpenTime = state.LastChangeTime,
                         CloseTime = DateTime.UtcNow,
-                        PnlUSDT = (side == SignalType.Long
+                        PnlUSDT = side == SignalType.Long
                                     ? (exitPrice - last.EntryPrice) * qty
-                                    : (last.EntryPrice - exitPrice) * qty)
-                                    + netPnlAsync.Commission
+                                    : (last.EntryPrice - exitPrice) * qty,
+                        Realized = netPnlAsync.Realized,
+                        Commission = netPnlAsync.Commission,
+                        Funding = netPnlAsync.Funding
                     };
 
                     await pnl.RegisterClosedTradeAsync(closed);

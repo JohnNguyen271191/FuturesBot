@@ -21,7 +21,10 @@ namespace FuturesBot.Services
 Entry : {trade.Entry}
 Exit  : {trade.Exit}
 Qty   : {trade.Quantity:F6}
-PnL   : {trade.PnlUSDT:F2} USDT";
+PnL   : {trade.PnlUSDT:F2} USDT
+Realized   : {trade.Realized:F2} USDT
+Commission   : {trade.Commission:F2} USDT
+Funding   : {trade.Funding:F2} USDT";
 
             await _notifier.SendAsync(msg);
 

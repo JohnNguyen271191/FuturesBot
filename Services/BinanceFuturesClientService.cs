@@ -187,67 +187,67 @@ namespace FuturesBot.Services
         }
 
         public async Task<PositionInfo> GetPositionAsync(string symbol)
-{
-    string json;
-    try
-    {
-        json = await SignedGetAsync("/fapi/v2/positionRisk", new Dictionary<string, string>
         {
-            ["symbol"] = symbol
-        });
-    }
-    catch (Exception ex)
-    {
-        throw new Exception($"GetPositionAsync API error for {symbol}: {ex.Message}");
-    }
+            string json;
+            try
+            {
+                json = await SignedGetAsync("/fapi/v2/positionRisk", new Dictionary<string, string>
+                {
+                    ["symbol"] = symbol
+                });
+            }
+            catch (Exception ex)
+            {
+                throw new Exception($"GetPositionAsync API error for {symbol}: {ex.Message}");
+            }
 
-    using var doc = JsonDocument.Parse(json);
-    var root = doc.RootElement;
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
 
-    if (root.ValueKind != JsonValueKind.Array || root.GetArrayLength() == 0)
-    {
-        throw new Exception($"GetPositionAsync empty array for {symbol}. Raw json: {json}");
-    }
+            if (root.ValueKind != JsonValueKind.Array || root.GetArrayLength() == 0)
+            {
+                throw new Exception($"GetPositionAsync empty array for {symbol}. Raw json: {json}");
+            }
 
-    JsonElement? chosen = null;
+            JsonElement? chosen = null;
 
-    foreach (var el in root.EnumerateArray())
-    {
-        var sym = el.GetProperty("symbol").GetString();
-        if (!string.Equals(sym, symbol, StringComparison.OrdinalIgnoreCase))
-            continue;
+            foreach (var el in root.EnumerateArray())
+            {
+                var sym = el.GetProperty("symbol").GetString();
+                if (!string.Equals(sym, symbol, StringComparison.OrdinalIgnoreCase))
+                    continue;
 
-        var amtStr = el.GetProperty("positionAmt").GetString() ?? "0";
-        var amt = decimal.Parse(amtStr, CultureInfo.InvariantCulture);
+                var amtStr = el.GetProperty("positionAmt").GetString() ?? "0";
+                var amt = decimal.Parse(amtStr, CultureInfo.InvariantCulture);
 
-        if (amt != 0)
-        {
-            chosen = el;
-            break;
+                if (amt != 0)
+                {
+                    chosen = el;
+                    break;
+                }
+
+                chosen ??= el; // giữ lại nếu không có positionAmt != 0
+            }
+
+            if (!chosen.HasValue)
+                throw new Exception($"GetPositionAsync cannot find symbol {symbol} in array.");
+
+            var elx = chosen.Value;
+
+            decimal positionAmt = decimal.Parse(elx.GetProperty("positionAmt").GetString() ?? "0", CultureInfo.InvariantCulture);
+            decimal entryPrice = decimal.Parse(elx.GetProperty("entryPrice").GetString() ?? "0", CultureInfo.InvariantCulture);
+            decimal markPrice = decimal.Parse(elx.GetProperty("markPrice").GetString() ?? "0", CultureInfo.InvariantCulture);
+            long updateMs = elx.GetProperty("updateTime").GetInt64();
+
+            return new PositionInfo
+            {
+                Symbol = symbol,
+                PositionAmt = positionAmt,
+                EntryPrice = entryPrice,
+                MarkPrice = markPrice,
+                UpdateTime = DateTimeOffset.FromUnixTimeMilliseconds(updateMs).UtcDateTime
+            };
         }
-
-        chosen ??= el; // giữ lại nếu không có positionAmt != 0
-    }
-
-    if (!chosen.HasValue)
-        throw new Exception($"GetPositionAsync cannot find symbol {symbol} in array.");
-
-    var elx = chosen.Value;
-
-    decimal positionAmt = decimal.Parse(elx.GetProperty("positionAmt").GetString() ?? "0", CultureInfo.InvariantCulture);
-    decimal entryPrice  = decimal.Parse(elx.GetProperty("entryPrice").GetString() ?? "0", CultureInfo.InvariantCulture);
-    decimal markPrice   = decimal.Parse(elx.GetProperty("markPrice").GetString() ?? "0", CultureInfo.InvariantCulture);
-    long updateMs       = elx.GetProperty("updateTime").GetInt64();
-
-    return new PositionInfo
-    {
-        Symbol = symbol,
-        PositionAmt = positionAmt,
-        EntryPrice = entryPrice,
-        MarkPrice = markPrice,
-        UpdateTime = DateTimeOffset.FromUnixTimeMilliseconds(updateMs).UtcDateTime
-    };
-}
 
         public async Task<bool> HasOpenPositionOrOrderAsync(string symbol)
         {
@@ -517,7 +517,7 @@ namespace FuturesBot.Services
             }
 
             return result;
-        }        
+        }
 
         // ==========================
         //       PRIVATE HELPERS
