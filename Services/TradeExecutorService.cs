@@ -84,7 +84,8 @@ PaperMode: {_config.PaperMode}
             {
                 await _notifier.SendAsync($"[INFO] - {symbol.Coin} - API call sent to place the order (check Binance).");
                 await _orderManagerService.MonitorLimitOrderAsync(signal);
-            } else
+            } 
+            else
             {
                 await _notifier.SendAsync($"[ERROR] - {symbol.Coin} - API calln't sent to place the order (check Binance).");
             }            

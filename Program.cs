@@ -1,5 +1,6 @@
 using FuturesBot.Config;
 using FuturesBot.IServices;
+using FuturesBot.Models;
 using FuturesBot.Services;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -74,6 +75,7 @@ static async Task RunSymbolWorkerAsync(
     var strategy = scope.ServiceProvider.GetRequiredService<TradingStrategy>();
     var executor = scope.ServiceProvider.GetRequiredService<TradeExecutorService>();
     var exchange = scope.ServiceProvider.GetRequiredService<IExchangeClientService>();
+    var orderManager = scope.ServiceProvider.GetRequiredService<OrderManagerService>();
 
     DateTime lastProcessedCandle = DateTime.MinValue;
 
@@ -99,9 +101,10 @@ static async Task RunSymbolWorkerAsync(
 
                     //Lấy position 1 lần
                     var pos = await exchange.GetPositionAsync(symbol.Coin);
+                    await orderManager.AttachManualPositionAsync(pos);
+
                     bool hasLong = pos.PositionAmt > 0;
                     bool hasShort = pos.PositionAmt < 0;
-
                     //EXIT logic
                     if (hasLong || hasShort)
                     {
@@ -114,7 +117,7 @@ static async Task RunSymbolWorkerAsync(
                             await exchange.ClosePositionAsync(symbol.Coin, pos.PositionAmt);
                             // không continue; vẫn cho liveSync/pnl chạy bên dưới
                         }
-                    }
+                    }                    
 
                     // ENTRY logic
                     var entrySignal = strategy.GenerateSignal(candles15m, candles1h, symbol);

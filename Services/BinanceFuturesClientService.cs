@@ -485,21 +485,22 @@ namespace FuturesBot.Services
             return true;
         }
 
-        public async Task<NetPnlResult> GetNetPnlAsync(string symbol)
+        public async Task<NetPnlResult> GetNetPnlAsync(string symbol, DateTime fromUtc, DateTime? toUtc = null)
         {
             var result = new NetPnlResult();
 
-            // 1️⃣ Lấy unrealized PnL từ PositionRisk
-            var pos = await GetPositionAsync(symbol);
+            var to = toUtc ?? DateTime.UtcNow;
 
-            // 2️⃣ Lấy các record mới nhất từ /income trong 24 giờ
-            var since = DateTime.UtcNow.AddDays(-1);
+            // Lấy income trong [from, to]
+            var incomeList = await GetIncomeAsync(symbol, fromUtc, to);
 
-            var incomeList = await GetIncomeAsync(symbol, since);
-
-            // 3️⃣ Tách theo loại income
             foreach (var i in incomeList)
             {
+                // Lọc thêm lần nữa cho chắc,
+                // phòng khi Binance trả dư (do startTime/endTime bị làm tròn)
+                if (i.Time < fromUtc || i.Time > to)
+                    continue;
+
                 switch (i.IncomeType)
                 {
                     case "REALIZED_PNL":
@@ -511,7 +512,7 @@ namespace FuturesBot.Services
                         break;
 
                     case "FUNDING_FEE":
-                        result.Funding += i.Income; // funding có thể âm hoặc dương
+                        result.Funding += i.Income; // funding âm hoặc dương
                         break;
                 }
             }
@@ -614,13 +615,16 @@ namespace FuturesBot.Services
             return local - _serverTimeOffsetMs;
         }
 
-        private async Task<List<IncomeRecord>> GetIncomeAsync(string symbol, DateTime startTime)
+        private async Task<List<IncomeRecord>> GetIncomeAsync(string symbol, DateTime startTimeUtc, DateTime endTimeUtc)
         {
             var query = new Dictionary<string, string>
             {
                 ["symbol"] = symbol,
                 ["limit"] = "100",
-                ["startTime"] = new DateTimeOffset(startTime)
+                ["startTime"] = new DateTimeOffset(startTimeUtc)
+                                    .ToUnixTimeMilliseconds()
+                                    .ToString(),
+                ["endTime"] = new DateTimeOffset(endTimeUtc)
                                     .ToUnixTimeMilliseconds()
                                     .ToString()
             };
@@ -637,10 +641,10 @@ namespace FuturesBot.Services
                     Symbol = el.GetProperty("symbol").GetString() ?? "",
                     IncomeType = el.GetProperty("incomeType").GetString() ?? "",
                     Income = decimal.Parse(
-                                    el.GetProperty("income").GetString() ?? "0",
-                                    CultureInfo.InvariantCulture),
+                                el.GetProperty("income").GetString() ?? "0",
+                                CultureInfo.InvariantCulture),
                     Time = DateTimeOffset.FromUnixTimeMilliseconds(
-                                    el.GetProperty("time").GetInt64()).UtcDateTime
+                                el.GetProperty("time").GetInt64()).UtcDateTime
                 });
             }
 

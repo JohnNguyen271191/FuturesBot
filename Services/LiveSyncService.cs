@@ -88,7 +88,9 @@ namespace FuturesBot.Services
                     var side = last.IsLong ? SignalType.Long : SignalType.Short;
                     var qty  = Math.Abs(last.PositionAmt);
 
-                    var netPnlAsync = await exchange.GetNetPnlAsync(symbol.Coin);
+                    var openTime = state.LastChangeTime;
+                    var closeTime = DateTime.UtcNow;
+                    var netPnlAsync = await exchange.GetNetPnlAsync(symbol.Coin, openTime, closeTime);
 
                     var closed = new ClosedTrade
                     {
@@ -97,11 +99,12 @@ namespace FuturesBot.Services
                         Entry = last.EntryPrice,
                         Exit = exitPrice,
                         Quantity = qty,
-                        OpenTime = state.LastChangeTime,
-                        CloseTime = DateTime.UtcNow,
-                        PnlUSDT = side == SignalType.Long
+                        OpenTime = openTime,
+                        CloseTime = closeTime,
+                        PnlUSDT = (side == SignalType.Long
                                     ? (exitPrice - last.EntryPrice) * qty
-                                    : (last.EntryPrice - exitPrice) * qty,
+                                    : (last.EntryPrice - exitPrice) * qty)
+                                    + netPnlAsync.Commission,
                         Realized = netPnlAsync.Realized,
                         Commission = netPnlAsync.Commission,
                         Funding = netPnlAsync.Funding

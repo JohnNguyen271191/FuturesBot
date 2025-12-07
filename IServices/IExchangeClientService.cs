@@ -24,6 +24,6 @@ namespace FuturesBot.IServices
         Task<IReadOnlyList<OpenOrderInfo>> GetOpenOrdersAsync(string symbol);
 
         Task<bool> PlaceStopOnlyAsync(string symbol, string side, string positionSide, decimal quantity, decimal stopPrice);
-        Task<NetPnlResult> GetNetPnlAsync(string symbol);
+        Task<NetPnlResult> GetNetPnlAsync(string symbol, DateTime fromUtc, DateTime? toUtc = null);
     }
 }
