@@ -173,7 +173,7 @@ namespace FuturesBot.Services
 
             if (IsMonitoringPosition(symbol))
             {
-                await _notify.SendAsync($"[{symbol}] POSITION: đã monitor → bỏ qua.");
+                //await _notify.SendAsync($"[{symbol}] POSITION: đã monitor → bỏ qua.");
                 return;
             }
 
@@ -312,7 +312,7 @@ namespace FuturesBot.Services
             // Nếu đã có POSITION monitor rồi thì không attach nữa
             if (IsMonitoringPosition(pos.Symbol))
             {
-                await _notify.SendAsync($"[{pos.Symbol}] MANUAL ATTACH: POSITION đang được monitor → bỏ qua.");
+                //await _notify.SendAsync($"[{pos.Symbol}] MANUAL ATTACH: POSITION đang được monitor → bỏ qua.");
                 return;
             }
 
