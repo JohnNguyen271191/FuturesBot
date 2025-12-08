@@ -18,19 +18,35 @@ namespace FuturesBot.Services
         private const decimal EmaBreakTolerance = 0.001m;
 
         // ============================================================
-        // TRACK SYMBOL ĐANG ĐƯỢC GIÁM SÁT
+        // TRACK SYMBOL ĐANG ĐƯỢC GIÁM SÁT (tách LIMIT / POSITION)
         // ============================================================
 
-        private readonly ConcurrentDictionary<string, bool> _monitoring = new();
+        private readonly ConcurrentDictionary<string, bool> _monitoringLimit = new();
+        private readonly ConcurrentDictionary<string, bool> _monitoringPosition = new();
 
-        private bool IsMonitoring(string symbol)
-            => _monitoring.ContainsKey(symbol);
+        private bool IsMonitoringLimit(string symbol)
+            => _monitoringLimit.ContainsKey(symbol);
 
-        private void SetMonitoring(string symbol)
-            => _monitoring[symbol] = true;
+        private bool IsMonitoringPosition(string symbol)
+            => _monitoringPosition.ContainsKey(symbol);
 
-        private void ClearMonitoring(string symbol)
-            => _monitoring.TryRemove(symbol, out _);
+        private void SetMonitoringLimit(string symbol)
+            => _monitoringLimit[symbol] = true;
+
+        private void SetMonitoringPosition(string symbol)
+            => _monitoringPosition[symbol] = true;
+
+        private void ClearMonitoringLimit(string symbol)
+            => _monitoringLimit.TryRemove(symbol, out _);
+
+        private void ClearMonitoringPosition(string symbol)
+            => _monitoringPosition.TryRemove(symbol, out _);
+
+        private void ClearAllMonitoring(string symbol)
+        {
+            ClearMonitoringLimit(symbol);
+            ClearMonitoringPosition(symbol);
+        }
 
         // ============================================================
         // CONSTRUCTOR
@@ -55,13 +71,14 @@ namespace FuturesBot.Services
             string symbol = signal.Coin;
             bool isLong = signal.Type == SignalType.Long;
 
-            if (IsMonitoring(symbol))
+            // Nếu đang monitor POSITION hoặc LIMIT rồi thì bỏ qua
+            if (IsMonitoringLimit(symbol) || IsMonitoringPosition(symbol))
             {
                 await _notify.SendAsync($"[{symbol}] LIMIT: đã monitor → bỏ qua.");
                 return;
             }
 
-            SetMonitoring(symbol);
+            SetMonitoringLimit(symbol);
 
             await _notify.SendAsync($"[{symbol}] Monitor LIMIT started...");
 
@@ -75,12 +92,21 @@ namespace FuturesBot.Services
                 bool hasPosition = pos.PositionAmt != 0;
                 bool hasOpenOrder = openOrders.Any();
 
+                // LIMIT đã khớp → chuyển sang monitor POSITION
                 if (hasPosition)
                 {
                     await _notify.SendAsync(
                         $"[{symbol}] LIMIT filled → chuyển sang monitor POSITION");
 
-                    _ = MonitorPositionAsync(signal);
+                    // Ngưng monitor LIMIT, chuyển sang POSITION
+                    ClearMonitoringLimit(symbol);
+
+                    // Nếu chưa có POSITION monitor thì bật
+                    if (!IsMonitoringPosition(symbol))
+                    {
+                        _ = MonitorPositionAsync(signal);
+                    }
+
                     return;
                 }
 
@@ -88,7 +114,7 @@ namespace FuturesBot.Services
                 {
                     await _notify.SendAsync(
                         $"[{symbol}] LIMIT không còn order → stop monitor LIMIT.");
-                    ClearMonitoring(symbol);
+                    ClearMonitoringLimit(symbol);
                     return;
                 }
 
@@ -130,7 +156,7 @@ namespace FuturesBot.Services
                     await _notify.SendAsync(
                         $"[{symbol}] LIMIT setup broke → canceling orders...");
                     await _exchange.CancelAllOpenOrdersAsync(symbol);
-                    ClearMonitoring(symbol);
+                    ClearMonitoringLimit(symbol);
                     return;
                 }
             }
@@ -145,13 +171,15 @@ namespace FuturesBot.Services
             string symbol = signal.Coin;
             bool isLong = signal.Type == SignalType.Long;
 
-            if (IsMonitoring(symbol))
+            if (IsMonitoringPosition(symbol))
             {
                 await _notify.SendAsync($"[{symbol}] POSITION: đã monitor → bỏ qua.");
                 return;
             }
 
-            SetMonitoring(symbol);
+            // Khi monitor POSITION thì thôi không monitor LIMIT nữa
+            ClearMonitoringLimit(symbol);
+            SetMonitoringPosition(symbol);
 
             decimal entry = signal.EntryPrice ?? 0;
             decimal sl = signal.StopLoss ?? 0;
@@ -167,7 +195,7 @@ namespace FuturesBot.Services
             if (risk <= 0)
             {
                 await _notify.SendAsync($"[{symbol}] POSITION: risk <= 0 → stop.");
-                ClearMonitoring(symbol);
+                ClearMonitoringPosition(symbol);
                 return;
             }
 
@@ -194,7 +222,7 @@ namespace FuturesBot.Services
                     if (openOrders == null || openOrders.Count == 0)
                     {
                         await _notify.SendAsync($"[{symbol}] Position closed → stop monitor.");
-                        ClearMonitoring(symbol);
+                        ClearMonitoringPosition(symbol);
                         return;
                     }
                     else
@@ -210,7 +238,7 @@ namespace FuturesBot.Services
                 if ((isLong && price <= sl) || (!isLong && price >= sl))
                 {
                     await _notify.SendAsync($"[{symbol}] SL HIT → stop position monitor.");
-                    ClearMonitoring(symbol);
+                    ClearMonitoringPosition(symbol);
                     return;
                 }
 
@@ -218,7 +246,7 @@ namespace FuturesBot.Services
                 if ((isLong && price >= tp) || (!isLong && price <= tp))
                 {
                     await _notify.SendAsync($"[{symbol}] TP HIT → stop position monitor.");
-                    ClearMonitoring(symbol);
+                    ClearMonitoringPosition(symbol);
                     return;
                 }
 
@@ -238,7 +266,7 @@ namespace FuturesBot.Services
                         $"[{symbol}] EARLY EXIT (rr={rr:F2}) → đóng lệnh.");
 
                     await _exchange.ClosePositionAsync(symbol, qty);
-                    ClearMonitoring(symbol);
+                    ClearMonitoringPosition(symbol);
                     return;
                 }
 
@@ -249,7 +277,7 @@ namespace FuturesBot.Services
                         $"[{symbol}] HARD REVERSE → đóng lệnh.");
 
                     await _exchange.ClosePositionAsync(symbol, qty);
-                    ClearMonitoring(symbol);
+                    ClearMonitoringPosition(symbol);
                     return;
                 }
 
@@ -281,11 +309,15 @@ namespace FuturesBot.Services
                 return;
             }
 
-            if (IsMonitoring(pos.Symbol))
+            // Nếu đã có POSITION monitor rồi thì không attach nữa
+            if (IsMonitoringPosition(pos.Symbol))
             {
-                //await _notify.SendAsync($"[{pos.Symbol}] MANUAL ATTACH: đã monitor → bỏ qua.");
+                await _notify.SendAsync($"[{pos.Symbol}] MANUAL ATTACH: POSITION đang được monitor → bỏ qua.");
                 return;
-            }            
+            }
+
+            // Có thể đang monitor LIMIT cũ → clear cho chắc
+            ClearMonitoringLimit(pos.Symbol);
 
             decimal qty = pos.PositionAmt;
             bool isLong = qty > 0;
@@ -315,9 +347,9 @@ namespace FuturesBot.Services
 
         public async Task ClearMonitoringTrigger(string symbol)
         {
-            if (IsMonitoring(symbol))
+            if (IsMonitoringLimit(symbol) || IsMonitoringPosition(symbol))
             {
-                ClearMonitoring(symbol);
+                ClearAllMonitoring(symbol);
                 await _notify.SendAsync($"[{symbol}] đã clear monitoring.");
             }
         }
@@ -391,7 +423,10 @@ namespace FuturesBot.Services
         {
             if (candles.Count == 0) return 0;
 
-            var closes = candles.Skip(Math.Max(0, candles.Count - period * 3)).Select(c => c.Close).ToArray();
+            var closes = candles
+                .Skip(Math.Max(0, candles.Count - period * 3))
+                .Select(c => c.Close)
+                .ToArray();
 
             decimal k = 2m / (period + 1);
             decimal ema = closes[0];
@@ -474,6 +509,7 @@ namespace FuturesBot.Services
             if (qty <= 0)
             {
                 await _notify.SendAsync($"[{symbol}] Không tìm thấy position khi update SL.");
+                ClearMonitoringPosition(symbol);
                 return;
             }
 
