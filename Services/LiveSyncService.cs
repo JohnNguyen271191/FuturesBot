@@ -5,7 +5,7 @@ using static FuturesBot.Utils.EnumTypesHelper;
 
 namespace FuturesBot.Services
 {
-    public class LiveSyncService(IExchangeClientService exchange, PnlReporterService pnl)
+    public class LiveSyncService(IExchangeClientService exchange, PnlReporterService pnl, OrderManagerService orderManagerService)
     {
         private class PositionState
         {
@@ -112,6 +112,7 @@ namespace FuturesBot.Services
 
                     await pnl.RegisterClosedTradeAsync(closed);
                     await exchange.CancelAllOpenOrdersAsync(symbol.Coin);
+                    await orderManagerService.ClearMonitoringTrigger(symbol.Coin);
                 }
 
                 // ===============================

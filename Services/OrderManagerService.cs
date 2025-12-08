@@ -313,6 +313,15 @@ namespace FuturesBot.Services
             _ = MonitorPositionAsync(signal);
         }
 
+        public async Task ClearMonitoringTrigger(string symbol)
+        {
+            if (IsMonitoring(symbol))
+            {
+                ClearMonitoring(symbol);
+                await _notify.SendAsync($"[{symbol}] đã clear monitoring.");
+            }
+        }
+
         // ============================================================
         //          DETECT TP/SL từ openOrders
         // ============================================================
