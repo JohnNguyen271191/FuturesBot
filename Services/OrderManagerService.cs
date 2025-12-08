@@ -283,7 +283,7 @@ namespace FuturesBot.Services
 
             if (IsMonitoring(pos.Symbol))
             {
-                await _notify.SendAsync($"[{pos.Symbol}] MANUAL ATTACH: đã monitor → bỏ qua.");
+                //await _notify.SendAsync($"[{pos.Symbol}] MANUAL ATTACH: đã monitor → bỏ qua.");
                 return;
             }            
 
