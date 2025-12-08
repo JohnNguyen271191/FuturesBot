@@ -520,6 +520,45 @@ namespace FuturesBot.Services
             return result;
         }
 
+        public async Task CancelStopLossOrdersAsync(string symbol)
+        {
+            // PAPER MODE: chỉ log, không gọi API thật
+            if (_config.PaperMode)
+            {
+                Console.WriteLine($"[PAPER MODE] CancelStopLossOrdersAsync for {symbol}");
+                return;
+            }
+
+            // 1) Lấy toàn bộ open orders
+            var orders = await GetOpenOrdersAsync(symbol);
+            if (orders == null || orders.Count == 0)
+            {
+                Console.WriteLine($"[{symbol}] Không có open orders để cancel SL.");
+                return;
+            }
+
+            // 2) Các type được coi là StopLoss
+            string[] slKeywords = ["STOP"];
+
+            // 3) Lọc ra các SL order
+            var slOrders = orders
+                .Where(o => slKeywords.Any(k =>
+                    o.Type.Contains(k, StringComparison.OrdinalIgnoreCase)))
+                .ToList();
+
+            if (slOrders.Count == 0)
+            {
+                Console.WriteLine($"[{symbol}] Không có StopLoss orders để cancel.");
+                return;
+            }
+
+            // 4) Cancel từng SL order theo orderId
+            foreach (var order in slOrders)
+            {
+                await CancelOrderByIdAsync(symbol, order.OrderId);
+            }
+        }
+
         // ==========================
         //       PRIVATE HELPERS
         // ==========================
@@ -649,6 +688,36 @@ namespace FuturesBot.Services
             }
 
             return list;
+        }
+
+        private async Task CancelOrderByIdAsync(string symbol, string orderId)
+        {
+            // PAPER MODE
+            if (_config.PaperMode)
+            {
+                Console.WriteLine($"[PAPER MODE] CancelOrderById {symbol} orderId={orderId}");
+                return;
+            }
+
+            long ts = GetBinanceTimestamp();
+
+            var qs = $"symbol={symbol}&orderId={orderId}&timestamp={ts}";
+            var signature = BinanceSignatureHelper.Sign(qs, _config.ApiSecret);
+
+            string url = $"/fapi/v1/order?{qs}&signature={signature}";
+            var req = new HttpRequestMessage(HttpMethod.Delete, url);
+
+            var resp = await _http.SendAsync(req);
+            var body = await resp.Content.ReadAsStringAsync();
+
+            if (!resp.IsSuccessStatusCode)
+            {
+                Console.WriteLine($"[CancelOrderByIdAsync ERROR] {symbol} orderId={orderId} => {body}");
+            }
+            else
+            {
+                Console.WriteLine($"[CancelOrderByIdAsync OK] {symbol} orderId={orderId} => {body}");
+            }
         }
     }
 }

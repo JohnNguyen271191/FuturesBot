@@ -501,7 +501,7 @@ namespace FuturesBot.Services
         {
             await _notify.SendAsync($"[{symbol}] Trailing SL update → {newSL}");
 
-            await _exchange.CancelAllOpenOrdersAsync(symbol);
+            await _exchange.CancelStopLossOrdersAsync(symbol);
 
             var pos = await _exchange.GetPositionAsync(symbol);
 

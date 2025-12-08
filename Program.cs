@@ -1,6 +1,5 @@
 using FuturesBot.Config;
 using FuturesBot.IServices;
-using FuturesBot.Models;
 using FuturesBot.Services;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -51,7 +50,7 @@ await notifier.SendAsync(
 );
 
 // Launch per-symbol workers
-var tasks = config.Symbols
+var tasks = config.CoinInfos
     .Select(s => RunSymbolWorkerAsync(s, host, config, notifier, liveSync, pnl))
     .ToList();
 
@@ -62,7 +61,7 @@ await Task.WhenAll(tasks);
 // ============================================================================
 
 static async Task RunSymbolWorkerAsync(
-    Symbol symbol,
+    CoinInfo coinInfo,
     IHost host,
     BotConfig config,
     SlackNotifierService notifier,
@@ -85,10 +84,10 @@ static async Task RunSymbolWorkerAsync(
         {
             // Lấy candles 1 lần cho vòng lặp này
             var candles15m = await exchange.GetRecentCandlesAsync(
-                symbol.Coin, config.Intervals[0].FrameTime, 200);
+                coinInfo.Symbol, config.Intervals[0].FrameTime, 200);
 
             var candles1h = await exchange.GetRecentCandlesAsync(
-                symbol.Coin, config.Intervals[1].FrameTime, 200);
+                coinInfo.Symbol, config.Intervals[1].FrameTime, 200);
 
             if (candles15m?.Count >= 2)
             {
@@ -100,7 +99,7 @@ static async Task RunSymbolWorkerAsync(
                     lastProcessedCandle = lastCandle.OpenTime;
 
                     //Lấy position 1 lần
-                    var pos = await exchange.GetPositionAsync(symbol.Coin);
+                    var pos = await exchange.GetPositionAsync(coinInfo.Symbol);
                     await orderManager.AttachManualPositionAsync(pos);
 
                     bool hasLong = pos.PositionAmt > 0;
@@ -109,19 +108,19 @@ static async Task RunSymbolWorkerAsync(
                     if (hasLong || hasShort)
                     {
                         var exitSignal = strategy.GenerateExitSignal(
-                            candles15m, hasLong, hasShort, symbol);
+                            candles15m, hasLong, hasShort, coinInfo);
 
                         if (exitSignal.Type == SignalType.CloseLong ||
                             exitSignal.Type == SignalType.CloseShort)
                         {
-                            await exchange.ClosePositionAsync(symbol.Coin, pos.PositionAmt);
+                            await exchange.ClosePositionAsync(coinInfo.Symbol, pos.PositionAmt);
                             // không continue; vẫn cho liveSync/pnl chạy bên dưới
                         }
                     }                    
 
                     // ENTRY logic
-                    var entrySignal = strategy.GenerateSignal(candles15m, candles1h, symbol);
-                    await executor.HandleSignalAsync(entrySignal, symbol);
+                    var entrySignal = strategy.GenerateSignal(candles15m, candles1h, coinInfo);
+                    await executor.HandleSignalAsync(entrySignal, coinInfo);
                 }
                 // nếu chưa có nến mới thì bỏ qua phần xử lý trade,
                 // nhưng vẫn chạy liveSync/pnl ở dưới
@@ -129,11 +128,11 @@ static async Task RunSymbolWorkerAsync(
         }
         catch (Exception ex)
         {
-            await notifier.SendAsync($"[ERROR] {symbol.Coin}: {ex}");
+            await notifier.SendAsync($"[ERROR] {coinInfo.Symbol}: {ex}");
         }
 
         // Các tác vụ chia sẻ, luôn chạy mỗi vòng (khoảng 30s/lần)
-        await liveSync.SyncAsync(new[] { symbol });
+        await liveSync.SyncAsync(new[] { coinInfo });
         await pnl.SendQuickDailySummary();
 
         // Tick interval

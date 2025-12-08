@@ -18,7 +18,7 @@ namespace FuturesBot.Services
         private readonly SlackNotifierService _notifier = notifier;
         private readonly OrderManagerService _orderManagerService = orderManagerService;
 
-        public async Task HandleSignalAsync(TradeSignal signal, Symbol symbol)
+        public async Task HandleSignalAsync(TradeSignal signal, CoinInfo coinInfo)
         {
             if (signal.Type == SignalType.None) return;
 
@@ -29,7 +29,7 @@ namespace FuturesBot.Services
             }
 
             // NEW: chặn nếu đã có vị thế hoặc lệnh chờ
-            if (await _exchange.HasOpenPositionOrOrderAsync(symbol.Coin))
+            if (await _exchange.HasOpenPositionOrOrderAsync(coinInfo.Symbol))
             {
                 //await _notifier.SendAsync($"[BLOCKED] - {symbol.Coin} - Already have open position or pending order. Skip new signal : {signal.Reason}");
                 return;
@@ -51,7 +51,7 @@ namespace FuturesBot.Services
             var sl = signal.StopLoss.Value;
             var tp = signal.TakeProfit.Value;
 
-            var qty = _risk.CalculatePositionSize(entry, sl, symbol.RiskPerTradePercent);
+            var qty = _risk.CalculatePositionSize(entry, sl, coinInfo.RiskPerTradePercent);
             if (qty <= 0)
             {
                 //await _notifier.SendAsync($"[WARN] - {symbol.Coin} - Position size = 0, signal ignore.");
@@ -62,11 +62,11 @@ namespace FuturesBot.Services
     $@"================ SIGNAL ================
 Time : {signal.Time:yyyy-MM-dd HH:mm:ss} UTC
 Type : {signal.Type}
-Symbol: {symbol.Coin}
+Symbol: {coinInfo.Symbol}
 Entry: {entry}
 SL   : {sl}
 TP   : {tp}
-Size : {qty:F6} {symbol.Coin.Replace("USDT", "")}
+Size : {qty:F6} {coinInfo.Symbol.Replace("USDT", "")}
 Reason: {signal.Reason}
 PaperMode: {_config.PaperMode}
 ========================================";
@@ -78,16 +78,16 @@ PaperMode: {_config.PaperMode}
                 return;
             }
 
-            var isOrdered = await _exchange.PlaceFuturesOrderAsync(symbol.Coin, signal.Type, qty, entry, sl, tp, symbol.Leverage, _notifier, marketOrder: false);
+            var isOrdered = await _exchange.PlaceFuturesOrderAsync(coinInfo.Symbol, signal.Type, qty, entry, sl, tp, coinInfo.Leverage, _notifier, marketOrder: false);
 
             if (isOrdered)
             {
-                await _notifier.SendAsync($"[INFO] - {symbol.Coin} - API call sent to place the order (check Binance).");
+                await _notifier.SendAsync($"[INFO] - {coinInfo.Symbol} - API call sent to place the order (check Binance).");
                 await _orderManagerService.MonitorLimitOrderAsync(signal);
             } 
             else
             {
-                await _notifier.SendAsync($"[ERROR] - {symbol.Coin} - API calln't sent to place the order (check Binance).");
+                await _notifier.SendAsync($"[ERROR] - {coinInfo.Symbol} - API calln't sent to place the order (check Binance).");
             }            
         }
     }

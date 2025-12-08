@@ -2,7 +2,7 @@
 {
     public class BotConfig
     {
-        public Symbol[] Symbols { get; set; } = [];
+        public CoinInfo[] CoinInfos { get; set; } = [];
         // Risk
         public decimal AccountBalance { get; set; } = 200m;      // vốn giả định để tính lot
         public decimal MaxDailyLossPercent { get; set; } = 5m;   // thua 5%/ngày nghỉ
@@ -27,10 +27,10 @@
         public string FrameTime { get; set; } = "";
     }
 
-    public class Symbol
+    public class CoinInfo
     {
         public int Id { get; set; }
-        public string Coin { get; set; } = "";
+        public string Symbol { get; set; } = "";
         public int Leverage { get; set; } = 50;
         public bool IsMajor { get; set; } = false;
         public decimal RiskPerTradePercent { get; set; } = 1m;   // 1% / lệnh

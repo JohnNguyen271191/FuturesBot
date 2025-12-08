@@ -1,6 +1,3 @@
-using System;
-using System.Collections.Generic;
-using System.Linq;
 using FuturesBot.Config;
 using FuturesBot.IServices;
 using FuturesBot.Models;
@@ -71,9 +68,6 @@ namespace FuturesBot.Services
         // SL an toàn quanh EMA gần nhất (cho trend dynamic EMA)
         private const decimal AnchorSlBufferPercent = 0.0015m;      // 0.15%
 
-        // SL an toàn quanh EMA89 (0.3% xa hơn EMA89) – vẫn dùng cho 1 số chỗ cũ
-        private const decimal Ema89StopExtraPercent = 0.003m;
-
         // Nến climax + overextended xa EMA gần nhất (tránh vừa vào là đảo)
         private const int ClimaxLookback = 20;
         private const decimal ClimaxBodyMultiplier = 1.8m;
@@ -107,7 +101,7 @@ namespace FuturesBot.Services
             IReadOnlyList<Candle> candles15m,
             bool hasLongPosition,
             bool hasShortPosition,
-            Symbol symbol)
+           CoinInfo coinInfo)
         {
             if (candles15m == null || candles15m.Count < 200)
                 return new TradeSignal();
@@ -148,8 +142,8 @@ namespace FuturesBot.Services
                     return new TradeSignal
                     {
                         Type = SignalType.CloseLong,
-                        Reason = $"{symbol.Coin}: Đang LONG, giá đóng dưới EMA{DetectEmaPeriod(dynamicSupportEma.Value, ema34Now, ema89Now, ema200Now)} M15 (dynamic support) → Exit để bảo vệ vốn.",
-                        Coin = symbol.Coin
+                        Reason = $"{coinInfo.Symbol}: Đang LONG, giá đóng dưới EMA{DetectEmaPeriod(dynamicSupportEma.Value, ema34Now, ema89Now, ema200Now)} M15 (dynamic support) → Exit để bảo vệ vốn.",
+                        Coin = coinInfo.Symbol
                     };
                 }
             }
@@ -174,8 +168,8 @@ namespace FuturesBot.Services
                     return new TradeSignal
                     {
                         Type = SignalType.CloseShort,
-                        Reason = $"{symbol.Coin}: Đang SHORT, giá đóng trên EMA{DetectEmaPeriod(dynamicResistEma.Value, ema34Now, ema89Now, ema200Now)} M15 (dynamic resistance) → Exit để tránh đảo trend.",
-                        Coin = symbol.Coin
+                        Reason = $"{coinInfo.Symbol}: Đang SHORT, giá đóng trên EMA{DetectEmaPeriod(dynamicResistEma.Value, ema34Now, ema89Now, ema200Now)} M15 (dynamic resistance) → Exit để tránh đảo trend.",
+                        Coin = coinInfo.Symbol
                     };
                 }
             }
@@ -187,7 +181,7 @@ namespace FuturesBot.Services
         //                           ENTRY SIGNAL
         // =====================================================================
 
-        public TradeSignal GenerateSignal(IReadOnlyList<Candle> candles15m, IReadOnlyList<Candle> candles1h, Symbol symbol)
+        public TradeSignal GenerateSignal(IReadOnlyList<Candle> candles15m, IReadOnlyList<Candle> candles1h,CoinInfo coinInfo)
         {
             if (candles15m.Count < MinBars || candles1h.Count < MinBars)
                 return new TradeSignal();
@@ -221,7 +215,7 @@ namespace FuturesBot.Services
 
             // =================== NEW: BTC vs ALT PROFILE =======================
 
-            bool isMajor = symbol.IsMajor; // BTC/ETH = true, Alt = false
+            bool isMajor = coinInfo.IsMajor; // BTC/ETH = true, Alt = false
 
             // RR theo profile
             decimal rrTrend = isMajor ? RiskRewardMajor : RiskReward;
@@ -238,8 +232,8 @@ namespace FuturesBot.Services
                     return new TradeSignal
                     {
                         Type = SignalType.None,
-                        Reason = $"{symbol.Coin}: Volume M15 quá thấp ({volUsd15:F0} USDT) → bỏ qua để tránh slippage.",
-                        Coin = symbol.Coin
+                        Reason = $"{coinInfo.Symbol}: Volume M15 quá thấp ({volUsd15:F0} USDT) → bỏ qua để tránh slippage.",
+                        Coin = coinInfo.Symbol
                     };
                 }
             }
@@ -250,8 +244,8 @@ namespace FuturesBot.Services
                     return new TradeSignal
                     {
                         Type = SignalType.None,
-                        Reason = $"{symbol.Coin}: Altcoin volume M15 yếu ({volUsd15:F0} USDT) → bỏ qua, tránh bị pump-dump/slippage.",
-                        Coin = symbol.Coin
+                        Reason = $"{coinInfo.Symbol}: Altcoin volume M15 yếu ({volUsd15:F0} USDT) → bỏ qua, tránh bị pump-dump/slippage.",
+                        Coin = coinInfo.Symbol
                     };
                 }
 
@@ -269,8 +263,8 @@ namespace FuturesBot.Services
                             return new TradeSignal
                             {
                                 Type = SignalType.None,
-                                Reason = $"{symbol.Coin}: Altcoin đang sideway, EMA34 H1 gần như đi ngang (slope={slope:P2}) → chỉ trade khi trend rõ để tránh nhiễu.",
-                                Coin = symbol.Coin
+                                Reason = $"{coinInfo.Symbol}: Altcoin đang sideway, EMA34 H1 gần như đi ngang (slope={slope:P2}) → chỉ trade khi trend rõ để tránh nhiễu.",
+                                Coin = coinInfo.Symbol
                             };
                         }
                     }
@@ -288,8 +282,8 @@ namespace FuturesBot.Services
                 return new TradeSignal
                 {
                     Type = SignalType.None,
-                    Reason = $"{symbol.Coin}: Altcoin đang SIDEWAY mạnh (EMA34 & EMA89 dính nhau / EMA34 đi ngang) trên {(sidewayH1 ? "H1" : "M15")} → NO TRADE (V2).",
-                    Coin = symbol.Coin
+                    Reason = $"{coinInfo.Symbol}: Altcoin đang SIDEWAY mạnh (EMA34 & EMA89 dính nhau / EMA34 đi ngang) trên {(sidewayH1 ? "H1" : "M15")} → NO TRADE (V2).",
+                    Coin = coinInfo.Symbol
                 };
             }
 
@@ -304,8 +298,8 @@ namespace FuturesBot.Services
                 return new TradeSignal
                 {
                     Type = SignalType.None,
-                    Reason = $"{symbol.Coin}: Bỏ qua entry vì vừa có nến climax và giá đang quá xa EMA gần nhất (đu đỉnh/đu đáy, chờ retest EMA rồi mới trade).",
-                    Coin = symbol.Coin
+                    Reason = $"{coinInfo.Symbol}: Bỏ qua entry vì vừa có nến climax và giá đang quá xa EMA gần nhất (đu đỉnh/đu đáy, chờ retest EMA rồi mới trade).",
+                    Coin = coinInfo.Symbol
                 };
             }
 
@@ -368,7 +362,7 @@ namespace FuturesBot.Services
                         macd15,
                         sig15,
                         last15,
-                        symbol,
+                        coinInfo,
                         h1BiasUp,
                         h1BiasDown,
                         rrSideway);
@@ -382,8 +376,8 @@ namespace FuturesBot.Services
                     return new TradeSignal
                     {
                         Type = SignalType.None,
-                        Reason = $"{symbol.Coin}: Altcoin đang sideway/pullback, H1+M15 chưa align trend rõ → bỏ qua, không scalp để tránh nhiễu.",
-                        Coin = symbol.Coin
+                        Reason = $"{coinInfo.Symbol}: Altcoin đang sideway/pullback, H1+M15 chưa align trend rõ → bỏ qua, không scalp để tránh nhiễu.",
+                        Coin = coinInfo.Symbol
                     };
                 }
             }
@@ -410,7 +404,7 @@ namespace FuturesBot.Services
                     sig15,
                     last15,
                     prev15,
-                    symbol,
+                    coinInfo,
                     rrTrend);
 
                 if (longSignal.Type != SignalType.None)
@@ -429,7 +423,7 @@ namespace FuturesBot.Services
                     sig15,
                     last15,
                     prev15,
-                    symbol,
+                    coinInfo,
                     rrTrend);
 
                 if (shortSignal.Type != SignalType.None)
@@ -453,7 +447,7 @@ namespace FuturesBot.Services
             IReadOnlyList<decimal> sig15,
             Candle last15,
             Candle prev15,
-            Symbol symbol,
+           CoinInfo coinInfo,
             decimal riskRewardTrend)
         {
             int i15 = candles15m.Count - 2;
@@ -474,8 +468,8 @@ namespace FuturesBot.Services
                 return new TradeSignal
                 {
                     Type = SignalType.None,
-                    Reason = $"{symbol.Coin}: Uptrend nhưng không có EMA hỗ trợ gần dưới giá để retest.",
-                    Coin = symbol.Coin
+                    Reason = $"{coinInfo.Symbol}: Uptrend nhưng không có EMA hỗ trợ gần dưới giá để retest.",
+                    Coin = coinInfo.Symbol
                 };
             }
 
@@ -511,8 +505,8 @@ namespace FuturesBot.Services
                 return new TradeSignal
                 {
                     Type = SignalType.None,
-                    Reason = $"{symbol.Coin}: H1 Uptrend nhưng setup long chưa đạt (touch={touchSupport}, reject={reject}, momentum={momentum}).",
-                    Coin = symbol.Coin
+                    Reason = $"{coinInfo.Symbol}: H1 Uptrend nhưng setup long chưa đạt (touch={touchSupport}, reject={reject}, momentum={momentum}).",
+                    Coin = coinInfo.Symbol
                 };
             }
 
@@ -528,8 +522,8 @@ namespace FuturesBot.Services
                 return new TradeSignal
                 {
                     Type = SignalType.None,
-                    Reason = $"{symbol.Coin}: SL invalid cho long (entry={entry:F4}, sl={sl:F4}).",
-                    Coin = symbol.Coin
+                    Reason = $"{coinInfo.Symbol}: SL invalid cho long (entry={entry:F4}, sl={sl:F4}).",
+                    Coin = coinInfo.Symbol
                 };
             }
 
@@ -542,8 +536,8 @@ namespace FuturesBot.Services
                 EntryPrice = entry,
                 StopLoss = sl,
                 TakeProfit = tp,
-                Reason = $"{symbol.Coin}: LONG – trend up + retest EMA hỗ trợ gần nhất ({nearestSupport:F6}) + (rejection/momentum) + entryOffset; SL đặt dưới EMA gần nhất.",
-                Coin = symbol.Coin
+                Reason = $"{coinInfo.Symbol}: LONG – trend up + retest EMA hỗ trợ gần nhất ({nearestSupport:F6}) + (rejection/momentum) + entryOffset; SL đặt dưới EMA gần nhất.",
+                Coin = coinInfo.Symbol
             };
         }
 
@@ -561,7 +555,7 @@ namespace FuturesBot.Services
             IReadOnlyList<decimal> sig15,
             Candle last15,
             Candle prev15,
-            Symbol symbol,
+            CoinInfo coinInfo,
             decimal riskRewardTrend)
         {
             int i15 = candles15m.Count - 2;
@@ -582,8 +576,8 @@ namespace FuturesBot.Services
                 return new TradeSignal
                 {
                     Type = SignalType.None,
-                    Reason = $"{symbol.Coin}: Downtrend nhưng không có EMA kháng cự gần trên giá để retest.",
-                    Coin = symbol.Coin
+                    Reason = $"{coinInfo.Symbol}: Downtrend nhưng không có EMA kháng cự gần trên giá để retest.",
+                    Coin = coinInfo.Symbol
                 };
             }
 
@@ -619,8 +613,8 @@ namespace FuturesBot.Services
                 return new TradeSignal
                 {
                     Type = SignalType.None,
-                    Reason = $"{symbol.Coin}: H1 Downtrend nhưng setup short chưa đạt (retest={retest}, reject={reject}, momentum={momentum}).",
-                    Coin = symbol.Coin
+                    Reason = $"{coinInfo.Symbol}: H1 Downtrend nhưng setup short chưa đạt (retest={retest}, reject={reject}, momentum={momentum}).",
+                    Coin = coinInfo.Symbol
                 };
             }
 
@@ -636,8 +630,8 @@ namespace FuturesBot.Services
                 return new TradeSignal
                 {
                     Type = SignalType.None,
-                    Reason = $"{symbol.Coin}: SL invalid cho short (entry={entry:F4}, sl={sl:F4}).",
-                    Coin = symbol.Coin
+                    Reason = $"{coinInfo.Symbol}: SL invalid cho short (entry={entry:F4}, sl={sl:F4}).",
+                    Coin = coinInfo.Symbol
                 };
             }
 
@@ -650,8 +644,8 @@ namespace FuturesBot.Services
                 EntryPrice = entry,
                 StopLoss = sl,
                 TakeProfit = tp,
-                Reason = $"{symbol.Coin}: SHORT – trend down + retest EMA kháng cự gần nhất ({nearestResistance:F6}) + (rejection/momentum) + entryOffset; SL đặt trên EMA gần nhất.",
-                Coin = symbol.Coin
+                Reason = $"{coinInfo.Symbol}: SHORT – trend down + retest EMA kháng cự gần nhất ({nearestResistance:F6}) + (rejection/momentum) + entryOffset; SL đặt trên EMA gần nhất.",
+                Coin = coinInfo.Symbol
             };
         }
 
@@ -668,7 +662,7 @@ namespace FuturesBot.Services
             IReadOnlyList<decimal> macd15,
             IReadOnlyList<decimal> sig15,
             Candle last15,
-            Symbol symbol,
+            CoinInfo coinInfo,
             bool h1BiasUp,
             bool h1BiasDown,
             decimal riskRewardSideway)
@@ -709,8 +703,8 @@ namespace FuturesBot.Services
                 return new TradeSignal
                 {
                     Type = SignalType.None,
-                    Reason = $"{symbol.Coin}: SIDEWAY – không có bias rõ (ema34={ema34:F2}, ema89={ema89:F2}, ema200={ema200:F2}).",
-                    Coin = symbol.Coin
+                    Reason = $"{coinInfo.Symbol}: SIDEWAY – không có bias rõ (ema34={ema34:F2}, ema89={ema89:F2}, ema200={ema200:F2}).",
+                    Coin = coinInfo.Symbol
                 };
             }
 
@@ -765,8 +759,8 @@ namespace FuturesBot.Services
                     EntryPrice = entry,
                     StopLoss = sl,
                     TakeProfit = tp,
-                    Reason = $"{symbol.Coin}: SIDEWAY SCALP SHORT – bias down (H1) + retest EMA (near={nearestRes:F2}) + rejection + RSI/MACD quay đầu.",
-                    Coin = symbol.Coin
+                    Reason = $"{coinInfo.Symbol}: SIDEWAY SCALP SHORT – bias down (H1) + retest EMA (near={nearestRes:F2}) + rejection + RSI/MACD quay đầu.",
+                    Coin = coinInfo.Symbol
                 };
             }
 
@@ -820,8 +814,8 @@ namespace FuturesBot.Services
                     EntryPrice = entry,
                     StopLoss = sl,
                     TakeProfit = tp,
-                    Reason = $"{symbol.Coin}: SIDEWAY SCALP LONG – bias up (H1) + retest EMA (near={nearestSup:F2}) + rejection + RSI/MACD quay đầu.",
-                    Coin = symbol.Coin
+                    Reason = $"{coinInfo.Symbol}: SIDEWAY SCALP LONG – bias up (H1) + retest EMA (near={nearestSup:F2}) + rejection + RSI/MACD quay đầu.",
+                    Coin = coinInfo.Symbol
                 };
             }
         }

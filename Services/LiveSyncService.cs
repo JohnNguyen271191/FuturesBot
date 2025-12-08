@@ -15,14 +15,14 @@ namespace FuturesBot.Services
 
         private readonly Dictionary<string, PositionState> _states = [];
 
-        public async Task SyncAsync(Symbol[] symbols)
+        public async Task SyncAsync(CoinInfo[] coinInfos)
         {
-            foreach (var symbol in symbols)
+            foreach (var coinInfo in coinInfos)
             {
-                if (!_states.TryGetValue(symbol.Coin, out var state))
+                if (!_states.TryGetValue(coinInfo.Symbol, out var state))
                 {
                     state = new PositionState();
-                    _states[symbol.Coin] = state;
+                    _states[coinInfo.Symbol] = state;
                 }
 
                 PositionInfo pos;
@@ -32,7 +32,7 @@ namespace FuturesBot.Services
                 // ===============================
                 try
                 {
-                    pos = await exchange.GetPositionAsync(symbol.Coin);
+                    pos = await exchange.GetPositionAsync(coinInfo.Symbol);
                 }
                 catch
                 {
@@ -65,7 +65,7 @@ namespace FuturesBot.Services
                     try
                     {
                         await Task.Delay(80);
-                        pos2 = await exchange.GetPositionAsync(symbol.Coin);
+                        pos2 = await exchange.GetPositionAsync(coinInfo.Symbol);
                     }
                     catch
                     {
@@ -80,7 +80,7 @@ namespace FuturesBot.Services
                     var last = state.LastPosition;
 
                     var lastTrade = await exchange.GetLastUserTradeAsync(
-                        symbol.Coin,
+                        coinInfo.Symbol,
                         state.LastChangeTime.AddMinutes(-1));
 
                     decimal exitPrice = lastTrade?.Price ?? pos.MarkPrice;
@@ -90,11 +90,11 @@ namespace FuturesBot.Services
 
                     var openTime = state.LastChangeTime;
                     var closeTime = DateTime.UtcNow;
-                    var netPnlAsync = await exchange.GetNetPnlAsync(symbol.Coin, openTime, closeTime);
+                    var netPnlAsync = await exchange.GetNetPnlAsync(coinInfo.Symbol, openTime, closeTime);
 
                     var closed = new ClosedTrade
                     {
-                        Symbol = symbol.Coin,
+                        Symbol = coinInfo.Symbol,
                         Side = side,
                         Entry = last.EntryPrice,
                         Exit = exitPrice,
@@ -111,8 +111,8 @@ namespace FuturesBot.Services
                     };
 
                     await pnl.RegisterClosedTradeAsync(closed);
-                    await exchange.CancelAllOpenOrdersAsync(symbol.Coin);
-                    await orderManagerService.ClearMonitoringTrigger(symbol.Coin);
+                    await exchange.CancelAllOpenOrdersAsync(coinInfo.Symbol);
+                    await orderManagerService.ClearMonitoringTrigger(coinInfo.Symbol);
                 }
 
                 // ===============================
