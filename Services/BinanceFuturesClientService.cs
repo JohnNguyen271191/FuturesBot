@@ -78,15 +78,15 @@ namespace FuturesBot.Services
         }
 
         public async Task<bool> PlaceFuturesOrderAsync(
-            string symbol,
-            SignalType side,
-            decimal quantity,
-            decimal entryPrice,
-            decimal stopLoss,
-            decimal takeProfit,
-            int leverage,
-            SlackNotifierService slackNotifierService,
-            bool marketOrder = true)
+    string symbol,
+    SignalType side,
+    decimal quantity,
+    decimal entryPrice,
+    decimal stopLoss,
+    decimal takeProfit,
+    int leverage,
+    SlackNotifierService slackNotifierService,
+    bool marketOrder = true)
         {
             var rules = await _rulesService.GetRulesAsync(symbol);
 
@@ -121,6 +121,7 @@ namespace FuturesBot.Services
 
             // 2. gửi lệnh vào (entry)
             string sideStr = side == SignalType.Long ? "BUY" : "SELL";
+            string closeSideStr = side == SignalType.Long ? "SELL" : "BUY";
             string positionSide = side == SignalType.Long ? "LONG" : "SHORT";
             string typeStr = marketOrder ? "MARKET" : "LIMIT";
 
@@ -150,39 +151,40 @@ namespace FuturesBot.Services
             }
             await slackNotifierService.SendAsync($"[ENTRY RESP] {entryResp}");
 
-            string closeSideStr = side == SignalType.Long ? "SELL" : "BUY";
-
-            var slParams = new Dictionary<string, string>
+            // 3. Đặt STOP_MARKET (Stop Loss) qua Algo Order API (algoType=CONDITIONAL)
+            var slAlgoParams = new Dictionary<string, string>
             {
                 ["symbol"] = symbol,
-                ["side"] = closeSideStr,
-                ["type"] = "STOP/STOP_MARKET",
-                ["stopPrice"] = sl.ToString(CultureInfo.InvariantCulture),
-                ["closePosition"] = "true",
-                ["timeInForce"] = "GTC",
-                ["recvWindow"] = "60000",
-                ["positionSide"] = positionSide
+                ["side"] = closeSideStr,                      // SELL để đóng long, BUY để đóng short
+                ["positionSide"] = positionSide,              // chỉ dùng khi Hedge mode; nếu One-way mode có thể vẫn gửi (server sẽ ignore) atau omit nếu muốn
+                ["algoType"] = "CONDITIONAL",                 // bắt buộc cho conditional algo orders
+                ["type"] = "STOP_MARKET",                     // loại order bên trong algo API
+                ["triggerPrice"] = sl.ToString(CultureInfo.InvariantCulture), // trigger price
+                ["closePosition"] = "true",                   // đóng toàn bộ vị thế
+                ["recvWindow"] = "60000"
             };
 
-            await slackNotifierService.SendAsync("=== SEND STOP LOSS ===");
-            var slResp = await SignedPostAsync("/fapi/v1/order", slParams);
+            await slackNotifierService.SendAsync("=== SEND STOP LOSS (ALGO) ===");
+            var slResp = await SignedPostAsync("/fapi/v1/algoOrder", slAlgoParams);
             await slackNotifierService.SendAsync($"[SL RESP] {slResp}");
 
-            var tpParams = new Dictionary<string, string>
+            // 4. Đặt TAKE_PROFIT_MARKET (Take Profit) qua Algo Order API
+            var tpAlgoParams = new Dictionary<string, string>
             {
                 ["symbol"] = symbol,
-                ["side"] = closeSideStr,
-                ["type"] = "TAKE_PROFIT/TAKE_PROFIT_MARKET",
-                ["stopPrice"] = tp.ToString(CultureInfo.InvariantCulture),
+                ["side"] = closeSideStr,                      // SELL để đóng long, BUY để đóng short
+                ["positionSide"] = positionSide,
+                ["algoType"] = "CONDITIONAL",
+                ["type"] = "TAKE_PROFIT_MARKET",
+                ["triggerPrice"] = tp.ToString(CultureInfo.InvariantCulture),
                 ["closePosition"] = "true",
-                ["timeInForce"] = "GTC",
-                ["recvWindow"] = "60000",
-                ["positionSide"] = positionSide
+                ["recvWindow"] = "60000"
             };
 
-            await slackNotifierService.SendAsync("=== SEND TAKE PROFIT ===");
-            var tpResp = await SignedPostAsync("/fapi/v1/order", tpParams);
+            await slackNotifierService.SendAsync("=== SEND TAKE PROFIT (ALGO) ===");
+            var tpResp = await SignedPostAsync("/fapi/v1/algoOrder", tpAlgoParams);
             await slackNotifierService.SendAsync($"[TP RESP] {tpResp}");
+
             return true;
         }
 
@@ -465,16 +467,15 @@ namespace FuturesBot.Services
             var param = new Dictionary<string, string>
             {
                 ["symbol"] = symbol,
-                ["side"] = side,
-                ["type"] = "STOP/STOP_MARKET",
-                ["stopPrice"] = stop.ToString(CultureInfo.InvariantCulture),
-                ["closePosition"] = "true",
-                ["timeInForce"] = "GTC",
-                ["recvWindow"] = "60000",
-                ["positionSide"] = positionSide
+                ["side"] = side,                      // SELL để đóng long, BUY để đóng short
+                ["positionSide"] = positionSide,              // chỉ dùng khi Hedge mode; nếu One-way mode có thể vẫn gửi (server sẽ ignore) atau omit nếu muốn
+                ["algoType"] = "CONDITIONAL",                 // bắt buộc cho conditional algo orders
+                ["type"] = "STOP_MARKET",                     // loại order bên trong algo API
+                ["triggerPrice"] = stop.ToString(CultureInfo.InvariantCulture), // trigger price
+                ["closePosition"] = "true",                   // đóng toàn bộ vị thế
+                ["recvWindow"] = "60000"
             };
-
-            var resp = await SignedPostAsync("/fapi/v1/order", param);
+            var resp = await SignedPostAsync("/fapi/v1/algoOrder", param);
 
             if (resp.Contains("[BINANCE ERROR]"))
             {
