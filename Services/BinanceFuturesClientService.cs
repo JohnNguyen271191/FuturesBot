@@ -1,4 +1,4 @@
-﻿using FuturesBot.Config;
+using FuturesBot.Config;
 using FuturesBot.IServices;
 using FuturesBot.Models;
 using FuturesBot.Utils;
@@ -152,6 +152,7 @@ namespace FuturesBot.Services
 
             string closeSideStr = side == SignalType.Long ? "SELL" : "BUY";
 
+            // SL via Algo order
             var slParams = new Dictionary<string, string>
             {
                 ["symbol"] = symbol,
@@ -159,15 +160,25 @@ namespace FuturesBot.Services
                 ["type"] = "STOP_MARKET",
                 ["stopPrice"] = sl.ToString(CultureInfo.InvariantCulture),
                 ["closePosition"] = "true",
-                ["timeInForce"] = "GTC",
+                // workingType can be CONTRACT_PRICE or MARK_PRICE depending on your strategy
+                ["workingType"] = "CONTRACT_PRICE",
+                ["priceProtect"] = "FALSE",
+                ["newOrderRespType"] = "RESULT",
                 ["recvWindow"] = "60000",
                 ["positionSide"] = positionSide
             };
 
             await slackNotifierService.SendAsync("=== SEND STOP LOSS ===");
-            var slResp = await SignedPostAsync("/fapi/v1/order", slParams);
+            // call algo endpoint but keep SignedPostAsync name
+            var slResp = await SignedPostAsync("/fapi/v1/algo/order", slParams);
             await slackNotifierService.SendAsync($"[SL RESP] {slResp}");
+            if (slResp.Contains("[BINANCE ERROR]"))
+            {
+                await slackNotifierService.SendAsync(slResp);
+                return false;
+            }
 
+            // TP via Algo order
             var tpParams = new Dictionary<string, string>
             {
                 ["symbol"] = symbol,
@@ -175,14 +186,21 @@ namespace FuturesBot.Services
                 ["type"] = "TAKE_PROFIT_MARKET",
                 ["stopPrice"] = tp.ToString(CultureInfo.InvariantCulture),
                 ["closePosition"] = "true",
-                ["timeInForce"] = "GTC",
+                ["workingType"] = "CONTRACT_PRICE",
+                ["priceProtect"] = "FALSE",
+                ["newOrderRespType"] = "RESULT",
                 ["recvWindow"] = "60000",
                 ["positionSide"] = positionSide
             };
 
             await slackNotifierService.SendAsync("=== SEND TAKE PROFIT ===");
-            var tpResp = await SignedPostAsync("/fapi/v1/order", tpParams);
+            var tpResp = await SignedPostAsync("/fapi/v1/algo/order", tpParams);
             await slackNotifierService.SendAsync($"[TP RESP] {tpResp}");
+            if (tpResp.Contains("[BINANCE ERROR]"))
+            {
+                await slackNotifierService.SendAsync(tpResp);
+                return false;
+            }
             return true;
         }
 
@@ -305,6 +323,26 @@ namespace FuturesBot.Services
             catch
             {
                 Console.WriteLine("[WARN] Cannot parse openOrders response.");
+            }
+
+            // check algo open orders as well (best-effort)
+            try
+            {
+                var algoParams = new Dictionary<string, string>
+                {
+                    ["symbol"] = symbol,
+                    ["recvWindow"] = "60000"
+                };
+                var algoJson = await SignedGetAsync("/fapi/v1/openAlgoOrders", algoParams);
+                using var adoc = JsonDocument.Parse(algoJson);
+                if (adoc.RootElement.ValueKind == JsonValueKind.Array && adoc.RootElement.GetArrayLength() > 0)
+                {
+                    return true;
+                }
+            }
+            catch
+            {
+                // ignore if not supported
             }
 
             return false;
@@ -469,12 +507,15 @@ namespace FuturesBot.Services
                 ["type"] = "STOP_MARKET",
                 ["stopPrice"] = stop.ToString(CultureInfo.InvariantCulture),
                 ["closePosition"] = "true",
+                ["workingType"] = "CONTRACT_PRICE",
                 ["timeInForce"] = "GTC",
                 ["recvWindow"] = "60000",
-                ["positionSide"] = positionSide
+                ["positionSide"] = positionSide,
+                ["newOrderRespType"] = "RESULT"
             };
 
-            var resp = await SignedPostAsync("/fapi/v1/order", param);
+            // call algo endpoint (keep using SignedPostAsync)
+            var resp = await SignedPostAsync("/fapi/v1/algo/order", param);
 
             if (resp.Contains("[BINANCE ERROR]"))
             {
@@ -538,7 +579,7 @@ namespace FuturesBot.Services
             }
 
             // 2) Các type được coi là StopLoss
-            string[] slKeywords = ["STOP"];
+            string[] slKeywords = new string[] { "STOP" };
 
             // 3) Lọc ra các SL order
             var slOrders = orders
@@ -580,16 +621,15 @@ namespace FuturesBot.Services
         {
             long ts = GetBinanceTimestamp();
             parameters["timestamp"] = ts.ToString();
-            var sb = new StringBuilder();
 
+            var sb = new StringBuilder();
+            bool first = true;
             foreach (var kv in parameters)
             {
-                if (sb.Length > 0) sb.Append('&');
+                if (!first) sb.Append('&');
                 sb.Append(kv.Key).Append('=').Append(kv.Value);
+                first = false;
             }
-
-            if (sb.Length > 0) sb.Append('&');
-            sb.Append("timestamp=").Append(ts);
 
             var queryString = sb.ToString();
             var signature = BinanceSignatureHelper.Sign(queryString, _config.ApiSecret);
@@ -614,15 +654,14 @@ namespace FuturesBot.Services
             long ts = GetBinanceTimestamp();
             parameters["timestamp"] = ts.ToString();
             var sb = new StringBuilder();
+            bool first = true;
 
             foreach (var kv in parameters)
             {
-                if (sb.Length > 0) sb.Append('&');
+                if (!first) sb.Append('&');
                 sb.Append(kv.Key).Append('=').Append(kv.Value);
+                first = false;
             }
-
-            if (sb.Length > 0) sb.Append('&');
-            sb.Append("timestamp=").Append(ts);
 
             var queryString = sb.ToString();
             var signature = BinanceSignatureHelper.Sign(queryString, _config.ApiSecret);
