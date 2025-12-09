@@ -165,7 +165,7 @@ namespace FuturesBot.Services
             };
 
             await slackNotifierService.SendAsync("=== SEND STOP LOSS ===");
-            var slResp = await SignedPostAsync("/fapi/v1/order", slParams);
+            var slResp = await SignedPostAsync("/fapi/v1/algoOrder", slParams);
             await slackNotifierService.SendAsync($"[SL RESP] {slResp}");
 
             var tpParams = new Dictionary<string, string>
@@ -181,7 +181,7 @@ namespace FuturesBot.Services
             };
 
             await slackNotifierService.SendAsync("=== SEND TAKE PROFIT ===");
-            var tpResp = await SignedPostAsync("/fapi/v1/order", tpParams);
+            var tpResp = await SignedPostAsync("/fapi/v1/algoOrder", tpParams);
             await slackNotifierService.SendAsync($"[TP RESP] {tpResp}");
             return true;
         }
@@ -474,7 +474,7 @@ namespace FuturesBot.Services
                 ["positionSide"] = positionSide
             };
 
-            var resp = await SignedPostAsync("/fapi/v1/order", param);
+            var resp = await SignedPostAsync("/fapi/v1/algoOrder", param);
 
             if (resp.Contains("[BINANCE ERROR]"))
             {
