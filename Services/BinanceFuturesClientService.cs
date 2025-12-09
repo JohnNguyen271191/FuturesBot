@@ -156,34 +156,32 @@ namespace FuturesBot.Services
             {
                 ["symbol"] = symbol,
                 ["side"] = closeSideStr,
-                ["type"] = "STOP_MARKET",
+                ["type"] = "STOP/STOP_MARKET",
                 ["stopPrice"] = sl.ToString(CultureInfo.InvariantCulture),
                 ["closePosition"] = "true",
                 ["timeInForce"] = "GTC",
                 ["recvWindow"] = "60000",
-                ["positionSide"] = positionSide,
-                ["algoType"] = "CONDITIONAL"
+                ["positionSide"] = positionSide
             };
 
             await slackNotifierService.SendAsync("=== SEND STOP LOSS ===");
-            var slResp = await SignedPostAsync("/fapi/v1/algoOrder", slParams);
+            var slResp = await SignedPostAsync("/fapi/v1/order", slParams);
             await slackNotifierService.SendAsync($"[SL RESP] {slResp}");
 
             var tpParams = new Dictionary<string, string>
             {
                 ["symbol"] = symbol,
                 ["side"] = closeSideStr,
-                ["type"] = "TAKE_PROFIT_MARKET",
+                ["type"] = "TAKE_PROFIT/TAKE_PROFIT_MARKET",
                 ["stopPrice"] = tp.ToString(CultureInfo.InvariantCulture),
                 ["closePosition"] = "true",
                 ["timeInForce"] = "GTC",
                 ["recvWindow"] = "60000",
-                ["positionSide"] = positionSide,
-                ["algoType"] = "CONDITIONAL"
+                ["positionSide"] = positionSide
             };
 
             await slackNotifierService.SendAsync("=== SEND TAKE PROFIT ===");
-            var tpResp = await SignedPostAsync("/fapi/v1/algoOrder", tpParams);
+            var tpResp = await SignedPostAsync("/fapi/v1/order", tpParams);
             await slackNotifierService.SendAsync($"[TP RESP] {tpResp}");
             return true;
         }
@@ -468,16 +466,15 @@ namespace FuturesBot.Services
             {
                 ["symbol"] = symbol,
                 ["side"] = side,
-                ["type"] = "STOP_MARKET",
+                ["type"] = "STOP/STOP_MARKET",
                 ["stopPrice"] = stop.ToString(CultureInfo.InvariantCulture),
                 ["closePosition"] = "true",
                 ["timeInForce"] = "GTC",
                 ["recvWindow"] = "60000",
-                ["positionSide"] = positionSide,
-                ["algoType"] = "CONDITIONAL"
+                ["positionSide"] = positionSide
             };
 
-            var resp = await SignedPostAsync("/fapi/v1/algoOrder", param);
+            var resp = await SignedPostAsync("/fapi/v1/order", param);
 
             if (resp.Contains("[BINANCE ERROR]"))
             {
