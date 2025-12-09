@@ -155,13 +155,13 @@ namespace FuturesBot.Services
             var slAlgoParams = new Dictionary<string, string>
             {
                 ["symbol"] = symbol,
-                ["side"] = closeSideStr, // SELL để đóng long, BUY để đóng short
-                ["algoType"] = "CONDITIONAL", // bắt buộc cho conditional algo orders
-                ["type"] = "STOP_MARKET", // loại order bên trong algo API
+                ["side"] = closeSideStr,                      // SELL để đóng long, BUY để đóng short
+                ["positionSide"] = positionSide,              // chỉ dùng khi Hedge mode; nếu One-way mode có thể vẫn gửi (server sẽ ignore) atau omit nếu muốn
+                ["algoType"] = "CONDITIONAL",                 // bắt buộc cho conditional algo orders
+                ["type"] = "STOP_MARKET",                     // loại order bên trong algo API
                 ["triggerPrice"] = sl.ToString(CultureInfo.InvariantCulture), // trigger price
-                ["closePosition"] = "true", // đóng toàn bộ vị thế
-                ["recvWindow"] = "60000",
-                ["workingType"] = "MARK_PRICE"
+                ["quantity"] = qty.ToString(CultureInfo.InvariantCulture),                   // đóng toàn bộ vị thế
+                ["recvWindow"] = "60000"
             };
 
             await slackNotifierService.SendAsync("=== SEND STOP LOSS (ALGO) ===");
@@ -172,13 +172,13 @@ namespace FuturesBot.Services
             var tpAlgoParams = new Dictionary<string, string>
             {
                 ["symbol"] = symbol,
-                ["side"] = closeSideStr,
+                ["side"] = closeSideStr,                      // SELL để đóng long, BUY để đóng short
+                ["positionSide"] = positionSide,
                 ["algoType"] = "CONDITIONAL",
                 ["type"] = "TAKE_PROFIT_MARKET",
                 ["triggerPrice"] = tp.ToString(CultureInfo.InvariantCulture),
-                ["closePosition"] = "true",
-                ["recvWindow"] = "60000",
-                ["workingType"] = "MARK_PRICE"
+                ["quantity"] = qty.ToString(CultureInfo.InvariantCulture),
+                ["recvWindow"] = "60000"
             };
 
             await slackNotifierService.SendAsync("=== SEND TAKE PROFIT (ALGO) ===");
