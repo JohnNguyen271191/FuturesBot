@@ -161,7 +161,8 @@ namespace FuturesBot.Services
                 ["type"] = "STOP_MARKET",                     // loại order bên trong algo API
                 ["triggerPrice"] = sl.ToString(CultureInfo.InvariantCulture), // trigger price
                 ["closePosition"] = "true",                   // đóng toàn bộ vị thế
-                ["recvWindow"] = "60000"
+                ["recvWindow"] = "60000",
+                ["timeInForce"] = "GTC"
             };
 
             await slackNotifierService.SendAsync("=== SEND STOP LOSS (ALGO) ===");
@@ -178,7 +179,8 @@ namespace FuturesBot.Services
                 ["type"] = "TAKE_PROFIT_MARKET",
                 ["triggerPrice"] = tp.ToString(CultureInfo.InvariantCulture),
                 ["closePosition"] = "true",
-                ["recvWindow"] = "60000"
+                ["recvWindow"] = "60000",
+                ["timeInForce"] = "GTC"
             };
 
             await slackNotifierService.SendAsync("=== SEND TAKE PROFIT (ALGO) ===");
@@ -473,7 +475,8 @@ namespace FuturesBot.Services
                 ["type"] = "STOP_MARKET",                     // loại order bên trong algo API
                 ["triggerPrice"] = stop.ToString(CultureInfo.InvariantCulture), // trigger price
                 ["closePosition"] = "true",                   // đóng toàn bộ vị thế
-                ["recvWindow"] = "60000"
+                ["recvWindow"] = "60000",
+                ["timeInForce"] = "GTC"
             };
             var resp = await SignedPostAsync($"{_config.Urls.AlgoOrderUrl}", param);
 
