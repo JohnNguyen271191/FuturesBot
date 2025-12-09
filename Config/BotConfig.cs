@@ -13,7 +13,7 @@
         // Binance
         public string ApiKey { get; set; } = Environment.GetEnvironmentVariable("BINANCE_API_KEY") ?? "";
         public string ApiSecret { get; set; } = Environment.GetEnvironmentVariable("BINANCE_API_SECRET") ?? "";
-        public string BaseUrl { get; set; } = "";
+        public Urls Urls { get; set; } = new Urls();
 
         // Mode
         public bool PaperMode { get; set; } = true;   // true = chỉ log, không gửi lệnh thật
@@ -34,5 +34,21 @@
         public int Leverage { get; set; } = 50;
         public bool IsMajor { get; set; } = false;
         public decimal RiskPerTradePercent { get; set; } = 1m;   // 1% / lệnh
+    }
+
+    public class Urls
+    {
+        public string BaseUrl { get; set; } = string.Empty;
+        public string AlgoOrderUrl { get; set; } = string.Empty;
+        public string OrderUrl { get; set; } = string.Empty;
+        public string KlinesUrl { get; set; } = string.Empty;
+        public string PositionRiskUrl { get; set; } = string.Empty;
+        public string OpenOrdersUrl { get; set; } = string.Empty;
+        public string UserTradesUrl { get; set; } = string.Empty;
+        public string TimeUrl { get; set; } = string.Empty;
+        public string AllOpenOrdersUrl { get; set; } = string.Empty;
+        public string LeverageUrl { get; set; } = string.Empty;
+        public string IncomeUrl { get; set; } = string.Empty;
+        public string ExchangeInfoUrl { get; set; } = string.Empty;
     }
 }

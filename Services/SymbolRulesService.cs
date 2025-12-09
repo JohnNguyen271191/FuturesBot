@@ -30,7 +30,7 @@ namespace FuturesBot.Services
             if (_cache.TryGetValue(symbol, out var rules))
                 return rules;
 
-            var resp = await _http.GetAsync($"{_config.BaseUrl}/fapi/v1/exchangeInfo?symbol={symbol}");
+            var resp = await _http.GetAsync($"{_config.Urls.BaseUrl}{_config.Urls.ExchangeInfoUrl}?symbol={symbol}");
             resp.EnsureSuccessStatusCode();
 
             var json = await resp.Content.ReadAsStringAsync();
