@@ -161,7 +161,8 @@ namespace FuturesBot.Services
                 ["closePosition"] = "true",
                 ["timeInForce"] = "GTC",
                 ["recvWindow"] = "60000",
-                ["positionSide"] = positionSide
+                ["positionSide"] = positionSide,
+                ["algoType"] = "CONDITIONAL"
             };
 
             await slackNotifierService.SendAsync("=== SEND STOP LOSS ===");
@@ -177,7 +178,8 @@ namespace FuturesBot.Services
                 ["closePosition"] = "true",
                 ["timeInForce"] = "GTC",
                 ["recvWindow"] = "60000",
-                ["positionSide"] = positionSide
+                ["positionSide"] = positionSide,
+                ["algoType"] = "CONDITIONAL"
             };
 
             await slackNotifierService.SendAsync("=== SEND TAKE PROFIT ===");
@@ -471,7 +473,8 @@ namespace FuturesBot.Services
                 ["closePosition"] = "true",
                 ["timeInForce"] = "GTC",
                 ["recvWindow"] = "60000",
-                ["positionSide"] = positionSide
+                ["positionSide"] = positionSide,
+                ["algoType"] = "CONDITIONAL"
             };
 
             var resp = await SignedPostAsync("/fapi/v1/algoOrder", param);
