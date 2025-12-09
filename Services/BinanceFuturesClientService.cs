@@ -137,7 +137,7 @@ namespace FuturesBot.Services
 
             if (!marketOrder)
             {
-                entryParams["timeInForce"] = "GTC";
+                //entryParams["timeInForce"] = "GTC";
                 entryParams["price"] = entry.ToString(CultureInfo.InvariantCulture);
             }
 
@@ -161,8 +161,7 @@ namespace FuturesBot.Services
                 ["type"] = "STOP_MARKET",                     // loại order bên trong algo API
                 ["triggerPrice"] = sl.ToString(CultureInfo.InvariantCulture), // trigger price
                 ["closePosition"] = "true",                   // đóng toàn bộ vị thế
-                ["recvWindow"] = "60000",
-                ["timeInForce"] = "GTC"
+                ["recvWindow"] = "60000"
             };
 
             await slackNotifierService.SendAsync("=== SEND STOP LOSS (ALGO) ===");
@@ -179,8 +178,7 @@ namespace FuturesBot.Services
                 ["type"] = "TAKE_PROFIT_MARKET",
                 ["triggerPrice"] = tp.ToString(CultureInfo.InvariantCulture),
                 ["closePosition"] = "true",
-                ["recvWindow"] = "60000",
-                ["timeInForce"] = "GTC"
+                ["recvWindow"] = "60000"
             };
 
             await slackNotifierService.SendAsync("=== SEND TAKE PROFIT (ALGO) ===");
@@ -475,8 +473,7 @@ namespace FuturesBot.Services
                 ["type"] = "STOP_MARKET",                     // loại order bên trong algo API
                 ["triggerPrice"] = stop.ToString(CultureInfo.InvariantCulture), // trigger price
                 ["closePosition"] = "true",                   // đóng toàn bộ vị thế
-                ["recvWindow"] = "60000",
-                ["timeInForce"] = "GTC"
+                ["recvWindow"] = "60000"
             };
             var resp = await SignedPostAsync($"{_config.Urls.AlgoOrderUrl}", param);
 
