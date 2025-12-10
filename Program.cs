@@ -88,7 +88,7 @@ static async Task RunSymbolWorkerAsync(
 {
     var remain = pnl.GetCooldownRemaining();
     await notifier.SendAsync(
-        $"[{symbol}] BOT đang trong COOLDOWN (còn ~{remain?.TotalMinutes:F0} phút) → không mở lệnh mới.");
+        $"BOT đang trong COOLDOWN (còn ~{remain?.TotalMinutes:F0} phút) → không mở lệnh mới.");
     return; // bỏ qua signal
 }
             // Lấy candles 1 lần cho vòng lặp này
