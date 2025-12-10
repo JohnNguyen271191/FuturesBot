@@ -1,6 +1,7 @@
+using System;
 using System.Collections.Concurrent;
-using System.Linq;
 using System.Collections.Generic;
+using System.Linq;
 using FuturesBot.Config;
 using FuturesBot.IServices;
 using FuturesBot.Models;
@@ -18,6 +19,9 @@ namespace FuturesBot.Services
         private const decimal EarlyExitRR = 0.5m;
         private const decimal HardReverseRR = 0.2m;
         private const decimal EmaBreakTolerance = 0.001m;
+
+        // Timeout cho LIMIT: 20 phút
+        private static readonly TimeSpan LimitTimeout = TimeSpan.FromMinutes(20);
 
         // ============================================================
         // TRACK SYMBOL ĐANG ĐƯỢC GIÁM SÁT
@@ -83,9 +87,24 @@ namespace FuturesBot.Services
 
             await _notify.SendAsync($"[{symbol}] Monitor LIMIT started...");
 
+            // Bắt đầu đếm thời gian cho limit
+            var startTime = DateTime.UtcNow;
+
             while (true)
             {
                 await Task.Delay(MonitorIntervalMs);
+
+                // === TIMEOUT CHECK: nếu quá 20 phút chưa khớp thì cancel LIMIT ===
+                var elapsed = DateTime.UtcNow - startTime;
+                if (elapsed > LimitTimeout)
+                {
+                    await _notify.SendAsync(
+                        $"[{symbol}] LIMIT quá {LimitTimeout.TotalMinutes} phút chưa khớp → cancel tất cả orders và stop LIMIT monitor.");
+
+                    await _exchange.CancelAllOpenOrdersAsync(symbol);
+                    ClearMonitoringLimit(symbol);
+                    return;
+                }
 
                 var openOrders = await _exchange.GetOpenOrdersAsync(symbol);
                 var pos = await _exchange.GetPositionAsync(symbol);
@@ -450,7 +469,6 @@ namespace FuturesBot.Services
         // ============================================================
         //                       EMA HELPERS
         // ============================================================
-
         private static decimal ComputeEmaLast(IReadOnlyList<Candle> candles, int period)
         {
             if (candles.Count == 0) return 0;
