@@ -363,7 +363,11 @@ namespace FuturesBot.Services
         private async Task<(decimal? sl, decimal? tp)> DetectManualSlTpAsync(
             string symbol, bool isLong, decimal entryPrice)
         {
-            var orders = await _exchange.GetOpenOrdersAsync(symbol);
+            var normalOrders = await _exchange.GetOpenOrdersAsync(symbol);
+var algoOrders   = await _exchange.GetOpenAlgoOrdersAsync(symbol);
+
+// gộp 2 list lại
+var orders = normalOrders.Concat(algoOrders).ToList();
 
             if (orders == null || orders.Count == 0)
                 return (null, null);
