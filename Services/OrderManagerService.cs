@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Linq;
 using FuturesBot.Config;
 using FuturesBot.IServices;
 using FuturesBot.Models;
@@ -152,7 +153,7 @@ namespace FuturesBot.Services
         }
 
         // ============================================================
-        //         MONITOR POSITION V3 (AUTO-TP LOGIC, SAFE)
+        //         MONITOR POSITION (AUTO-TP, TRAILING, EARLY EXIT)
         // ============================================================
 
         public async Task MonitorPositionAsync(TradeSignal signal)
@@ -186,7 +187,7 @@ namespace FuturesBot.Services
             if (hasEntry && hasSL)
             {
                 risk = isLong ? entry - sl : sl - entry;
-                useRR = risk > 0;
+                if (risk > 0) useRR = true;
             }
 
             await _notify.SendAsync($"[{symbol}] Monitor POSITION started...");
@@ -304,7 +305,7 @@ namespace FuturesBot.Services
         }
 
         // ============================================================
-        //          MANUAL ATTACH POSITION
+        //          MANUAL ATTACH POSITION (AUTO TÍNH TP NẾU MẤT)
         // ============================================================
 
         public async Task AttachManualPositionAsync(PositionInfo pos)
@@ -314,11 +315,13 @@ namespace FuturesBot.Services
                 return;
             }
 
+            // Nếu đã có POSITION monitor rồi thì không attach nữa
             if (IsMonitoringPosition(pos.Symbol))
             {
                 return;
             }
 
+            // Có thể đang monitor LIMIT cũ → clear cho chắc
             ClearMonitoringLimit(pos.Symbol);
 
             decimal qty = pos.PositionAmt;
@@ -326,7 +329,28 @@ namespace FuturesBot.Services
 
             decimal entry = pos.EntryPrice;
 
+            // 1) Lấy SL/TP hiện có trên sàn (normal + algo nếu mày merge trong DetectManualSlTpAsync)
             var (sl, tp) = await DetectManualSlTpAsync(pos.Symbol, isLong, entry);
+
+            // 2) Nếu KHÔNG tìm thấy TP nhưng có SL + entry → tự tính TP theo RR mặc định
+            if (!tp.HasValue && sl.HasValue && entry > 0)
+            {
+                decimal risk = isLong ? entry - sl.Value : sl.Value - entry;
+
+                if (risk > 0)
+                {
+                    const decimal defaultRR = 1.5m; // RR mặc định, muốn đổi thì chỉnh tại đây
+
+                    var autoTp = isLong
+                        ? entry + risk * defaultRR
+                        : entry - risk * defaultRR;
+
+                    tp = autoTp;
+
+                    await _notify.SendAsync(
+                        $"[{pos.Symbol}] MANUAL ATTACH: không tìm thấy TP trên sàn → auto tính TP={autoTp} theo RR={defaultRR}");
+                }
+            }
 
             await _notify.SendAsync(
                 $"[{pos.Symbol}] MANUAL ATTACH → side={(isLong ? "LONG" : "SHORT")} entry={entry}, SL={sl}, TP={tp}"
@@ -356,18 +380,21 @@ namespace FuturesBot.Services
         }
 
         // ============================================================
-        //          DETECT TP/SL từ openOrders (CHỈ ORDER THƯỜNG)
-        // (TP/SL dạng algo thì mình đang handle bằng Auto-TP trong monitor)
+        //          DETECT TP/SL từ openOrders
+        //  (nếu mày đã có GetOpenAlgoOrdersAsync thì có thể gộp thêm)
         // ============================================================
 
         private async Task<(decimal? sl, decimal? tp)> DetectManualSlTpAsync(
             string symbol, bool isLong, decimal entryPrice)
         {
+            // Order thường
             var normalOrders = await _exchange.GetOpenOrdersAsync(symbol);
-var algoOrders   = await _exchange.GetOpenAlgoOrdersAsync(symbol);
 
-// gộp 2 list lại
-var orders = normalOrders.Concat(algoOrders).ToList();
+            // Nếu muốn gộp luôn algo orders:
+            // var algoOrders = await _exchange.GetOpenAlgoOrdersAsync(symbol);
+            // var orders = normalOrders.Concat(algoOrders).ToList();
+
+            var orders = normalOrders;
 
             if (orders == null || orders.Count == 0)
                 return (null, null);
