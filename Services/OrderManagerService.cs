@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Linq;
+using System.Collections.Generic;
 using FuturesBot.Config;
 using FuturesBot.IServices;
 using FuturesBot.Models;
@@ -329,7 +330,7 @@ namespace FuturesBot.Services
 
             decimal entry = pos.EntryPrice;
 
-            // 1) Lấy SL/TP hiện có trên sàn (normal + algo nếu mày merge trong DetectManualSlTpAsync)
+            // 1) Lấy SL/TP hiện có trên sàn (normal + algo)
             var (sl, tp) = await DetectManualSlTpAsync(pos.Symbol, isLong, entry);
 
             // 2) Nếu KHÔNG tìm thấy TP nhưng có SL + entry → tự tính TP theo RR mặc định
@@ -339,7 +340,7 @@ namespace FuturesBot.Services
 
                 if (risk > 0)
                 {
-                    const decimal defaultRR = 2m; // RR mặc định, muốn đổi thì chỉnh tại đây
+                    const decimal defaultRR = 2m; // RR mặc định
 
                     var autoTp = isLong
                         ? entry + risk * defaultRR
@@ -348,7 +349,7 @@ namespace FuturesBot.Services
                     tp = autoTp;
 
                     await _notify.SendAsync(
-                        $"[{pos.Symbol}] MANUAL ATTACH: không tìm thấy TP trên sàn → auto tính TP={autoTp} theo RR={defaultRR}");
+                        $"[{pos.Symbol}] MANUAL ATTACH: không tìm thấy TP trên sàn → auto TP={autoTp} theo RR={defaultRR}");
                 }
             }
 
@@ -380,8 +381,7 @@ namespace FuturesBot.Services
         }
 
         // ============================================================
-        //          DETECT TP/SL từ openOrders
-        //  (nếu mày đã có GetOpenAlgoOrdersAsync thì có thể gộp thêm)
+        //          DETECT TP/SL từ openOrders + openAlgoOrders
         // ============================================================
 
         private async Task<(decimal? sl, decimal? tp)> DetectManualSlTpAsync(
@@ -400,42 +400,46 @@ namespace FuturesBot.Services
             foreach (var o in orders)
             {
                 decimal trigger = o.StopPrice > 0 ? o.StopPrice : o.Price;
-
                 if (trigger <= 0) continue;
+
+                bool isStopType = o.Type.Contains("STOP", StringComparison.OrdinalIgnoreCase);
+                bool isTpType =
+                    o.Type.Contains("TAKE", StringComparison.OrdinalIgnoreCase) ||
+                    (o.Type.Contains("LIMIT", StringComparison.OrdinalIgnoreCase) &&
+                     !o.Type.Contains("STOP", StringComparison.OrdinalIgnoreCase));
 
                 if (isLong)
                 {
-                    // TP: SELL LIMIT trên entry
-                    if (o.Side == "SELL" && trigger > entryPrice &&
-                        (o.Type.Contains("LIMIT") || o.Type.Contains("TAKE")))
+                    // LONG TP: SELL LIMIT/TAKE phía trên entry (nếu có entry)
+                    if (o.Side == "SELL" && isTpType &&
+                        (entryPrice <= 0 || trigger >= entryPrice))
                     {
                         tp ??= trigger;
-                        if (trigger < tp) tp = trigger;
+                        if (trigger < tp) tp = trigger;   // TP gần nhất
                     }
 
-                    // SL: SELL STOP dưới entry
-                    if (o.Side == "SELL" && trigger < entryPrice &&
-                        (o.Type.Contains("STOP")))
+                    // LONG SL: mọi SELL STOP là SL (kể cả trailing > entry)
+                    if (o.Side == "SELL" && isStopType)
                     {
                         sl ??= trigger;
-                        if (trigger > sl) sl = trigger;
+                        if (trigger > sl) sl = trigger;   // SL gần giá nhất: cao hơn
                     }
                 }
                 else
                 {
-                    // SHORT TP: BUY LIMIT dưới entry
-                    if (o.Side == "BUY" && trigger < entryPrice &&
-                        (o.Type.Contains("LIMIT") || o.Type.Contains("TAKE")))
+                    // SHORT TP: BUY LIMIT/TAKE phía dưới entry (nếu có entry)
+                    if (o.Side == "BUY" && isTpType &&
+                        (entryPrice <= 0 || trigger <= entryPrice))
                     {
                         tp ??= trigger;
-                        if (trigger > tp) tp = trigger;
+                        if (trigger > tp) tp = trigger;   // với short, TP gần hơn là giá cao hơn
                     }
 
-                    // SHORT SL: BUY STOP trên entry
-                    if (o.Side == "BUY" && trigger > entryPrice && o.Type.Contains("STOP"))
+                    // SHORT SL: mọi BUY STOP là SL (kể cả trailing < entry)
+                    if (o.Side == "BUY" && isStopType)
                     {
                         sl ??= trigger;
-                        if (trigger < sl) sl = trigger;
+                        if (trigger < sl) sl = trigger;   // SL gần giá: thấp hơn
                     }
                 }
             }
