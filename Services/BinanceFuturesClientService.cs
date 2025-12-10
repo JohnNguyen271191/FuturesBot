@@ -385,7 +385,7 @@ namespace FuturesBot.Services
                 _serverTimeOffsetMs = localTime - serverTime;
                 _lastTimeSync = DateTime.UtcNow;
 
-                await _slack.SendAsync($"[TIME OFFSET] => {_serverTimeOffsetMs} ms");
+                //await _slack.SendAsync($"[TIME OFFSET] => {_serverTimeOffsetMs} ms");
             }
             catch (Exception ex)
             {
