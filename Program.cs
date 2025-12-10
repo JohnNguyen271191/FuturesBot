@@ -45,6 +45,8 @@ var pnl = host.Services.GetRequiredService<PnlReporterService>();
 var vnTimeZone = TimeZoneInfo.FindSystemTimeZoneById("Asia/Ho_Chi_Minh");
 var nowVN = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, vnTimeZone);
 
+pnl.SetDailyBaseCapital(config.AccountBalance); // ví dụ vốn 80 USDT
+
 await notifier.SendAsync(
     $"=== FuturesBot {config.Intervals[0].FrameTime.ToUpper()} - {nowVN:dd/MM/yyyy HH:mm:ss} started ==="
 );
@@ -82,6 +84,13 @@ static async Task RunSymbolWorkerAsync(
     {
         try
         {
+            if (pnl.IsInCooldown())
+{
+    var remain = pnl.GetCooldownRemaining();
+    await notifier.SendAsync(
+        $"[{symbol}] BOT đang trong COOLDOWN (còn ~{remain?.TotalMinutes:F0} phút) → không mở lệnh mới.");
+    return; // bỏ qua signal
+}
             // Lấy candles 1 lần cho vòng lặp này
             var candles15m = await exchange.GetRecentCandlesAsync(
                 coinInfo.Symbol, config.Intervals[0].FrameTime, 200);
