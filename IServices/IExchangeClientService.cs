@@ -28,5 +28,6 @@ namespace FuturesBot.IServices
         Task CancelStopLossOrdersAsync(string symbol);
         Task<bool> PlaceTakeProfitAsync(string symbol, string positionSide, decimal qty, decimal takeProfitPrice);
         Task<bool> HasTakeProfitOrderAsync(string symbol);
+        Task<IReadOnlyList<OpenOrderInfo>> GetOpenAlgoOrdersAsync(string symbol);
     }
 }
