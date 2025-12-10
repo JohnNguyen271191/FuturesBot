@@ -17,6 +17,7 @@ namespace FuturesBot.Services
         private long _serverTimeOffsetMs = 0;
         private DateTime _lastTimeSync = DateTime.MinValue;
         private readonly SymbolRulesService _rulesService;
+        private readonly SlackNotifierService _slack;
 
         public BinanceFuturesClientService(BotConfig config)
         {
@@ -24,6 +25,7 @@ namespace FuturesBot.Services
             _http = new HttpClient { BaseAddress = new Uri(config.Urls.BaseUrl) };
             _http.DefaultRequestHeaders.Add("X-MBX-APIKEY", config.ApiKey);
             _rulesService = new SymbolRulesService(_http, _config);
+            _slack = new SlackNotifierService(_config);
         }
 
         // ==========================
@@ -65,15 +67,16 @@ namespace FuturesBot.Services
                 }
                 catch (IOException ex) when (attempt < 3)
                 {
-                    Console.WriteLine($"[WARN] IO error when calling Binance (attempt {attempt}): {ex.Message}");
+                    await _slack.SendAsync($"[WARN] IO error when calling Binance (attempt {attempt}): {ex.Message}");
                     await Task.Delay(500 * attempt);
                 }
                 catch (HttpRequestException ex) when (attempt < 3)
                 {
-                    Console.WriteLine($"[WARN] HTTP error when calling Binance (attempt {attempt}): {ex.Message}");
+                    await _slack.SendAsync($"[WARN] HTTP error when calling Binance (attempt {attempt}): {ex.Message}");
                     await Task.Delay(500 * attempt);
                 }
             }
+
             throw new Exception("Failed to get candles from Binance after 3 attempts.");
         }
 
@@ -109,10 +112,10 @@ namespace FuturesBot.Services
             // PAPER MODE: chỉ log, không call API
             if (_config.PaperMode)
             {
-                Console.WriteLine("[PAPER MODE] Giả lập gửi lệnh futures:");
-                Console.WriteLine($" -> {side} {quantity} {symbol} @ {entryPrice}");
-                Console.WriteLine($" -> SL (STOP_MARKET) : {stopLoss}");
-                Console.WriteLine($" -> TP (TAKE_PROFIT_MARKET) : {takeProfit}");
+                await _slack.SendAsync("[PAPER MODE] Giả lập gửi lệnh futures:");
+                await _slack.SendAsync($" -> {side} {quantity} {symbol} @ {entryPrice}");
+                await _slack.SendAsync($" -> SL (STOP_MARKET) : {stopLoss}");
+                await _slack.SendAsync($" -> TP (TAKE_PROFIT_MARKET) : {takeProfit}");
                 return true;
             }
 
@@ -141,32 +144,35 @@ namespace FuturesBot.Services
                 entryParams["price"] = entry.ToString(CultureInfo.InvariantCulture);
             }
 
-            await slackNotifierService.SendAsync("=== SEND ENTRY ORDER ===");
+            // sử dụng slackNotifierService param chỗ này để đồng nhất message (nếu caller truyền đôi tượng cụ thể)
+            var notifier = slackNotifierService ?? _slack;
+
+            await notifier.SendAsync("=== SEND ENTRY ORDER ===");
             var entryResp = await SignedPostAsync($"{_config.Urls.OrderUrl}", entryParams);
             if (entryResp.Contains("[BINANCE ERROR]"))
             {
-                await slackNotifierService.SendAsync($"Send order: symbol={symbol}, side={sideStr}, qty={qty} - {rules.QtyStep}, price={entry} - {rules.PriceStep}, sl={sl}, tp={tp}");
-                await slackNotifierService.SendAsync(entryResp);
+                await notifier.SendAsync($"Send order: symbol={symbol}, side={sideStr}, qty={qty} - {rules.QtyStep}, price={entry} - {rules.PriceStep}, sl={sl}, tp={tp}");
+                await notifier.SendAsync(entryResp);
                 return false;
             }
-            await slackNotifierService.SendAsync($"[ENTRY RESP] {entryResp}");
+            await notifier.SendAsync($"[ENTRY RESP] {entryResp}");
 
             // 3. Đặt STOP_MARKET (Stop Loss) qua Algo Order API (algoType=CONDITIONAL)
             var slAlgoParams = new Dictionary<string, string>
             {
                 ["symbol"] = symbol,
                 ["side"] = closeSideStr,                      // SELL để đóng long, BUY để đóng short
-                ["positionSide"] = positionSide,              // chỉ dùng khi Hedge mode; nếu One-way mode có thể vẫn gửi (server sẽ ignore) atau omit nếu muốn
+                ["positionSide"] = positionSide,              // chỉ dùng khi Hedge mode; nếu One-way mode có thể vẫn gửi (server sẽ ignore) hoặc omit nếu muốn
                 ["algoType"] = "CONDITIONAL",                 // bắt buộc cho conditional algo orders
                 ["type"] = "STOP_MARKET",                     // loại order bên trong algo API
                 ["triggerPrice"] = sl.ToString(CultureInfo.InvariantCulture), // trigger price
-                ["quantity"] = qty.ToString(CultureInfo.InvariantCulture),                   // đóng toàn bộ vị thế
+                ["quantity"] = qty.ToString(CultureInfo.InvariantCulture),    // đóng toàn bộ vị thế
                 ["recvWindow"] = "60000"
             };
 
-            await slackNotifierService.SendAsync("=== SEND STOP LOSS (ALGO) ===");
+            await notifier.SendAsync("=== SEND STOP LOSS (ALGO) ===");
             var slResp = await SignedPostAsync($"{_config.Urls.AlgoOrderUrl}", slAlgoParams);
-            await slackNotifierService.SendAsync($"[SL RESP] {slResp}");
+            await notifier.SendAsync($"[SL RESP] {slResp}");
 
             // 4. Đặt TAKE_PROFIT_MARKET (Take Profit) qua Algo Order API
             var tpAlgoParams = new Dictionary<string, string>
@@ -181,26 +187,46 @@ namespace FuturesBot.Services
                 ["recvWindow"] = "60000"
             };
 
-            await slackNotifierService.SendAsync("=== SEND TAKE PROFIT (ALGO) ===");
+            await notifier.SendAsync("=== SEND TAKE PROFIT (ALGO) ===");
             var tpResp = await SignedPostAsync($"{_config.Urls.AlgoOrderUrl}", tpAlgoParams);
-            await slackNotifierService.SendAsync($"[TP RESP] {tpResp}");
+            await notifier.SendAsync($"[TP RESP] {tpResp}");
 
             return true;
         }
 
         public async Task<PositionInfo> GetPositionAsync(string symbol)
         {
-            string json;
-            try
+            string json = "";
+            Exception? lastEx = null;
+
+            for (int attempt = 1; attempt <= 3; attempt++)
             {
-                json = await SignedGetAsync($"{_config.Urls.PositionRiskUrl}", new Dictionary<string, string>
+                try
                 {
-                    ["symbol"] = symbol
-                });
-            }
-            catch (Exception ex)
-            {
-                throw new Exception($"GetPositionAsync API error for {symbol}: {ex.Message}");
+                    json = await SignedGetAsync($"{_config.Urls.PositionRiskUrl}", new Dictionary<string, string>
+                    {
+                        ["symbol"] = symbol
+                    });
+
+                    if (string.IsNullOrWhiteSpace(json))
+                        throw new Exception("Empty response from Binance.");
+
+                    // quick parse check
+                    using var testDoc = JsonDocument.Parse(json);
+                    break; // success
+                }
+                catch (Exception ex)
+                {
+                    lastEx = ex;
+                    if (attempt < 3)
+                    {
+                        await _slack.SendAsync($"[WARN] GetPositionAsync retry {attempt} for {symbol}: {ex.Message}");
+                        await Task.Delay(400 * attempt);
+                        continue;
+                    }
+
+                    throw new Exception($"GetPositionAsync API error for {symbol} after 3 attempts: {ex.Message}");
+                }
             }
 
             using var doc = JsonDocument.Parse(json);
@@ -285,7 +311,7 @@ namespace FuturesBot.Services
             }
             catch
             {
-                Console.WriteLine("[WARN] Cannot parse positionRisk response.");
+                await _slack.SendAsync("[WARN] Cannot parse positionRisk response.");
             }
 
             var orderParams = new Dictionary<string, string>
@@ -306,7 +332,7 @@ namespace FuturesBot.Services
             }
             catch
             {
-                Console.WriteLine("[WARN] Cannot parse openOrders response.");
+                await _slack.SendAsync("[WARN] Cannot parse openOrders response.");
             }
 
             return false;
@@ -359,11 +385,11 @@ namespace FuturesBot.Services
                 _serverTimeOffsetMs = localTime - serverTime;
                 _lastTimeSync = DateTime.UtcNow;
 
-                Console.WriteLine($"[TIME OFFSET] => {_serverTimeOffsetMs} ms");
+                await _slack.SendAsync($"[TIME OFFSET] => {_serverTimeOffsetMs} ms");
             }
             catch (Exception ex)
             {
-                Console.WriteLine("[TIME SYNC ERROR] " + ex.Message);
+                await _slack.SendAsync("[TIME SYNC ERROR] " + ex.Message);
             }
         }
 
@@ -388,10 +414,10 @@ namespace FuturesBot.Services
 
             if (!resp.IsSuccessStatusCode)
             {
-                Console.WriteLine($"[CancelAllOpenOrdersAsync ERROR] {content}");
+                await _slack.SendAsync($"[CancelAllOpenOrdersAsync ERROR] {content}");
             }
 
-            Console.WriteLine($"[CancelAllOpenOrdersAsync OK] {symbol} => {content}");
+            await _slack.SendAsync($"[CancelAllOpenOrdersAsync OK] {symbol} => {content}");
         }
 
         public async Task ClosePositionAsync(string symbol, decimal quantity)
@@ -460,7 +486,7 @@ namespace FuturesBot.Services
             // PAPER MODE
             if (_config.PaperMode)
             {
-                Console.WriteLine($"[PAPER MODE] PlaceStopOnly {side} {symbol} qty={qty} stop={stop}");
+                await _slack.SendAsync($"[PAPER MODE] PlaceStopOnly {side} {symbol} qty={qty} stop={stop}");
                 return true;
             }
 
@@ -468,18 +494,18 @@ namespace FuturesBot.Services
             {
                 ["symbol"] = symbol,
                 ["side"] = side,                      // SELL để đóng long, BUY để đóng short
-                ["positionSide"] = positionSide,              // chỉ dùng khi Hedge mode; nếu One-way mode có thể vẫn gửi (server sẽ ignore) atau omit nếu muốn
-                ["algoType"] = "CONDITIONAL",                 // bắt buộc cho conditional algo orders
-                ["type"] = "STOP_MARKET",                     // loại order bên trong algo API
+                ["positionSide"] = positionSide,      // chỉ dùng khi Hedge mode; nếu One-way mode có thể vẫn gửi (server sẽ ignore) hoặc omit nếu muốn
+                ["algoType"] = "CONDITIONAL",         // bắt buộc cho conditional algo orders
+                ["type"] = "STOP_MARKET",             // loại order bên trong algo API
                 ["triggerPrice"] = stop.ToString(CultureInfo.InvariantCulture), // trigger price
-                ["closePosition"] = "true",                   // đóng toàn bộ vị thế
+                ["closePosition"] = "true",           // đóng toàn bộ vị thế
                 ["recvWindow"] = "60000"
             };
             var resp = await SignedPostAsync($"{_config.Urls.AlgoOrderUrl}", param);
 
             if (resp.Contains("[BINANCE ERROR]"))
             {
-                Console.WriteLine("[PlaceStopOnly ERROR] " + resp);
+                await _slack.SendAsync("[PlaceStopOnly ERROR] " + resp);
                 return false;
             }
 
@@ -526,7 +552,7 @@ namespace FuturesBot.Services
             // PAPER MODE: chỉ log, không gọi API thật
             if (_config.PaperMode)
             {
-                Console.WriteLine($"[PAPER MODE] CancelStopLossOrdersAsync for {symbol}");
+                await _slack.SendAsync($"[PAPER MODE] CancelStopLossOrdersAsync for {symbol}");
                 return;
             }
 
@@ -534,12 +560,12 @@ namespace FuturesBot.Services
             var orders = await GetOpenOrdersAsync(symbol);
             if (orders == null || orders.Count == 0)
             {
-                Console.WriteLine($"[{symbol}] Không có open orders để cancel SL.");
+                await _slack.SendAsync($"[{symbol}] Không có open orders để cancel SL.");
                 return;
             }
 
             // 2) Các type được coi là StopLoss
-            string[] slKeywords = ["STOP"];
+            string[] slKeywords = new string[] { "STOP" };
 
             // 3) Lọc ra các SL order
             var slOrders = orders
@@ -549,7 +575,7 @@ namespace FuturesBot.Services
 
             if (slOrders.Count == 0)
             {
-                Console.WriteLine($"[{symbol}] Không có StopLoss orders để cancel.");
+                await _slack.SendAsync($"[{symbol}] Không có StopLoss orders để cancel.");
                 return;
             }
 
@@ -574,7 +600,7 @@ namespace FuturesBot.Services
             };
 
             var resp = await SignedPostAsync($"{_config.Urls.LeverageUrl}", param);
-            Console.WriteLine("[LEVERAGE RESP] " + resp);
+            await _slack.SendAsync("[LEVERAGE RESP] " + resp);
         }
 
         private async Task<string> SignedPostAsync(string path, IDictionary<string, string> parameters)
@@ -589,9 +615,7 @@ namespace FuturesBot.Services
                 sb.Append(kv.Key).Append('=').Append(kv.Value);
             }
 
-            if (sb.Length > 0) sb.Append('&');
-            sb.Append("timestamp=").Append(ts);
-
+            // IMPORTANT: do not append timestamp again here (already included in parameters)
             var queryString = sb.ToString();
             var signature = BinanceSignatureHelper.Sign(queryString, _config.ApiSecret);
             queryString += "&signature=" + signature;
@@ -622,9 +646,7 @@ namespace FuturesBot.Services
                 sb.Append(kv.Key).Append('=').Append(kv.Value);
             }
 
-            if (sb.Length > 0) sb.Append('&');
-            sb.Append("timestamp=").Append(ts);
-
+            // IMPORTANT: do not append timestamp again here (already included in parameters)
             var queryString = sb.ToString();
             var signature = BinanceSignatureHelper.Sign(queryString, _config.ApiSecret);
             queryString += "&signature=" + signature;
@@ -636,7 +658,7 @@ namespace FuturesBot.Services
 
             if (!resp.IsSuccessStatusCode)
             {
-                Console.WriteLine($"[BINANCE ERROR] {resp.StatusCode}: {body}");
+                await _slack.SendAsync($"[BINANCE ERROR] {resp.StatusCode}: {body}");
             }
 
             return body;
@@ -696,7 +718,7 @@ namespace FuturesBot.Services
             // PAPER MODE
             if (_config.PaperMode)
             {
-                Console.WriteLine($"[PAPER MODE] CancelOrderById {symbol} orderId={orderId}");
+                await _slack.SendAsync($"[PAPER MODE] CancelOrderById {symbol} orderId={orderId}");
                 return;
             }
 
@@ -713,11 +735,11 @@ namespace FuturesBot.Services
 
             if (!resp.IsSuccessStatusCode)
             {
-                Console.WriteLine($"[CancelOrderByIdAsync ERROR] {symbol} orderId={orderId} => {body}");
+                await _slack.SendAsync($"[CancelOrderByIdAsync ERROR] {symbol} orderId={orderId} => {body}");
             }
             else
             {
-                Console.WriteLine($"[CancelOrderByIdAsync OK] {symbol} orderId={orderId} => {body}");
+                await _slack.SendAsync($"[CancelOrderByIdAsync OK] {symbol} orderId={orderId} => {body}");
             }
         }
     }
