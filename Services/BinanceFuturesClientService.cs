@@ -226,16 +226,64 @@ namespace FuturesBot.Services
                         continue;
                     }
 
-                    throw new Exception($"GetPositionAsync API error for {symbol} after 3 attempts: {ex.Message}");
+                    // Sau 3 lần retry vẫn fail => log rồi trả về position rỗng
+                    await _slack.SendAsync($"[ERROR] GetPositionAsync FAILED for {symbol} after 3 attempts: {ex.Message}");
+                    return new PositionInfo
+                    {
+                        Symbol = symbol,
+                        PositionAmt = 0,
+                        EntryPrice = 0,
+                        MarkPrice = 0,
+                        UpdateTime = DateTime.UtcNow
+                    };
                 }
             }
 
             using var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;
 
-            if (root.ValueKind != JsonValueKind.Array || root.GetArrayLength() == 0)
+            // Nếu Binance trả error object ({"code":...,"msg":...}) hoặc format lạ
+            if (root.ValueKind != JsonValueKind.Array)
             {
-                throw new Exception($"GetPositionAsync empty array for {symbol}. Raw json: {json}");
+                try
+                {
+                    if (root.TryGetProperty("code", out var codeEl))
+                    {
+                        var code = codeEl.GetInt32();
+                        var msg = root.GetProperty("msg").GetString();
+                        await _slack.SendAsync($"[GetPositionAsync BINANCE ERROR] {symbol}: code={code}, msg={msg}. Treat as no-position.");
+                    }
+                    else
+                    {
+                        await _slack.SendAsync($"[GetPositionAsync UNEXPECTED JSON] {symbol}: {json}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    await _slack.SendAsync($"[GetPositionAsync PARSE ERROR] {symbol}: {ex.Message}. Raw: {json}");
+                }
+
+                return new PositionInfo
+                {
+                    Symbol = symbol,
+                    PositionAmt = 0,
+                    EntryPrice = 0,
+                    MarkPrice = 0,
+                    UpdateTime = DateTime.UtcNow
+                };
+            }
+
+            // Array rỗng => không có vị thế
+            if (root.GetArrayLength() == 0)
+            {
+                return new PositionInfo
+                {
+                    Symbol = symbol,
+                    PositionAmt = 0,
+                    EntryPrice = 0,
+                    MarkPrice = 0,
+                    UpdateTime = DateTime.UtcNow
+                };
             }
 
             JsonElement? chosen = null;
@@ -259,14 +307,34 @@ namespace FuturesBot.Services
             }
 
             if (!chosen.HasValue)
-                throw new Exception($"GetPositionAsync cannot find symbol {symbol} in array.");
+            {
+                await _slack.SendAsync($"[GetPositionAsync] Symbol {symbol} not found in positionRisk array. Raw: {json}");
+                return new PositionInfo
+                {
+                    Symbol = symbol,
+                    PositionAmt = 0,
+                    EntryPrice = 0,
+                    MarkPrice = 0,
+                    UpdateTime = DateTime.UtcNow
+                };
+            }
 
             var elx = chosen.Value;
 
             decimal positionAmt = decimal.Parse(elx.GetProperty("positionAmt").GetString() ?? "0", CultureInfo.InvariantCulture);
             decimal entryPrice = decimal.Parse(elx.GetProperty("entryPrice").GetString() ?? "0", CultureInfo.InvariantCulture);
             decimal markPrice = decimal.Parse(elx.GetProperty("markPrice").GetString() ?? "0", CultureInfo.InvariantCulture);
-            long updateMs = elx.GetProperty("updateTime").GetInt64();
+
+            DateTime updateTime;
+            try
+            {
+                long updateMs = elx.GetProperty("updateTime").GetInt64();
+                updateTime = DateTimeOffset.FromUnixTimeMilliseconds(updateMs).UtcDateTime;
+            }
+            catch
+            {
+                updateTime = DateTime.UtcNow;
+            }
 
             return new PositionInfo
             {
@@ -274,7 +342,7 @@ namespace FuturesBot.Services
                 PositionAmt = positionAmt,
                 EntryPrice = entryPrice,
                 MarkPrice = markPrice,
-                UpdateTime = DateTimeOffset.FromUnixTimeMilliseconds(updateMs).UtcDateTime
+                UpdateTime = updateTime
             };
         }
 
