@@ -774,6 +774,46 @@ public async Task<bool> HasTakeProfitOrderAsync(string symbol)
     return false;
 }
 
+public async Task<IReadOnlyList<OpenOrderInfo>> GetOpenAlgoOrdersAsync(string symbol)
+{
+    if (_config.PaperMode)
+        return Array.Empty<OpenOrderInfo>();
+
+    var json = await SignedGetAsync($"{_config.Urls.OpenAlgoOrdersUrl}", new Dictionary<string, string>
+    {
+        ["symbol"] = symbol,
+        ["recvWindow"] = "60000"
+    });
+
+    var list = new List<OpenOrderInfo>();
+
+    using var doc = JsonDocument.Parse(json);
+    var root = doc.RootElement;
+
+    if (root.ValueKind != JsonValueKind.Array)
+        return list;
+
+    foreach (var el in root.EnumerateArray())
+    {
+        // /fapi/v1/algoOpenOrders trả về:
+        // algoId, symbol, side, orderType, price, triggerPrice, quantity, ...
+        list.Add(new OpenOrderInfo
+        {
+            Symbol       = el.GetProperty("symbol").GetString() ?? symbol,
+            ClientOrderId = string.Empty, // algo không có clientOrderId
+            OrderId      = el.GetProperty("algoId").GetInt64().ToString(),
+            Side         = el.GetProperty("side").GetString() ?? string.Empty,
+            Type         = el.GetProperty("orderType").GetString() ?? string.Empty,
+            Price        = decimal.Parse(el.GetProperty("price").GetString() ?? "0", CultureInfo.InvariantCulture),
+            OrigQty      = decimal.Parse(el.GetProperty("quantity").GetString() ?? "0", CultureInfo.InvariantCulture),
+            ExecutedQty  = 0m, // algo conditional chưa khớp
+            StopPrice    = decimal.Parse(el.GetProperty("triggerPrice").GetString() ?? "0", CultureInfo.InvariantCulture),
+        });
+    }
+
+    return list;
+}
+
         // ==========================
         //       PRIVATE HELPERS
         // ==========================
