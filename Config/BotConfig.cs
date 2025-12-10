@@ -50,5 +50,7 @@
         public string LeverageUrl { get; set; } = string.Empty;
         public string IncomeUrl { get; set; } = string.Empty;
         public string ExchangeInfoUrl { get; set; } = string.Empty;
+        public string OpenAlgoOrdersUrl { get; set; } = string.Empty;
+        public string AlgoOpenOrdersUrl { get; set; } = string.Empty;
     }
 }
