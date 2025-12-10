@@ -339,7 +339,7 @@ namespace FuturesBot.Services
 
                 if (risk > 0)
                 {
-                    const decimal defaultRR = 1.5m; // RR mặc định, muốn đổi thì chỉnh tại đây
+                    const decimal defaultRR = 2m; // RR mặc định, muốn đổi thì chỉnh tại đây
 
                     var autoTp = isLong
                         ? entry + risk * defaultRR
