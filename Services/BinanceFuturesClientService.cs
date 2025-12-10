@@ -723,6 +723,57 @@ namespace FuturesBot.Services
             }
         }
 
+        public async Task<bool> PlaceTakeProfitAsync(string symbol, string positionSide, decimal qty, decimal takeProfitPrice)
+{
+    var rules = await _rulesService.GetRulesAsync(symbol);
+
+    var tp = SymbolRulesService.TruncateToStep(takeProfitPrice, rules.PriceStep);
+    var q = SymbolRulesService.TruncateToStep(qty, rules.QtyStep);
+
+    string side = positionSide == "LONG" ? "SELL" : "BUY";
+
+    var param = new Dictionary<string, string>
+    {
+        ["symbol"] = symbol,
+        ["side"] = side,
+        ["positionSide"] = positionSide,
+        ["algoType"] = "CONDITIONAL",
+        ["type"] = "TAKE_PROFIT_MARKET",
+        ["triggerPrice"] = tp.ToString(CultureInfo.InvariantCulture),
+        ["quantity"] = q.ToString(CultureInfo.InvariantCulture),
+        ["recvWindow"] = "60000",
+    };
+
+    var resp = await SignedPostAsync(_config.Urls.AlgoOrderUrl, param);
+
+    if (resp.Contains("[BINANCE ERROR]"))
+    {
+        await _slack.SendAsync($"[TP ERROR] {resp}");
+        return false;
+    }
+
+    await _slack.SendAsync($"[TP PLACED] {symbol} qty={q} tp={tp}");
+    return true;
+}
+
+public async Task<bool> HasTakeProfitOrderAsync(string symbol)
+{
+    var json = await SignedGetAsync(_config.Urls.OpenAlgoOrdersUrl, 
+        new Dictionary<string, string> { ["symbol"] = symbol });
+
+    using var doc = JsonDocument.Parse(json);
+    var root = doc.RootElement;
+
+    foreach (var el in root.EnumerateArray())
+    {
+        var type = el.GetProperty("orderType").GetString() ?? "";
+        if (type == "TAKE_PROFIT_MARKET" || type == "TAKE_PROFIT")
+            return true;
+    }
+
+    return false;
+}
+
         // ==========================
         //       PRIVATE HELPERS
         // ==========================
