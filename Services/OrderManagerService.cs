@@ -103,7 +103,6 @@ namespace FuturesBot.Services
                             $"[{symbol}] LIMIT quá {LimitTimeout.TotalMinutes} phút chưa khớp → cancel tất cả orders và stop LIMIT monitor.");
 
                         await _exchange.CancelAllOpenOrdersAsync(symbol);
-                        ClearMonitoringLimit(symbol);
                         return;
                     }
 
@@ -182,7 +181,7 @@ namespace FuturesBot.Services
         public async Task MonitorPositionAsync(TradeSignal signal)
         {
             string symbol = signal.Coin;
-            bool isLong = signal.Type == SignalType.Long;
+            bool isLongSignal = signal.Type == SignalType.Long;
 
             // Guard chống race: chỉ 1 thread được monitor POSITION cho mỗi symbol
             if (!TryStartMonitoringPosition(symbol))
@@ -213,9 +212,12 @@ namespace FuturesBot.Services
 
             if (hasEntry && hasSL)
             {
-                risk = isLong ? entry - sl : sl - entry;
+                risk = isLongSignal ? entry - sl : sl - entry;
                 if (risk > 0) useRR = true;
             }
+
+            // Cờ đánh dấu đã chắc chắn có TP trên sàn (để tránh loop AUTO-TP)
+            bool tpInitialized = false;
 
             await _notify.SendAsync($"[{symbol}] Monitor POSITION started...");
 
@@ -235,24 +237,35 @@ namespace FuturesBot.Services
                         return;
                     }
 
+                    bool isLongPosition = qty > 0;
                     decimal price = pos.MarkPrice;
 
-                    // ===================== AUTO-TP (CHỈ KHI CÓ tp > 0) =====================
-                    if (hasTP)
+                    // ===================== AUTO-TP (1 lần, dùng DetectManualSlTpAsync) =====================
+                    if (hasTP && !tpInitialized)
                     {
-                        bool hasTpOrder = await _exchange.HasTakeProfitOrderAsync(symbol);
-
-                        if (!hasTpOrder)
+                        // Kiểm tra trên sàn hiện tại đã có TP chưa (normal + algo)
+                        var (_, tpOnExchange) = await DetectManualSlTpAsync(symbol, isLongPosition, entry);
+                        if (tpOnExchange.HasValue)
+                        {
+                            // Đã thấy TP trên sàn → không cần AUTO-TP nữa
+                            tpInitialized = true;
+                        }
+                        else
                         {
                             decimal absQty = Math.Abs(qty);
-                            string posSide = qty > 0 ? "LONG" : "SHORT";
+                            string posSide = isLongPosition ? "LONG" : "SHORT";
+                            decimal tpDisplay = Math.Round(tp, 6);
 
-                            await _notify.SendAsync($"[{symbol}] AUTO-TP → đặt TP mới {tp}");
+                            await _notify.SendAsync($"[{symbol}] AUTO-TP → đặt TP mới {tpDisplay}");
 
                             var ok = await _exchange.PlaceTakeProfitAsync(symbol, posSide, absQty, tp);
                             if (!ok)
                             {
-                                await _notify.SendAsync($"[{symbol}] AUTO-TP FAILED → tp={tp}, qty={absQty}");
+                                await _notify.SendAsync($"[{symbol}] AUTO-TP FAILED → tp={tpDisplay}, qty={absQty}");
+                            }
+                            else
+                            {
+                                tpInitialized = true;
                             }
                         }
                     }
@@ -260,17 +273,17 @@ namespace FuturesBot.Services
                     // ===================== SL HIT (chỉ khi có SL) =====================
                     if (hasSL)
                     {
-                        if ((isLong && price <= sl) || (!isLong && price >= sl))
+                        if ((isLongPosition && price <= sl) || (!isLongPosition && price >= sl))
                         {
                             await _notify.SendAsync($"[{symbol}] SL HIT → stop monitor.");
                             return;
                         }
                     }
 
-                    // ===================== TP HIT (chỉ khi có TP trong signal) ===========
+                    // ===================== TP HIT (theo giá trong signal) ===========
                     if (hasTP)
                     {
-                        if ((isLong && price >= tp) || (!isLong && price <= tp))
+                        if ((isLongPosition && price >= tp) || (!isLongPosition && price <= tp))
                         {
                             await _notify.SendAsync($"[{symbol}] TP HIT (theo giá) → stop monitor.");
                             return;
@@ -280,13 +293,13 @@ namespace FuturesBot.Services
                     // ===================== RR, EARLY EXIT, HARD REVERSE ==================
                     if (useRR)
                     {
-                        decimal rr = isLong ? (price - entry) / risk : (entry - price) / risk;
+                        decimal rr = isLongPosition ? (price - entry) / risk : (entry - price) / risk;
 
                         var candles = await _exchange.GetRecentCandlesAsync(
                             symbol, _botConfig.Intervals[0].FrameTime, 40);
                         if (candles.Count >= 3)
                         {
-                            var (reverse, hardReverse) = CheckMomentumReversal(candles, isLong, entry);
+                            var (reverse, hardReverse) = CheckMomentumReversal(candles, isLongPosition, entry);
 
                             // EARLY EXIT
                             if (rr >= EarlyExitRR && reverse)
@@ -313,15 +326,16 @@ namespace FuturesBot.Services
                             decimal newSL = sl;
 
                             if (rr >= 1m)
-                                newSL = isLong ? entry + risk * 0.5m : entry - risk * 0.5m;
+                                newSL = isLongPosition ? entry + risk * 0.5m : entry - risk * 0.5m;
 
                             if (rr >= 1.5m)
-                                newSL = isLong ? entry + risk * 1m : entry - risk * 1m;
+                                newSL = isLongPosition ? entry + risk * 1m : entry - risk * 1m;
 
                             if (newSL != sl)
                             {
                                 sl = newSL;
-                                await UpdateStopLossAsync(symbol, newSL, isLong);
+                                // Khi trailing SL phải đảm bảo vẫn giữ TP (nếu có)
+                                await UpdateStopLossAsync(symbol, newSL, isLongPosition, hasTP, tp);
                             }
                         }
                     }
@@ -555,17 +569,17 @@ namespace FuturesBot.Services
         }
 
         // ============================================================
-        //                     UPDATE STOPLOSS
+        //                     UPDATE STOPLOSS (TRAILING)
         // ============================================================
 
-        private async Task UpdateStopLossAsync(string symbol, decimal newSL, bool isLong)
+        private async Task UpdateStopLossAsync(string symbol, decimal newSL, bool isLong, bool hasTp, decimal? expectedTp)
         {
             await _notify.SendAsync($"[{symbol}] Trailing SL update → {newSL}");
 
+            // Hủy tất cả SL hiện tại (chỉ SL, không TP) – implement chi tiết trong BinanceFuturesClientService
             await _exchange.CancelStopLossOrdersAsync(symbol);
 
             var pos = await _exchange.GetPositionAsync(symbol);
-
             decimal qty = Math.Abs(pos.PositionAmt);
             if (qty <= 0)
             {
@@ -577,7 +591,27 @@ namespace FuturesBot.Services
             string side = isLong ? "SELL" : "BUY";
             string posSide = isLong ? "LONG" : "SHORT";
 
+            // Đặt SL mới
             await _exchange.PlaceStopOnlyAsync(symbol, side, posSide, qty, newSL);
+
+            // Đảm bảo không bị mất TP sau khi trailing (nếu ban đầu có TP)
+            if (hasTp && expectedTp.HasValue)
+            {
+                var (_, tpOnExchange) = await DetectManualSlTpAsync(symbol, isLong, pos.EntryPrice);
+                if (!tpOnExchange.HasValue)
+                {
+                    decimal tpVal = expectedTp.Value;
+                    decimal tpDisplay = Math.Round(tpVal, 6);
+
+                    await _notify.SendAsync($"[{symbol}] Trailing giữ TP → đặt lại TP {tpDisplay}");
+
+                    var ok = await _exchange.PlaceTakeProfitAsync(symbol, posSide, qty, tpVal);
+                    if (!ok)
+                    {
+                        await _notify.SendAsync($"[{symbol}] Trailing giữ TP FAILED → tp={tpDisplay}");
+                    }
+                }
+            }
         }
     }
 }
