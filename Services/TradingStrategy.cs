@@ -78,7 +78,7 @@ namespace FuturesBot.Services
 
         // Volume M15 (ước lượng USDT = Close * Volume) tối thiểu cho trade
         private const decimal MinMajorVolumeUsd15m = 2_000_000m; // BTC
-        private const decimal MinAltVolumeUsd15m = 1_000_000m;   // Altcoin
+        private const decimal MinAltVolumeUsd15m = 6_00_000m;   // Altcoin
 
         // Độ dốc EMA34 H1 tối thiểu cho Altcoin (tránh alt sideway)
         private const int EmaSlopeLookbackH1 = 3;
