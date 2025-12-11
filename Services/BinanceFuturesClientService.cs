@@ -724,95 +724,95 @@ namespace FuturesBot.Services
         }
 
         public async Task<bool> PlaceTakeProfitAsync(string symbol, string positionSide, decimal qty, decimal takeProfitPrice)
-{
-    var rules = await _rulesService.GetRulesAsync(symbol);
-
-    var tp = SymbolRulesService.TruncateToStep(takeProfitPrice, rules.PriceStep);
-    var q = SymbolRulesService.TruncateToStep(qty, rules.QtyStep);
-
-    string side = positionSide == "LONG" ? "SELL" : "BUY";
-
-    var param = new Dictionary<string, string>
-    {
-        ["symbol"] = symbol,
-        ["side"] = side,
-        ["positionSide"] = positionSide,
-        ["algoType"] = "CONDITIONAL",
-        ["type"] = "TAKE_PROFIT_MARKET",
-        ["triggerPrice"] = tp.ToString(CultureInfo.InvariantCulture),
-        ["quantity"] = q.ToString(CultureInfo.InvariantCulture),
-        ["recvWindow"] = "60000",
-    };
-
-    var resp = await SignedPostAsync(_config.Urls.AlgoOrderUrl, param);
-
-    if (resp.Contains("[BINANCE ERROR]"))
-    {
-        await _slack.SendAsync($"[TP ERROR] {resp}");
-        return false;
-    }
-
-    await _slack.SendAsync($"[TP PLACED] {symbol} qty={q} tp={tp}");
-    return true;
-}
-
-public async Task<bool> HasTakeProfitOrderAsync(string symbol)
-{
-    var json = await SignedGetAsync(_config.Urls.OpenAlgoOrdersUrl, 
-        new Dictionary<string, string> { ["symbol"] = symbol });
-
-    using var doc = JsonDocument.Parse(json);
-    var root = doc.RootElement;
-
-    foreach (var el in root.EnumerateArray())
-    {
-        var type = el.GetProperty("orderType").GetString() ?? "";
-        if (type == "TAKE_PROFIT_MARKET" || type == "TAKE_PROFIT")
-            return true;
-    }
-
-    return false;
-}
-
-public async Task<IReadOnlyList<OpenOrderInfo>> GetOpenAlgoOrdersAsync(string symbol)
-{
-    if (_config.PaperMode)
-        return Array.Empty<OpenOrderInfo>();
-
-    var json = await SignedGetAsync($"{_config.Urls.OpenAlgoOrdersUrl}", new Dictionary<string, string>
-    {
-        ["symbol"] = symbol,
-        ["recvWindow"] = "60000"
-    });
-
-    var list = new List<OpenOrderInfo>();
-
-    using var doc = JsonDocument.Parse(json);
-    var root = doc.RootElement;
-
-    if (root.ValueKind != JsonValueKind.Array)
-        return list;
-
-    foreach (var el in root.EnumerateArray())
-    {
-        // /fapi/v1/algoOpenOrders trả về:
-        // algoId, symbol, side, orderType, price, triggerPrice, quantity, ...
-        list.Add(new OpenOrderInfo
         {
-            Symbol       = el.GetProperty("symbol").GetString() ?? symbol,
-            ClientOrderId = string.Empty, // algo không có clientOrderId
-            OrderId      = el.GetProperty("algoId").GetInt64().ToString(),
-            Side         = el.GetProperty("side").GetString() ?? string.Empty,
-            Type         = el.GetProperty("orderType").GetString() ?? string.Empty,
-            Price        = decimal.Parse(el.GetProperty("price").GetString() ?? "0", CultureInfo.InvariantCulture),
-            OrigQty      = decimal.Parse(el.GetProperty("quantity").GetString() ?? "0", CultureInfo.InvariantCulture),
-            ExecutedQty  = 0m, // algo conditional chưa khớp
-            StopPrice    = decimal.Parse(el.GetProperty("triggerPrice").GetString() ?? "0", CultureInfo.InvariantCulture),
-        });
-    }
+            var rules = await _rulesService.GetRulesAsync(symbol);
 
-    return list;
-}
+            var tp = SymbolRulesService.TruncateToStep(takeProfitPrice, rules.PriceStep);
+            var q = SymbolRulesService.TruncateToStep(qty, rules.QtyStep);
+
+            string side = positionSide == "LONG" ? "SELL" : "BUY";
+
+            var param = new Dictionary<string, string>
+            {
+                ["symbol"] = symbol,
+                ["side"] = side,
+                ["positionSide"] = positionSide,
+                ["algoType"] = "CONDITIONAL",
+                ["type"] = "TAKE_PROFIT_MARKET",
+                ["triggerPrice"] = tp.ToString(CultureInfo.InvariantCulture),
+                ["quantity"] = q.ToString(CultureInfo.InvariantCulture),
+                ["recvWindow"] = "60000",
+            };
+
+            var resp = await SignedPostAsync(_config.Urls.AlgoOrderUrl, param);
+
+            if (resp.Contains("[BINANCE ERROR]"))
+            {
+                await _slack.SendAsync($"[TP ERROR] {resp}");
+                return false;
+            }
+
+            await _slack.SendAsync($"[TP PLACED] {symbol} qty={q} tp={tp}");
+            return true;
+        }
+
+        public async Task<bool> HasTakeProfitOrderAsync(string symbol)
+        {
+            var json = await SignedGetAsync(_config.Urls.OpenAlgoOrdersUrl,
+                new Dictionary<string, string> { ["symbol"] = symbol });
+
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            foreach (var el in root.EnumerateArray())
+            {
+                var type = el.GetProperty("orderType").GetString() ?? "";
+                if (type == "TAKE_PROFIT_MARKET" || type == "TAKE_PROFIT")
+                    return true;
+            }
+
+            return false;
+        }
+
+        public async Task<IReadOnlyList<OpenOrderInfo>> GetOpenAlgoOrdersAsync(string symbol)
+        {
+            if (_config.PaperMode)
+                return Array.Empty<OpenOrderInfo>();
+
+            var json = await SignedGetAsync($"{_config.Urls.OpenAlgoOrdersUrl}", new Dictionary<string, string>
+            {
+                ["symbol"] = symbol,
+                ["recvWindow"] = "60000"
+            });
+
+            var list = new List<OpenOrderInfo>();
+
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            if (root.ValueKind != JsonValueKind.Array)
+                return list;
+
+            foreach (var el in root.EnumerateArray())
+            {
+                // /fapi/v1/algoOpenOrders trả về:
+                // algoId, symbol, side, orderType, price, triggerPrice, quantity, ...
+                list.Add(new OpenOrderInfo
+                {
+                    Symbol = el.GetProperty("symbol").GetString() ?? symbol,
+                    ClientOrderId = string.Empty, // algo không có clientOrderId
+                    OrderId = el.GetProperty("algoId").GetInt64().ToString(),
+                    Side = el.GetProperty("side").GetString() ?? string.Empty,
+                    Type = el.GetProperty("orderType").GetString() ?? string.Empty,
+                    Price = decimal.Parse(el.GetProperty("price").GetString() ?? "0", CultureInfo.InvariantCulture),
+                    OrigQty = decimal.Parse(el.GetProperty("quantity").GetString() ?? "0", CultureInfo.InvariantCulture),
+                    ExecutedQty = 0m, // algo conditional chưa khớp
+                    StopPrice = decimal.Parse(el.GetProperty("triggerPrice").GetString() ?? "0", CultureInfo.InvariantCulture),
+                });
+            }
+
+            return list;
+        }
 
         // ==========================
         //       PRIVATE HELPERS

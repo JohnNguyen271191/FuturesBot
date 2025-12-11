@@ -84,13 +84,7 @@ static async Task RunSymbolWorkerAsync(
     {
         try
         {
-            if (pnl.IsInCooldown())
-{
-    var remain = pnl.GetCooldownRemaining();
-    await notifier.SendAsync(
-        $"BOT đang trong COOLDOWN (còn ~{remain?.TotalMinutes:F0} phút) → không mở lệnh mới.");
-    return; // bỏ qua signal
-}
+            
             // Lấy candles 1 lần cho vòng lặp này
             var candles15m = await exchange.GetRecentCandlesAsync(
                 coinInfo.Symbol, config.Intervals[0].FrameTime, 200);
@@ -100,6 +94,13 @@ static async Task RunSymbolWorkerAsync(
 
             if (candles15m?.Count >= 2)
             {
+                if (pnl.IsInCooldown())
+                {
+                    var remain = pnl.GetCooldownRemaining();
+                    await notifier.SendAsync(
+                        $"BOT đang trong COOLDOWN (còn ~{remain?.TotalMinutes:F0} phút) → không mở lệnh mới.");
+                    return;
+                }
                 var lastCandle = candles15m[^1];
 
                 // Chỉ xử lý khi có nến 15m mới
@@ -125,7 +126,7 @@ static async Task RunSymbolWorkerAsync(
                             await exchange.ClosePositionAsync(coinInfo.Symbol, pos.PositionAmt);
                             // không continue; vẫn cho liveSync/pnl chạy bên dưới
                         }
-                    }                    
+                    }
 
                     // ENTRY logic
                     var entrySignal = strategy.GenerateSignal(candles15m, candles1h, coinInfo);
@@ -141,7 +142,7 @@ static async Task RunSymbolWorkerAsync(
         }
 
         // Các tác vụ chia sẻ, luôn chạy mỗi vòng (khoảng 30s/lần)
-        await liveSync.SyncAsync(new[] { coinInfo });
+        await liveSync.SyncAsync([coinInfo]);
         await pnl.SendQuickDailySummary();
 
         // Tick interval
