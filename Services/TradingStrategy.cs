@@ -1,3 +1,5 @@
+using System;
+using System.Collections.Generic;
 using FuturesBot.Config;
 using FuturesBot.IServices;
 using FuturesBot.Models;
@@ -21,7 +23,7 @@ namespace FuturesBot.Services
     /// - Sideway scalp:
     ///       + Dùng khi H1 có bias rõ nhưng M15 chưa align / đang sideway quanh EMA
     ///       + Chỉ trade theo hướng bias H1 (H1 down chỉ short, H1 up chỉ long)
-    /// - Tối ưu BTC/ETH vs Altcoin (symbol.IsMajor):
+    /// - Tối ưu BTC/ETH vs Altcoin (coinInfo.IsMajor):
     ///       + IsMajor = true (BTC/ETH): cho phép trend trade + sideway scalp,
     ///         RR trend riêng (RiskRewardMajor), RR sideway (RiskRewardSidewayMajor).
     ///       + IsMajor = false (Altcoin): chỉ trend trade, thêm filter Volume / EMA slope H1,
@@ -29,6 +31,9 @@ namespace FuturesBot.Services
     /// - V2 bổ sung:
     ///       + Filter SIDEWAY mạnh (EMA34 & EMA89 dính nhau + EMA34 gần như đi ngang).
     ///       + Altcoin gặp sideway H1/M15 → NO TRADE để né nhiễu.
+    /// - V3 bổ sung:
+    ///       + Market Structure (Lower-High / Higher-Low) để khóa LONG/SHORT khi cấu trúc báo ngược,
+    ///         tránh bot cứ LONG trong giai đoạn đỉnh thấp dần (như case BTC chart mày gửi).
     /// </summary>
     public class TradingStrategy(IndicatorService indicators) : IStrategyService
     {
@@ -77,8 +82,8 @@ namespace FuturesBot.Services
         // ========================= NEW: BTC vs ALT CONFIG ====================
 
         // Volume M15 (ước lượng USDT = Close * Volume) tối thiểu cho trade
-        private const decimal MinMajorVolumeUsd15m = 2_000_000m; // BTC
-        private const decimal MinAltVolumeUsd15m = 6_00_000m;   // Altcoin
+        private const decimal MinMajorVolumeUsd15m = 2_000_000m; // BTC/ETH
+        private const decimal MinAltVolumeUsd15m = 600_000m;     // Altcoin
 
         // Độ dốc EMA34 H1 tối thiểu cho Altcoin (tránh alt sideway)
         private const int EmaSlopeLookbackH1 = 3;
@@ -88,6 +93,12 @@ namespace FuturesBot.Services
         private const int SidewaySlopeLookback = 10;
         private const decimal SidewayEmaDistThreshold = 0.0015m; // 0.15%
         private const decimal SidewaySlopeThreshold = 0.002m;    // 0.2%
+
+        // ========================= MARKET STRUCTURE (V3) =========================
+        private const int StructureSwingStrength = 3;             // fractal strength
+        private const int StructureMaxLookbackBars = 80;          // scan recent bars
+        private const int StructureNeedSwings = 2;                // need 2 swings
+        private const decimal StructureBreakTolerance = 0.001m;   // 0.1% tol
 
         // =====================================================================
         //                           EXIT SIGNAL
@@ -101,7 +112,7 @@ namespace FuturesBot.Services
             IReadOnlyList<Candle> candles15m,
             bool hasLongPosition,
             bool hasShortPosition,
-           CoinInfo coinInfo)
+            CoinInfo coinInfo)
         {
             if (candles15m == null || candles15m.Count < 200)
                 return new TradeSignal();
@@ -181,9 +192,9 @@ namespace FuturesBot.Services
         //                           ENTRY SIGNAL
         // =====================================================================
 
-        public TradeSignal GenerateSignal(IReadOnlyList<Candle> candles15m, IReadOnlyList<Candle> candles1h,CoinInfo coinInfo)
+        public TradeSignal GenerateSignal(IReadOnlyList<Candle> candles15m, IReadOnlyList<Candle> candles1h, CoinInfo coinInfo)
         {
-            if (candles15m.Count < MinBars || candles1h.Count < MinBars)
+            if (candles15m == null || candles1h == null || candles15m.Count < MinBars || candles1h.Count < MinBars)
                 return new TradeSignal();
 
             // Dùng nến đã đóng: M15 & H1
@@ -333,6 +344,18 @@ namespace FuturesBot.Services
                 macd15[i15] < sig15[i15] &&
                 rsi15[i15] < ExtremeRsiLow;
 
+            // =================== MARKET STRUCTURE (V3: LH/HL) ==================
+            var (lowerHigh, higherLow, lastSwingHigh, prevSwingHigh, lastSwingLow, prevSwingLow)
+                = DetectMarketStructure(candles15m, i15);
+
+            // Nếu structure bearish (LH) -> khóa LONG, ưu tiên SHORT
+            // Nếu structure bullish (HL) -> khóa SHORT, ưu tiên LONG
+            bool preferShortByStructure = lowerHigh && !higherLow;
+            bool preferLongByStructure = higherLow && !lowerHigh;
+
+            bool blockLongByStructure = preferShortByStructure;
+            bool blockShortByStructure = preferLongByStructure;
+
             // =================== SIDEWAY / PULLBACK SCALP ======================
 
             if (!extremeUp && !extremeDump)
@@ -353,6 +376,21 @@ namespace FuturesBot.Services
                 // Major: cho phép sideway scalp
                 if (allowSideway && shouldTrySideway)
                 {
+                    // Nếu structure đang ưu tiên 1 phía thì bẻ bias để sideway scalp không đi ngược
+                    bool biasUp = h1BiasUp;
+                    bool biasDown = h1BiasDown;
+
+                    if (blockLongByStructure)
+                    {
+                        biasUp = false;
+                        biasDown = true;
+                    }
+                    else if (blockShortByStructure)
+                    {
+                        biasDown = false;
+                        biasUp = true;
+                    }
+
                     var sidewaySignal = BuildSidewayScalp(
                         candles15m,
                         ema34_15,
@@ -363,8 +401,8 @@ namespace FuturesBot.Services
                         sig15,
                         last15,
                         coinInfo,
-                        h1BiasUp,
-                        h1BiasDown,
+                        biasUp,
+                        biasDown,
                         rrSideway);
 
                     if (sidewaySignal.Type != SignalType.None)
@@ -392,7 +430,7 @@ namespace FuturesBot.Services
 
             // =================== BUILD LONG / SHORT (THEO TREND MẠNH) =========
 
-            if (upTrend)
+            if (upTrend && !blockLongByStructure)
             {
                 var longSignal = BuildLong(
                     candles15m,
@@ -410,8 +448,17 @@ namespace FuturesBot.Services
                 if (longSignal.Type != SignalType.None)
                     return longSignal;
             }
+            else if (upTrend && blockLongByStructure)
+            {
+                return new TradeSignal
+                {
+                    Type = SignalType.None,
+                    Reason = $"{coinInfo.Symbol}: Block LONG vì Market Structure đang Lower-High (đỉnh thấp dần) (LH={lowerHigh}, lastH={lastSwingHigh:F2} < prevH={prevSwingHigh:F2}) → ưu tiên canh SHORT.",
+                    Coin = coinInfo.Symbol
+                };
+            }
 
-            if (downTrend)
+            if (downTrend && !blockShortByStructure)
             {
                 var shortSignal = BuildShort(
                     candles15m,
@@ -428,6 +475,15 @@ namespace FuturesBot.Services
 
                 if (shortSignal.Type != SignalType.None)
                     return shortSignal;
+            }
+            else if (downTrend && blockShortByStructure)
+            {
+                return new TradeSignal
+                {
+                    Type = SignalType.None,
+                    Reason = $"{coinInfo.Symbol}: Block SHORT vì Market Structure đang Higher-Low (đáy cao dần) (HL={higherLow}, lastL={lastSwingLow:F2} > prevL={prevSwingLow:F2}) → ưu tiên canh LONG.",
+                    Coin = coinInfo.Symbol
+                };
             }
 
             return new TradeSignal();
@@ -447,7 +503,7 @@ namespace FuturesBot.Services
             IReadOnlyList<decimal> sig15,
             Candle last15,
             Candle prev15,
-           CoinInfo coinInfo,
+            CoinInfo coinInfo,
             decimal riskRewardTrend)
         {
             int i15 = candles15m.Count - 2;
@@ -457,7 +513,7 @@ namespace FuturesBot.Services
             decimal ema89 = ema89_15[i15];
             decimal ema200 = ema200_15[i15];
 
-            // 1. HỖ TRỢ GẦN NHẤT (EMA dưới giá) – dynamic: 34/89/200 cái nào gần nhất phía dưới
+            // 1. HỖ TRỢ GẦN NHẤT (EMA dưới giá) – dynamic
             var supports = new List<decimal>();
             if (ema34 < last15.Close) supports.Add(ema34);
             if (ema89 > 0 && ema89 < last15.Close) supports.Add(ema89);
@@ -475,13 +531,13 @@ namespace FuturesBot.Services
 
             decimal nearestSupport = supports.Max(); // EMA gần nhất phía dưới giá
 
-            // 2. RETEST HỖ TRỢ (giá chạm band quanh EMA)
+            // 2. RETEST HỖ TRỢ
             bool touchSupport =
                 nearestSupport > 0m &&
                 last15.Low <= nearestSupport * (1 + EmaRetestBand) &&
                 last15.Low >= nearestSupport * (1 - EmaRetestBand);
 
-            // 3. NẾN REJECTION (đuôi dưới xuyên EMA, thân xanh đóng trên EMA)
+            // 3. NẾN REJECTION
             bool reject =
                 nearestSupport > 0m &&
                 last15.Close > last15.Open &&
@@ -511,11 +567,10 @@ namespace FuturesBot.Services
             }
 
             // 5. ENTRY & SL DYNAMIC THEO EMA GẦN NHẤT
-            //    Entry cao hơn EMA 1 chút, SL thấp hơn EMA 1 chút
             decimal anchor = nearestSupport;
 
-            decimal entry = anchor * (1m + EntryOffsetPercent);       // tránh vào đúng EMA
-            decimal sl = anchor * (1m - AnchorSlBufferPercent);    // SL dưới EMA gần nhất
+            decimal entry = anchor * (1m + EntryOffsetPercent);
+            decimal sl = anchor * (1m - AnchorSlBufferPercent);
 
             if (sl >= entry || sl <= 0)
             {
@@ -565,7 +620,7 @@ namespace FuturesBot.Services
             decimal ema89 = ema89_15[i15];
             decimal ema200 = ema200_15[i15];
 
-            // 1. KHÁNG CỰ GẦN NHẤT (EMA trên giá) – dynamic: 34/89/200 cái nào gần nhất phía trên
+            // 1. KHÁNG CỰ GẦN NHẤT (EMA trên giá) – dynamic
             var resistances = new List<decimal>();
             if (ema34 > last15.Close) resistances.Add(ema34);
             if (ema89 > last15.Close) resistances.Add(ema89);
@@ -589,7 +644,7 @@ namespace FuturesBot.Services
                 last15.High >= nearestResistance * (1 - EmaRetestBand) &&
                 last15.High <= nearestResistance * (1 + EmaRetestBand);
 
-            // 3. NẾN REJECTION (đuôi trên xuyên EMA, thân đỏ đóng dưới EMA)
+            // 3. NẾN REJECTION
             bool reject =
                 nearestResistance > 0m &&
                 last15.Close < last15.Open &&
@@ -619,11 +674,10 @@ namespace FuturesBot.Services
             }
 
             // 5. ENTRY & SL DYNAMIC THEO EMA GẦN NHẤT
-            //    Entry thấp hơn EMA 1 chút, SL cao hơn EMA 1 chút
             decimal anchor = nearestResistance;
 
-            decimal entry = anchor * (1m - EntryOffsetPercent);       // tránh vào đúng EMA
-            decimal sl = anchor * (1m + AnchorSlBufferPercent);    // SL trên EMA gần nhất
+            decimal entry = anchor * (1m - EntryOffsetPercent);
+            decimal sl = anchor * (1m + AnchorSlBufferPercent);
 
             if (sl <= entry)
             {
@@ -759,7 +813,7 @@ namespace FuturesBot.Services
                     EntryPrice = entry,
                     StopLoss = sl,
                     TakeProfit = tp,
-                    Reason = $"{coinInfo.Symbol}: SIDEWAY SCALP SHORT – bias down (H1) + retest EMA (near={nearestRes:F2}) + rejection + RSI/MACD quay đầu.",
+                    Reason = $"{coinInfo.Symbol}: SIDEWAY SCALP SHORT – bias down + retest EMA (near={nearestRes:F2}) + rejection + RSI/MACD quay đầu.",
                     Coin = coinInfo.Symbol
                 };
             }
@@ -814,14 +868,14 @@ namespace FuturesBot.Services
                     EntryPrice = entry,
                     StopLoss = sl,
                     TakeProfit = tp,
-                    Reason = $"{coinInfo.Symbol}: SIDEWAY SCALP LONG – bias up (H1) + retest EMA (near={nearestSup:F2}) + rejection + RSI/MACD quay đầu.",
+                    Reason = $"{coinInfo.Symbol}: SIDEWAY SCALP LONG – bias up + retest EMA (near={nearestSup:F2}) + rejection + RSI/MACD quay đầu.",
                     Coin = coinInfo.Symbol
                 };
             }
         }
 
         // =====================================================================
-        //                     HELPERS: CLIMAX / EMA / SYMBOL / SIDEWAY
+        //                     HELPERS: CLIMAX / EMA / SIDEWAY
         // =====================================================================
 
         private bool IsClimaxCandle(IReadOnlyList<Candle> candles, int index)
@@ -946,6 +1000,94 @@ namespace FuturesBot.Services
             decimal slope = (emaEnd - emaStart) / emaStart;
 
             return Math.Abs(slope) < SidewaySlopeThreshold;
+        }
+
+        // =====================================================================
+        //                MARKET STRUCTURE HELPERS (Lower-High / Higher-Low)
+        // =====================================================================
+
+        private bool IsSwingHigh(IReadOnlyList<Candle> candles, int i, int strength)
+        {
+            if (i - strength < 0 || i + strength >= candles.Count) return false;
+
+            var h = candles[i].High;
+            for (int k = 1; k <= strength; k++)
+            {
+                if (h <= candles[i - k].High) return false;
+                if (h <= candles[i + k].High) return false;
+            }
+            return true;
+        }
+
+        private bool IsSwingLow(IReadOnlyList<Candle> candles, int i, int strength)
+        {
+            if (i - strength < 0 || i + strength >= candles.Count) return false;
+
+            var l = candles[i].Low;
+            for (int k = 1; k <= strength; k++)
+            {
+                if (l >= candles[i - k].Low) return false;
+                if (l >= candles[i + k].Low) return false;
+            }
+            return true;
+        }
+
+        private List<(int idx, decimal price)> GetRecentSwingHighs(IReadOnlyList<Candle> candles, int endIdx, int maxLookback, int strength)
+        {
+            var res = new List<(int, decimal)>();
+            int start = Math.Max(0, endIdx - maxLookback);
+
+            for (int i = endIdx - strength; i >= start + strength; i--)
+            {
+                if (IsSwingHigh(candles, i, strength))
+                {
+                    res.Add((i, candles[i].High));
+                    if (res.Count >= 5) break;
+                }
+            }
+            return res;
+        }
+
+        private List<(int idx, decimal price)> GetRecentSwingLows(IReadOnlyList<Candle> candles, int endIdx, int maxLookback, int strength)
+        {
+            var res = new List<(int, decimal)>();
+            int start = Math.Max(0, endIdx - maxLookback);
+
+            for (int i = endIdx - strength; i >= start + strength; i--)
+            {
+                if (IsSwingLow(candles, i, strength))
+                {
+                    res.Add((i, candles[i].Low));
+                    if (res.Count >= 5) break;
+                }
+            }
+            return res;
+        }
+
+        private (bool lowerHigh, bool higherLow, decimal lastSwingHigh, decimal prevSwingHigh, decimal lastSwingLow, decimal prevSwingLow)
+            DetectMarketStructure(IReadOnlyList<Candle> candles15m, int i15)
+        {
+            var highs = GetRecentSwingHighs(candles15m, i15, StructureMaxLookbackBars, StructureSwingStrength);
+            var lows = GetRecentSwingLows(candles15m, i15, StructureMaxLookbackBars, StructureSwingStrength);
+
+            decimal lastH = 0m, prevH = 0m, lastL = 0m, prevL = 0m;
+            bool lh = false, hl = false;
+
+            if (highs.Count >= StructureNeedSwings)
+            {
+                lastH = highs[0].price;
+                prevH = highs[1].price;
+                lh = lastH < prevH * (1m - StructureBreakTolerance);
+            }
+
+            if (lows.Count >= StructureNeedSwings)
+            {
+                lastL = lows[0].price;
+                prevL = lows[1].price;
+                hl = lastL > prevL * (1m + StructureBreakTolerance);
+            }
+
+            return (lh, hl, lastH, prevH, lastL, prevL);
         }
     }
 }
