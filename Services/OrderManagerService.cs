@@ -185,7 +185,6 @@ namespace FuturesBot.Services
         public async Task MonitorPositionAsync(TradeSignal signal)
         {
             string symbol = signal.Coin;
-            bool isLongSignal = signal.Type == SignalType.Long;
 
             if (!TryStartMonitoringPosition(symbol))
             {
@@ -195,30 +194,17 @@ namespace FuturesBot.Services
 
             ClearMonitoringLimit(symbol);
 
-            decimal entry = signal.EntryPrice ?? 0;
-            decimal sl = signal.StopLoss ?? 0;
-            decimal tp = signal.TakeProfit ?? 0;
+            // ===== INIT từ signal (manual attach có thể thiếu SL/TP) =====
+            decimal entry = signal.EntryPrice ?? 0m;
+            decimal sl = signal.StopLoss ?? 0m;
+            decimal tp = signal.TakeProfit ?? 0m;
 
-            bool hasEntry = entry > 0;
-            bool hasSL = sl > 0;
-            bool hasTP = tp > 0;
-
-            if (!hasEntry || !hasSL || !hasTP)
-            {
-                await _notify.SendAsync(
-                    $"[{symbol}] POSITION: thiếu Entry/SL/TP. entry={entry}, sl={sl}, tp={tp}");
-            }
-
-            decimal risk = 0;
-            bool useRR = false;
-
-            if (hasEntry && hasSL)
-            {
-                risk = isLongSignal ? entry - sl : sl - entry;
-                if (risk > 0) useRR = true;
-            }
-
+            bool missingNotified = false;
             bool tpInitialized = false;
+            bool autoTpPlaced = false;
+
+            // RR mặc định cho case manual thiếu TP (mày muốn đổi thì chỉnh số này)
+            const decimal DefaultManualRR = 2m;
 
             await _notify.SendAsync($"[{symbol}] Monitor POSITION started...");
 
@@ -242,12 +228,81 @@ namespace FuturesBot.Services
                     decimal absQty = Math.Abs(qty);
                     string posSide = isLongPosition ? "LONG" : "SHORT";
 
-                    // ===================== AUTO-TP (1 lần, check TP trên sàn trước) =====================
+                    // ============================================================
+                    // 1) SYNC ENTRY/SL/TP TỪ SÀN (FIX: manual đặt SL/TP sau)
+                    // ============================================================
+
+                    if (entry <= 0m && pos.EntryPrice > 0m)
+                        entry = pos.EntryPrice;
+
+                    var (slOnEx, tpOnEx) = await DetectManualSlTpAsync(symbol, isLongPosition, entry);
+
+                    // manual đặt SL sau
+                    if (sl <= 0m && slOnEx.HasValue && slOnEx.Value > 0m)
+                    {
+                        sl = slOnEx.Value;
+                        await _notify.SendAsync($"[{symbol}] Sync SL từ sàn → SL={Math.Round(sl, 6)}");
+                    }
+
+                    // manual đặt TP sau
+                    if (tp <= 0m && tpOnEx.HasValue && tpOnEx.Value > 0m)
+                    {
+                        tp = tpOnEx.Value;
+                        tpInitialized = true;
+                        await _notify.SendAsync($"[{symbol}] Sync TP từ sàn → TP={Math.Round(tp, 6)}");
+                    }
+
+                    bool hasEntry = entry > 0m;
+                    bool hasSL = sl > 0m;
+                    bool hasTP = tp > 0m;
+
+                    if ((!hasEntry || !hasSL || !hasTP) && !missingNotified)
+                    {
+                        await _notify.SendAsync(
+                            $"[{symbol}] POSITION: thiếu Entry/SL/TP. entry={entry}, sl={sl}, tp={tp} (sẽ auto-sync khi mày đặt tay)");
+                        missingNotified = true;
+                    }
+
+                    // ============================================================
+                    // 2) MANUAL: có SL + entry nhưng thiếu TP → AUTO tính & đặt TP
+                    // ============================================================
+                    if (hasEntry && hasSL && !hasTP && !autoTpPlaced)
+                    {
+                        decimal riskManual = isLongPosition ? (entry - sl) : (sl - entry);
+                        if (riskManual > 0m)
+                        {
+                            decimal autoTp = isLongPosition
+                                ? entry + riskManual * DefaultManualRR
+                                : entry - riskManual * DefaultManualRR;
+
+                            tp = autoTp;
+                            hasTP = true;
+                            tpInitialized = false;
+
+                            await _notify.SendAsync(
+                                $"[{symbol}] Manual có SL nhưng thiếu TP → AUTO-TP={Math.Round(autoTp, 6)} theo RR={DefaultManualRR}");
+
+                            var ok = await _exchange.PlaceTakeProfitAsync(symbol, posSide, absQty, autoTp);
+                            if (!ok)
+                            {
+                                await _notify.SendAsync($"[{symbol}] AUTO-TP FAILED → tp={Math.Round(autoTp, 6)}, qty={absQty}");
+                            }
+                            else
+                            {
+                                autoTpPlaced = true;
+                                tpInitialized = true;
+                            }
+                        }
+                    }
+
+                    // ============================================================
+                    // 3) AUTO-TP (1 lần, check TP trên sàn trước) – giữ logic cũ
+                    // ============================================================
                     if (hasTP && !tpInitialized)
                     {
-                        var (_, tpOnExchange) = await DetectManualSlTpAsync(symbol, isLongPosition, entry);
+                        var (_, tpCheck) = await DetectManualSlTpAsync(symbol, isLongPosition, entry);
 
-                        if (tpOnExchange.HasValue)
+                        if (tpCheck.HasValue)
                         {
                             tpInitialized = true;
                         }
@@ -268,7 +323,9 @@ namespace FuturesBot.Services
                         }
                     }
 
-                    // ===================== SL HIT (nếu có SL) =====================
+                    // ============================================================
+                    // 4) SL HIT (nếu có SL)
+                    // ============================================================
                     if (hasSL)
                     {
                         if ((isLongPosition && price <= sl) || (!isLongPosition && price >= sl))
@@ -279,15 +336,17 @@ namespace FuturesBot.Services
                         }
                     }
 
-                    // ===================== TP HIT (theo giá trong signal) =====================
+                    // ============================================================
+                    // 5) TP HIT (theo giá trong local tp)
+                    // ============================================================
                     if (hasTP)
                     {
                         bool hitTp = (isLongPosition && price >= tp) || (!isLongPosition && price <= tp);
                         if (hitTp)
                         {
-                            // FIX: nếu chạm TP mà trên sàn không có TP thì đóng position (tránh stop monitor khi lệnh vẫn còn)
-                            var (_, tpOnExchange) = await DetectManualSlTpAsync(symbol, isLongPosition, entry);
-                            if (!tpOnExchange.HasValue)
+                            // nếu chạm TP mà trên sàn không có TP thì đóng position
+                            var (_, tpOnExchange2) = await DetectManualSlTpAsync(symbol, isLongPosition, entry);
+                            if (!tpOnExchange2.HasValue)
                             {
                                 await _notify.SendAsync($"[{symbol}] Giá chạm TP nhưng không thấy TP trên sàn → đóng position.");
                                 await _exchange.ClosePositionAsync(symbol, qty);
@@ -300,7 +359,18 @@ namespace FuturesBot.Services
                         }
                     }
 
-                    // ===================== RR, EARLY EXIT, HARD REVERSE =====================
+                    // ============================================================
+                    // 6) RR, EARLY EXIT, HARD REVERSE + TRAILING
+                    // ============================================================
+                    decimal risk = 0m;
+                    bool useRR = false;
+
+                    if (hasEntry && hasSL)
+                    {
+                        risk = isLongPosition ? entry - sl : sl - entry;
+                        if (risk > 0m) useRR = true;
+                    }
+
                     if (useRR)
                     {
                         decimal rr = isLongPosition ? (price - entry) / risk : (entry - price) / risk;
@@ -474,7 +544,6 @@ namespace FuturesBot.Services
                     // LONG: SL là SELL STOP phía dưới entry (hoặc dưới giá)
                     if (side.Equals("SELL", StringComparison.OrdinalIgnoreCase) && isStopType)
                     {
-                        // ưu tiên SL nằm dưới entry nếu có entry
                         if (entryPrice > 0 && trigger > entryPrice) continue;
 
                         if (!sl.HasValue) sl = trigger;
@@ -550,7 +619,6 @@ namespace FuturesBot.Services
         private (bool reverse, bool hardReverse) CheckMomentumReversal(
             IReadOnlyList<Candle> candles15m, bool isLong, decimal entryPrice)
         {
-            // FIX: dùng nến đã đóng để tránh noise
             int i0 = candles15m.Count - 2;
             int i1 = candles15m.Count - 3;
             if (i1 < 0) return (false, false);
