@@ -1,3 +1,8 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 using FuturesBot.Config;
 using FuturesBot.IServices;
 using FuturesBot.Services;
@@ -97,6 +102,51 @@ _ = Task.Run(async () =>
 });
 
 // ============================================================================
+// GLOBAL LIVE SYNC LOOP (chạy 1 lần, không spam theo coin)
+// ============================================================================
+
+_ = Task.Run(async () =>
+{
+    while (!lifetime.ApplicationStopping.IsCancellationRequested)
+    {
+        try
+        {
+            // Sync toàn bộ coin 1 lượt
+            await liveSync.SyncAsync(config.CoinInfos);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[ERROR] LiveSyncLoop: {ex}");
+        }
+
+        // Tần suất sync tuỳ mày, 10-20s thường đủ
+        await Task.Delay(TimeSpan.FromSeconds(5), lifetime.ApplicationStopping);
+    }
+});
+
+// ============================================================================
+// GLOBAL PNL SUMMARY LOOP (không gọi trong worker per-coin nữa)
+// ============================================================================
+
+_ = Task.Run(async () =>
+{
+    while (!lifetime.ApplicationStopping.IsCancellationRequested)
+    {
+        try
+        {
+            await pnl.SendQuickDailySummary();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[ERROR] PnlSummaryLoop: {ex}");
+        }
+
+        // Đừng spam: 3-10 phút tuỳ nhu cầu
+        await Task.Delay(TimeSpan.FromSeconds(10), lifetime.ApplicationStopping);
+    }
+});
+
+// ============================================================================
 // LAUNCH PER-SYMBOL WORKERS
 // ============================================================================
 
@@ -105,7 +155,6 @@ var tasks = config.CoinInfos
         s,
         host,
         config,
-        liveSync,
         pnl,
         lifetime.ApplicationStopping))
     .ToList();
@@ -113,14 +162,15 @@ var tasks = config.CoinInfos
 await Task.WhenAll(tasks);
 
 // ============================================================================
-// WORKER PER SYMBOL
+// WORKER PER SYMBOL (tối ưu: chỉ chạy theo nhịp nến đóng)
+// - Worker KHÔNG tự ClosePosition nữa để tránh double-close.
+// - Exit/Trailing/AutoTP giao hết cho OrderManagerService monitor.
 // ============================================================================
 
 static async Task RunSymbolWorkerAsync(
     CoinInfo coinInfo,
     IHost host,
     BotConfig config,
-    LiveSyncService liveSync,
     PnlReporterService pnl,
     CancellationToken ct)
 {
@@ -131,69 +181,113 @@ static async Task RunSymbolWorkerAsync(
     var exchange = scope.ServiceProvider.GetRequiredService<IExchangeClientService>();
     var orderManager = scope.ServiceProvider.GetRequiredService<OrderManagerService>();
 
-    DateTime lastProcessedCandleUtc = DateTime.MinValue;
+    // interval chính để trigger (vd 15m)
+    var mainTf = config.Intervals[0].FrameTime;
+    var mainSpan = ParseFrameTime(mainTf);
+
+    DateTime lastProcessedCandleOpenTimeUtc = DateTime.MinValue;
+
+    // delay nhỏ để đợi sàn “ra nến” ổn định
+    var afterCloseDelay = TimeSpan.FromSeconds(2);
 
     while (!ct.IsCancellationRequested)
     {
         try
         {
+            // 1) ngủ đến gần lúc nến đóng (giảm poll 30s/coin)
+            var sleep = GetDelayToNextCloseUtc(mainSpan) + afterCloseDelay;
+            if (sleep < TimeSpan.FromMilliseconds(200))
+                sleep = TimeSpan.FromMilliseconds(200);
+
+            await Task.Delay(sleep, ct);
+
+            // 2) fetch candles (chỉ khi tới nhịp nến)
             var candles15m = await exchange.GetRecentCandlesAsync(
-                coinInfo.Symbol, config.Intervals[0].FrameTime, 200);
+                coinInfo.Symbol, config.Intervals[0].FrameTime, 220);
 
             var candles1h = await exchange.GetRecentCandlesAsync(
-                coinInfo.Symbol, config.Intervals[1].FrameTime, 200);
+                coinInfo.Symbol, config.Intervals[1].FrameTime, 220);
 
-            if (candles15m != null && candles15m.Count >= 2)
+            if (candles15m == null || candles15m.Count < 3 || candles1h == null || candles1h.Count < 3)
+                continue;
+
+            // FIX: dùng nến ĐÃ ĐÓNG
+            var lastClosed = candles15m[^2];
+
+            // Chỉ process mỗi nến 1 lần
+            if (lastClosed.OpenTime <= lastProcessedCandleOpenTimeUtc)
+                continue;
+
+            lastProcessedCandleOpenTimeUtc = lastClosed.OpenTime;
+
+            // 3) Sync position + attach manual (nếu có)
+            var pos = await exchange.GetPositionAsync(coinInfo.Symbol);
+            await orderManager.AttachManualPositionAsync(pos);
+
+            bool hasPosition = pos.PositionAmt != 0;
+
+            // 4) ENTRY LOGIC: chỉ tìm entry khi:
+            //    - không cooldown
+            //    - không có position
+            if (!hasPosition && !pnl.IsInCooldown())
             {
-                // FIX: dùng nến ĐÃ ĐÓNG
-                var lastClosed = candles15m[^2];
-
-                if (lastClosed.OpenTime > lastProcessedCandleUtc)
-                {
-                    lastProcessedCandleUtc = lastClosed.OpenTime;
-
-                    // ================= POSITION SYNC =================
-                    var pos = await exchange.GetPositionAsync(coinInfo.Symbol);
-                    await orderManager.AttachManualPositionAsync(pos);
-
-                    bool hasLong = pos.PositionAmt > 0;
-                    bool hasShort = pos.PositionAmt < 0;
-
-                    // ================= EXIT LOGIC (LUÔN CHẠY) =================
-                    if (hasLong || hasShort)
-                    {
-                        var exitSignal = strategy.GenerateExitSignal(
-                            candles15m, hasLong, hasShort, coinInfo);
-
-                        if (exitSignal.Type == SignalType.CloseLong ||
-                            exitSignal.Type == SignalType.CloseShort)
-                        {
-                            await exchange.ClosePositionAsync(
-                                coinInfo.Symbol, pos.PositionAmt);
-                        }
-                    }
-
-                    // ================= ENTRY LOGIC (KHÔNG COOLDOWN) =================
-                    if (!pnl.IsInCooldown())
-                    {
-                        var entrySignal = strategy.GenerateSignal(
-                            candles15m, candles1h, coinInfo);
-
-                        await executor.HandleSignalAsync(entrySignal, coinInfo);
-                    }
-                }
+                var entrySignal = strategy.GenerateSignal(candles15m, candles1h, coinInfo);
+                await executor.HandleSignalAsync(entrySignal, coinInfo);
             }
+
+            // NOTE: EXIT LOGIC đã giao cho OrderManagerService.MonitorPositionAsync
+            // => tránh double-close.
+        }
+        catch (OperationCanceledException)
+        {
+            // normal shutdown
+            return;
         }
         catch (Exception ex)
         {
-            // Không spam Slack, log local đủ để debug
             Console.WriteLine($"[ERROR] Worker {coinInfo.Symbol}: {ex}");
         }
-
-        // ================= SHARED TASKS =================
-        await liveSync.SyncAsync([coinInfo]);
-        await pnl.SendQuickDailySummary();
-
-        await Task.Delay(TimeSpan.FromSeconds(30), ct);
     }
+}
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+static TimeSpan ParseFrameTime(string frameTime)
+{
+    if (string.IsNullOrWhiteSpace(frameTime))
+        throw new ArgumentException("frameTime is empty");
+
+    frameTime = frameTime.Trim().ToLowerInvariant();
+
+    // formats: "15m", "1h", "4h"
+    if (frameTime.EndsWith("m"))
+    {
+        if (int.TryParse(frameTime[..^1], out int mins) && mins > 0)
+            return TimeSpan.FromMinutes(mins);
+    }
+
+    if (frameTime.EndsWith("h"))
+    {
+        if (int.TryParse(frameTime[..^1], out int hours) && hours > 0)
+            return TimeSpan.FromHours(hours);
+    }
+
+    throw new ArgumentException($"Unsupported FrameTime: {frameTime}");
+}
+
+static TimeSpan GetDelayToNextCloseUtc(TimeSpan interval)
+{
+    // Align theo Unix epoch để khớp với candle exchanges (Binance)
+    long nowSec = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+    long intSec = (long)Math.Max(1, interval.TotalSeconds);
+
+    long nextCloseSec = ((nowSec / intSec) + 1) * intSec;
+    long delta = nextCloseSec - nowSec;
+
+    // Nếu delta=0 nghĩa là đúng khoảnh khắc đóng nến → return rất nhỏ
+    if (delta < 0) delta = 0;
+
+    return TimeSpan.FromSeconds(delta);
 }
