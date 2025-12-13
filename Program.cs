@@ -51,9 +51,43 @@ await notifier.SendAsync(
     $"=== FuturesBot {config.Intervals[0].FrameTime.ToUpper()} - {nowVN:dd/MM/yyyy HH:mm:ss} started ==="
 );
 
+// Global cooldown notifier (1 lần cho toàn bot)
+_ = Task.Run(async () =>
+{
+    bool inCooldownNotified = false;
+
+    while (true)
+    {
+        try
+        {
+            var inCooldown = pnl.IsInCooldown();
+
+            if (inCooldown && !inCooldownNotified)
+            {
+                inCooldownNotified = true;
+                var remain = pnl.GetCooldownRemaining();
+                await notifier.SendAsync(
+                    $"BOT đang trong COOLDOWN (còn ~{remain?.TotalMinutes:F0} phút) → không mở lệnh mới.");
+            }
+            else if (!inCooldown && inCooldownNotified)
+            {
+                inCooldownNotified = false;
+                await notifier.SendAsync(
+                    $"COOLDOWN kết thúc → BOT tiếp tục tìm ENTRY.");
+            }
+        }
+        catch (Exception ex)
+        {
+            await notifier.SendAsync($"[ERROR] CooldownWatcher: {ex}");
+        }
+
+        await Task.Delay(TimeSpan.FromSeconds(15));
+    }
+});
+
 // Launch per-symbol workers
 var tasks = config.CoinInfos
-    .Select(s => RunSymbolWorkerAsync(s, host, config, notifier, liveSync, pnl))
+    .Select(s => RunSymbolWorkerAsync(s, host, config, liveSync, pnl))
     .ToList();
 
 await Task.WhenAll(tasks);
@@ -66,7 +100,6 @@ static async Task RunSymbolWorkerAsync(
     CoinInfo coinInfo,
     IHost host,
     BotConfig config,
-    SlackNotifierService notifier,
     LiveSyncService liveSync,
     PnlReporterService pnl)
 {
@@ -84,7 +117,6 @@ static async Task RunSymbolWorkerAsync(
     {
         try
         {
-            
             // Lấy candles 1 lần cho vòng lặp này
             var candles15m = await exchange.GetRecentCandlesAsync(
                 coinInfo.Symbol, config.Intervals[0].FrameTime, 200);
@@ -94,13 +126,6 @@ static async Task RunSymbolWorkerAsync(
 
             if (candles15m?.Count >= 2)
             {
-                if (pnl.IsInCooldown())
-                {
-                    var remain = pnl.GetCooldownRemaining();
-                    await notifier.SendAsync(
-                        $"BOT đang trong COOLDOWN (còn ~{remain?.TotalMinutes:F0} phút) → không mở lệnh mới.");
-                    return;
-                }
                 var lastCandle = candles15m[^1];
 
                 // Chỉ xử lý khi có nến 15m mới
@@ -108,13 +133,16 @@ static async Task RunSymbolWorkerAsync(
                 {
                     lastProcessedCandle = lastCandle.OpenTime;
 
-                    //Lấy position 1 lần
+                    // Lấy position 1 lần
                     var pos = await exchange.GetPositionAsync(coinInfo.Symbol);
                     await orderManager.AttachManualPositionAsync(pos);
 
                     bool hasLong = pos.PositionAmt > 0;
                     bool hasShort = pos.PositionAmt < 0;
-                    //EXIT logic
+
+                    // ============================================================
+                    // EXIT logic: luôn chạy, kể cả đang cooldown
+                    // ============================================================
                     if (hasLong || hasShort)
                     {
                         var exitSignal = strategy.GenerateExitSignal(
@@ -124,21 +152,24 @@ static async Task RunSymbolWorkerAsync(
                             exitSignal.Type == SignalType.CloseShort)
                         {
                             await exchange.ClosePositionAsync(coinInfo.Symbol, pos.PositionAmt);
-                            // không continue; vẫn cho liveSync/pnl chạy bên dưới
                         }
                     }
 
-                    // ENTRY logic
-                    var entrySignal = strategy.GenerateSignal(candles15m, candles1h, coinInfo);
-                    await executor.HandleSignalAsync(entrySignal, coinInfo);
+                    // ============================================================
+                    // ENTRY logic: chỉ chạy khi KHÔNG cooldown (cooldown là global)
+                    // ============================================================
+                    if (!pnl.IsInCooldown())
+                    {
+                        var entrySignal = strategy.GenerateSignal(candles15m, candles1h, coinInfo);
+                        await executor.HandleSignalAsync(entrySignal, coinInfo);
+                    }
                 }
-                // nếu chưa có nến mới thì bỏ qua phần xử lý trade,
-                // nhưng vẫn chạy liveSync/pnl ở dưới
             }
         }
-        catch (Exception ex)
+        catch (Exception)
         {
-            await notifier.SendAsync($"[ERROR] {coinInfo.Symbol}: {ex}");
+            // worker này không giữ notifier nữa để đúng "1 notify global"
+            // Nếu mày vẫn muốn log lỗi theo coin, ta sẽ chuyển sang logger hoặc 1 error queue.
         }
 
         // Các tác vụ chia sẻ, luôn chạy mỗi vòng (khoảng 30s/lần)
