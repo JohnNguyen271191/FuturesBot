@@ -620,7 +620,7 @@ namespace FuturesBot.Services
                 ["algoType"] = "CONDITIONAL",
                 ["type"] = "STOP_MARKET",
                 ["triggerPrice"] = stop.ToString(CultureInfo.InvariantCulture),
-                ["closePosition"] = "true",
+                ["quantity"] = qty.ToString(CultureInfo.InvariantCulture),
                 ["recvWindow"] = "60000"
             };
             var resp = await SignedPostAsync($"{_config.Urls.AlgoOrderUrl}", param);
