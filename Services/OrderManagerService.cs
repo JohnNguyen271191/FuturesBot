@@ -21,7 +21,6 @@ namespace FuturesBot.Services
         private const decimal HardReverseRR = 0.2m;
         private const decimal EmaBreakTolerance = 0.001m;
 
-        // Timeout cho LIMIT: 20 phút
         private static readonly TimeSpan LimitTimeout = TimeSpan.FromMinutes(20);
 
         // ============================================================
@@ -31,23 +30,14 @@ namespace FuturesBot.Services
         private readonly ConcurrentDictionary<string, bool> _monitoringLimit = new();
         private readonly ConcurrentDictionary<string, bool> _monitoringPosition = new();
 
-        private bool IsMonitoringLimit(string symbol)
-            => _monitoringLimit.ContainsKey(symbol);
+        private bool IsMonitoringLimit(string symbol) => _monitoringLimit.ContainsKey(symbol);
+        private bool IsMonitoringPosition(string symbol) => _monitoringPosition.ContainsKey(symbol);
 
-        private bool IsMonitoringPosition(string symbol)
-            => _monitoringPosition.ContainsKey(symbol);
+        private bool TryStartMonitoringLimit(string symbol) => _monitoringLimit.TryAdd(symbol, true);
+        private bool TryStartMonitoringPosition(string symbol) => _monitoringPosition.TryAdd(symbol, true);
 
-        private bool TryStartMonitoringLimit(string symbol)
-            => _monitoringLimit.TryAdd(symbol, true);
-
-        private bool TryStartMonitoringPosition(string symbol)
-            => _monitoringPosition.TryAdd(symbol, true);
-
-        private void ClearMonitoringLimit(string symbol)
-            => _monitoringLimit.TryRemove(symbol, out _);
-
-        private void ClearMonitoringPosition(string symbol)
-            => _monitoringPosition.TryRemove(symbol, out _);
+        private void ClearMonitoringLimit(string symbol) => _monitoringLimit.TryRemove(symbol, out _);
+        private void ClearMonitoringPosition(string symbol) => _monitoringPosition.TryRemove(symbol, out _);
 
         private void ClearAllMonitoring(string symbol)
         {
@@ -78,7 +68,6 @@ namespace FuturesBot.Services
             string symbol = signal.Coin;
             bool isLong = signal.Type == SignalType.Long;
 
-            // Nếu đang monitor POSITION hoặc không thể start LIMIT (đã có thread khác)
             if (IsMonitoringPosition(symbol) || !TryStartMonitoringLimit(symbol))
             {
                 await _notify.SendAsync($"[{symbol}] LIMIT: đã monitor → bỏ qua.");
@@ -95,14 +84,12 @@ namespace FuturesBot.Services
                 {
                     await Task.Delay(MonitorIntervalMs);
 
-                    // === TIMEOUT CHECK ===
                     var elapsed = DateTime.UtcNow - startTime;
                     if (elapsed > LimitTimeout)
                     {
                         await _notify.SendAsync(
                             $"[{symbol}] LIMIT quá {LimitTimeout.TotalMinutes} phút chưa khớp → cancel open orders và stop LIMIT monitor.");
 
-                        // NOTE: CancelAll có thể mạnh tay, nhưng ở pha LIMIT thường chưa có POSITION.
                         await _exchange.CancelAllOpenOrdersAsync(symbol);
                         return;
                     }
@@ -113,7 +100,6 @@ namespace FuturesBot.Services
                     bool hasPosition = pos.PositionAmt != 0;
                     bool hasOpenOrder = openOrders.Any();
 
-                    // LIMIT ĐÃ KHỚP → CHUYỂN POSITION
                     if (hasPosition)
                     {
                         await _notify.SendAsync($"[{symbol}] LIMIT filled → chuyển sang monitor POSITION");
@@ -123,18 +109,16 @@ namespace FuturesBot.Services
                         return;
                     }
 
-                    // LIMIT không còn order → dừng monitor
                     if (!hasOpenOrder)
                     {
                         await _notify.SendAsync($"[{symbol}] LIMIT không còn order → stop LIMIT monitor.");
                         return;
                     }
 
-                    // CHECK SETUP INVALID (dùng nến đã đóng, tránh false break)
                     var candles = await _exchange.GetRecentCandlesAsync(symbol, _botConfig.Intervals[0].FrameTime, 80);
                     if (candles == null || candles.Count < 3) continue;
 
-                    var lastClosed = candles[^2]; // FIX: dùng nến đã đóng
+                    var lastClosed = candles[^2];
 
                     decimal ema34 = ComputeEmaLast(candles, 34);
                     decimal ema89 = ComputeEmaLast(candles, 89);
@@ -147,21 +131,18 @@ namespace FuturesBot.Services
 
                     bool broken = false;
 
-                    // Guard SL null/0
                     var slVal = signal.StopLoss ?? 0m;
                     bool hasSl = slVal > 0m;
 
                     if (isLong)
                     {
                         if (hasSl && lastClosed.Close < slVal) broken = true;
-                        if (boundary > 0 && lastClosed.Close < boundary * (1 - EmaBreakTolerance))
-                            broken = true;
+                        if (boundary > 0 && lastClosed.Close < boundary * (1 - EmaBreakTolerance)) broken = true;
                     }
                     else
                     {
                         if (hasSl && lastClosed.Close > slVal) broken = true;
-                        if (boundary > 0 && lastClosed.Close > boundary * (1 + EmaBreakTolerance))
-                            broken = true;
+                        if (boundary > 0 && lastClosed.Close > boundary * (1 + EmaBreakTolerance)) broken = true;
                     }
 
                     if (broken)
@@ -194,7 +175,6 @@ namespace FuturesBot.Services
 
             ClearMonitoringLimit(symbol);
 
-            // ===== INIT từ signal (manual attach có thể thiếu SL/TP) =====
             decimal entry = signal.EntryPrice ?? 0m;
             decimal sl = signal.StopLoss ?? 0m;
             decimal tp = signal.TakeProfit ?? 0m;
@@ -203,7 +183,6 @@ namespace FuturesBot.Services
             bool tpInitialized = false;
             bool autoTpPlaced = false;
 
-            // RR mặc định cho case manual thiếu TP (mày muốn đổi thì chỉnh số này)
             const decimal DefaultManualRR = 2m;
 
             await _notify.SendAsync($"[{symbol}] Monitor POSITION started...");
@@ -228,23 +207,18 @@ namespace FuturesBot.Services
                     decimal absQty = Math.Abs(qty);
                     string posSide = isLongPosition ? "LONG" : "SHORT";
 
-                    // ============================================================
-                    // 1) SYNC ENTRY/SL/TP TỪ SÀN (FIX: manual đặt SL/TP sau)
-                    // ============================================================
-
+                    // =================== SYNC ENTRY/SL/TP TỪ SÀN ===================
                     if (entry <= 0m && pos.EntryPrice > 0m)
                         entry = pos.EntryPrice;
 
                     var (slOnEx, tpOnEx) = await DetectManualSlTpAsync(symbol, isLongPosition, entry);
 
-                    // manual đặt SL sau
                     if (sl <= 0m && slOnEx.HasValue && slOnEx.Value > 0m)
                     {
                         sl = slOnEx.Value;
                         await _notify.SendAsync($"[{symbol}] Sync SL từ sàn → SL={Math.Round(sl, 6)}");
                     }
 
-                    // manual đặt TP sau
                     if (tp <= 0m && tpOnEx.HasValue && tpOnEx.Value > 0m)
                     {
                         tp = tpOnEx.Value;
@@ -263,9 +237,7 @@ namespace FuturesBot.Services
                         missingNotified = true;
                     }
 
-                    // ============================================================
-                    // 2) MANUAL: có SL + entry nhưng thiếu TP → AUTO tính & đặt TP
-                    // ============================================================
+                    // =================== MANUAL: có SL nhưng thiếu TP → AUTO TP ===================
                     if (hasEntry && hasSL && !hasTP && !autoTpPlaced)
                     {
                         decimal riskManual = isLongPosition ? (entry - sl) : (sl - entry);
@@ -295,9 +267,7 @@ namespace FuturesBot.Services
                         }
                     }
 
-                    // ============================================================
-                    // 3) AUTO-TP (1 lần, check TP trên sàn trước) – giữ logic cũ
-                    // ============================================================
+                    // =================== AUTO-TP 1 lần: check TP trên sàn trước ===================
                     if (hasTP && !tpInitialized)
                     {
                         var (_, tpCheck) = await DetectManualSlTpAsync(symbol, isLongPosition, entry);
@@ -323,9 +293,7 @@ namespace FuturesBot.Services
                         }
                     }
 
-                    // ============================================================
-                    // 4) SL HIT (nếu có SL)
-                    // ============================================================
+                    // =================== SL HIT (theo giá) ===================
                     if (hasSL)
                     {
                         if ((isLongPosition && price <= sl) || (!isLongPosition && price >= sl))
@@ -336,15 +304,12 @@ namespace FuturesBot.Services
                         }
                     }
 
-                    // ============================================================
-                    // 5) TP HIT (theo giá trong local tp)
-                    // ============================================================
+                    // =================== TP HIT (theo giá local) ===================
                     if (hasTP)
                     {
                         bool hitTp = (isLongPosition && price >= tp) || (!isLongPosition && price <= tp);
                         if (hitTp)
                         {
-                            // nếu chạm TP mà trên sàn không có TP thì đóng position
                             var (_, tpOnExchange2) = await DetectManualSlTpAsync(symbol, isLongPosition, entry);
                             if (!tpOnExchange2.HasValue)
                             {
@@ -359,9 +324,7 @@ namespace FuturesBot.Services
                         }
                     }
 
-                    // ============================================================
-                    // 6) RR, EARLY EXIT, HARD REVERSE + TRAILING
-                    // ============================================================
+                    // =================== RR / EARLY EXIT / HARD REVERSE / TRAILING ===================
                     decimal risk = 0m;
                     bool useRR = false;
 
@@ -397,7 +360,6 @@ namespace FuturesBot.Services
                             }
                         }
 
-                        // ===================== TRAILING SL =====================
                         if (hasSL)
                         {
                             decimal newSL = sl;
@@ -442,10 +404,8 @@ namespace FuturesBot.Services
 
             decimal entry = pos.EntryPrice;
 
-            // 1) Lấy SL/TP hiện có trên sàn (normal + algo)
             var (sl, tp) = await DetectManualSlTpAsync(pos.Symbol, isLong, entry);
 
-            // 2) Nếu KHÔNG tìm thấy TP nhưng có SL + entry → tự tính TP theo RR mặc định
             if (!tp.HasValue && sl.HasValue && entry > 0)
             {
                 decimal risk = isLong ? entry - sl.Value : sl.Value - entry;
@@ -493,16 +453,12 @@ namespace FuturesBot.Services
         }
 
         // ============================================================
-        //          DETECT TP/SL từ openOrders + openAlgoOrders (FIXED)
+        //          DETECT TP/SL từ openOrders + openAlgoOrders (ROBUST)
         // ============================================================
 
         private async Task<(decimal? sl, decimal? tp)> DetectManualSlTpAsync(
             string symbol, bool isLong, decimal entryPrice)
         {
-            // NOTE: vì OpenOrderInfo không có ReduceOnly/ClosePosition,
-            // nên để tránh nhầm ENTRY LIMIT thành TP, ta chỉ nhận:
-            // - TP: TAKE_PROFIT / TAKE_PROFIT_MARKET (contains "TAKE")
-            // - SL: STOP / STOP_MARKET (contains "STOP" và không phải TAKE)
             var normalOrders = await _exchange.GetOpenOrdersAsync(symbol);
             var algoOrders = await _exchange.GetOpenAlgoOrdersAsync(symbol);
 
@@ -512,6 +468,35 @@ namespace FuturesBot.Services
 
             if (orders.Count == 0)
                 return (null, null);
+
+            // fallback pivot = markPrice khi entryPrice sai/chưa sync
+            decimal markPrice = 0m;
+            try
+            {
+                var pos = await _exchange.GetPositionAsync(symbol);
+                markPrice = pos?.MarkPrice ?? 0m;
+            }
+            catch { /* ignore */ }
+
+            static decimal GetTrigger(OpenOrderInfo o)
+            {
+                if (o == null) return 0m;
+                if (o.StopPrice > 0) return o.StopPrice;
+                if (o.Price > 0) return o.Price;
+                return 0m;
+            }
+
+            static bool IsTake(string type)
+                => !string.IsNullOrWhiteSpace(type) &&
+                   type.Contains("TAKE", StringComparison.OrdinalIgnoreCase);
+
+            static bool IsStop(string type)
+                => !string.IsNullOrWhiteSpace(type) &&
+                   (type.Contains("STOP", StringComparison.OrdinalIgnoreCase) ||
+                    type.Contains("LOSS", StringComparison.OrdinalIgnoreCase)) // bắt STOP_LOSS*
+                   && !type.Contains("TAKE", StringComparison.OrdinalIgnoreCase);
+
+            decimal pivot = entryPrice > 0 ? entryPrice : (markPrice > 0 ? markPrice : 0m);
 
             decimal? sl = null;
             decimal? tp = null;
@@ -523,52 +508,58 @@ namespace FuturesBot.Services
                 string type = o.Type ?? string.Empty;
                 string side = o.Side ?? string.Empty;
 
-                decimal trigger = o.StopPrice > 0 ? o.StopPrice : o.Price;
+                decimal trigger = GetTrigger(o);
                 if (trigger <= 0) continue;
 
-                bool isStopType = type.Contains("STOP", StringComparison.OrdinalIgnoreCase)
-                                  && !type.Contains("TAKE", StringComparison.OrdinalIgnoreCase);
+                bool take = IsTake(type);
+                bool stop = IsStop(type);
 
-                bool isTakeType = type.Contains("TAKE", StringComparison.OrdinalIgnoreCase);
+                // loại order type không rõ để tránh nhầm entry limit
+                if (!take && !stop) continue;
 
-                if (isLong)
+                if (pivot > 0)
                 {
-                    // LONG: TP thường là SELL TAKE_PROFIT phía trên entry
-                    if (side.Equals("SELL", StringComparison.OrdinalIgnoreCase) && isTakeType &&
-                        (entryPrice <= 0 || trigger >= entryPrice))
+                    if (isLong)
                     {
-                        if (!tp.HasValue) tp = trigger;
-                        else tp = Math.Min(tp.Value, trigger); // TP gần nhất (thấp hơn) trên entry
+                        // LONG: TP >= pivot, SL <= pivot
+                        if (take && trigger >= pivot)
+                            tp = tp.HasValue ? Math.Min(tp.Value, trigger) : trigger;
+
+                        if (stop && trigger <= pivot)
+                            sl = sl.HasValue ? Math.Max(sl.Value, trigger) : trigger;
                     }
-
-                    // LONG: SL là SELL STOP phía dưới entry (hoặc dưới giá)
-                    if (side.Equals("SELL", StringComparison.OrdinalIgnoreCase) && isStopType)
+                    else
                     {
-                        if (entryPrice > 0 && trigger > entryPrice) continue;
+                        // SHORT: TP <= pivot, SL >= pivot
+                        if (take && trigger <= pivot)
+                            tp = tp.HasValue ? Math.Max(tp.Value, trigger) : trigger;
 
-                        if (!sl.HasValue) sl = trigger;
-                        else sl = Math.Max(sl.Value, trigger); // SL gần giá nhất (cao hơn) nhưng vẫn dưới entry
+                        if (stop && trigger >= pivot)
+                            sl = sl.HasValue ? Math.Min(sl.Value, trigger) : trigger;
                     }
                 }
                 else
                 {
-                    // SHORT: TP là BUY TAKE_PROFIT phía dưới entry
-                    if (side.Equals("BUY", StringComparison.OrdinalIgnoreCase) && isTakeType &&
-                        (entryPrice <= 0 || trigger <= entryPrice))
-                    {
-                        if (!tp.HasValue) tp = trigger;
-                        else tp = Math.Max(tp.Value, trigger); // TP gần nhất cho short là giá cao hơn (nhưng vẫn <= entry)
-                    }
-
-                    // SHORT: SL là BUY STOP phía trên entry
-                    if (side.Equals("BUY", StringComparison.OrdinalIgnoreCase) && isStopType)
-                    {
-                        if (entryPrice > 0 && trigger < entryPrice) continue;
-
-                        if (!sl.HasValue) sl = trigger;
-                        else sl = Math.Min(sl.Value, trigger); // SL gần giá nhất (thấp hơn) nhưng vẫn trên entry
-                    }
+                    // pivot không có: fallback theo type, lấy cái đầu tiên
+                    if (take && !tp.HasValue) tp = trigger;
+                    if (stop && !sl.HasValue) sl = trigger;
                 }
+            }
+
+            // Debug nhẹ khi thiếu SL/TP (giúp bắt lỗi mapping StopPrice/Type)
+            if (!sl.HasValue || !tp.HasValue)
+            {
+                var sample = orders
+                    .Select(o =>
+                    {
+                        var trig = (o.StopPrice > 0 ? o.StopPrice : o.Price);
+                        return $"type={o.Type}, side={o.Side}, price={o.Price}, stop={o.StopPrice}, trig={trig}";
+                    })
+                    .Take(8);
+
+                await _notify.SendAsync(
+                    $"[{symbol}] Detect SL/TP missing. isLong={isLong}, entry={entryPrice}, mark={markPrice}, pivot={pivot}\n" +
+                    string.Join("\n", sample));
             }
 
             return (sl, tp);
@@ -640,16 +631,12 @@ namespace FuturesBot.Services
             if (isLong)
             {
                 reverse = c0.Close < c0.Open && c0.Volume >= c1.Volume * 0.8m;
-
-                if (boundary > 0 && c0.Close < boundary * (1 - EmaBreakTolerance))
-                    hard = true;
+                if (boundary > 0 && c0.Close < boundary * (1 - EmaBreakTolerance)) hard = true;
             }
             else
             {
                 reverse = c0.Close > c0.Open && c0.Volume >= c1.Volume * 0.8m;
-
-                if (boundary > 0 && c0.Close > boundary * (1 + EmaBreakTolerance))
-                    hard = true;
+                if (boundary > 0 && c0.Close > boundary * (1 + EmaBreakTolerance)) hard = true;
             }
 
             return (reverse, hard);
@@ -663,7 +650,6 @@ namespace FuturesBot.Services
         {
             await _notify.SendAsync($"[{symbol}] Trailing SL update → {newSL}");
 
-            // Hủy tất cả SL hiện tại (chỉ SL, không TP)
             await _exchange.CancelStopLossOrdersAsync(symbol);
 
             var pos = await _exchange.GetPositionAsync(symbol);
@@ -680,7 +666,6 @@ namespace FuturesBot.Services
 
             await _exchange.PlaceStopOnlyAsync(symbol, side, posSide, qty, newSL);
 
-            // Đảm bảo không bị mất TP sau khi trailing (nếu ban đầu có TP)
             if (hasTp && expectedTp.HasValue)
             {
                 var (_, tpOnExchange) = await DetectManualSlTpAsync(symbol, isLong, pos.EntryPrice);
@@ -700,4 +685,4 @@ namespace FuturesBot.Services
             }
         }
     }
-}
+} 
