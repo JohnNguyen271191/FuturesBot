@@ -1,3 +1,4 @@
+
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -22,6 +23,9 @@ namespace FuturesBot.Services
         private const decimal EmaBreakTolerance = 0.001m;
 
         private static readonly TimeSpan LimitTimeout = TimeSpan.FromMinutes(20);
+
+        // throttle debug spam
+        private readonly ConcurrentDictionary<string, DateTime> _lastMissingLogUtc = new();
 
         // ============================================================
         // TRACK SYMBOL ĐANG ĐƯỢC GIÁM SÁT
@@ -207,10 +211,15 @@ namespace FuturesBot.Services
                     decimal absQty = Math.Abs(qty);
                     string posSide = isLongPosition ? "LONG" : "SHORT";
 
-                    // =================== SYNC ENTRY/SL/TP TỪ SÀN ===================
-                    if (entry <= 0m && pos.EntryPrice > 0m)
-                        entry = pos.EntryPrice;
+                    // =================== FIX CHÍNH: LUÔN SYNC ENTRY THEO SÀN ===================
+                    // vì signal.EntryPrice có thể lệch so với entry thật => pivot sai => detect SL/TP sai => spam.
+                    if (pos.EntryPrice > 0m)
+                    {
+                        if (entry <= 0m || Math.Abs(entry - pos.EntryPrice) / pos.EntryPrice > 0.0005m) // lệch >0.05%
+                            entry = pos.EntryPrice;
+                    }
 
+                    // =================== SYNC SL/TP TỪ SÀN ===================
                     var (slOnEx, tpOnEx) = await DetectManualSlTpAsync(symbol, isLongPosition, entry);
 
                     if (sl <= 0m && slOnEx.HasValue && slOnEx.Value > 0m)
@@ -457,7 +466,7 @@ namespace FuturesBot.Services
         // ============================================================
 
         private async Task<(decimal? sl, decimal? tp)> DetectManualSlTpAsync(
-            string symbol, bool isLong, decimal entryPrice)
+            string symbol, bool isLong, decimal entryPriceFromCaller)
         {
             var normalOrders = await _exchange.GetOpenOrdersAsync(symbol);
             var algoOrders = await _exchange.GetOpenAlgoOrdersAsync(symbol);
@@ -469,12 +478,14 @@ namespace FuturesBot.Services
             if (orders.Count == 0)
                 return (null, null);
 
-            // fallback pivot = markPrice khi entryPrice sai/chưa sync
+            // Ưu tiên pivot = entryPrice thật từ position (FIX spam)
             decimal markPrice = 0m;
+            decimal exEntry = 0m;
             try
             {
                 var pos = await _exchange.GetPositionAsync(symbol);
                 markPrice = pos?.MarkPrice ?? 0m;
+                exEntry = pos?.EntryPrice ?? 0m;
             }
             catch { /* ignore */ }
 
@@ -493,10 +504,13 @@ namespace FuturesBot.Services
             static bool IsStop(string type)
                 => !string.IsNullOrWhiteSpace(type) &&
                    (type.Contains("STOP", StringComparison.OrdinalIgnoreCase) ||
-                    type.Contains("LOSS", StringComparison.OrdinalIgnoreCase)) // bắt STOP_LOSS*
+                    type.Contains("LOSS", StringComparison.OrdinalIgnoreCase))
                    && !type.Contains("TAKE", StringComparison.OrdinalIgnoreCase);
 
-            decimal pivot = entryPrice > 0 ? entryPrice : (markPrice > 0 ? markPrice : 0m);
+            decimal pivot =
+                exEntry > 0 ? exEntry :
+                entryPriceFromCaller > 0 ? entryPriceFromCaller :
+                markPrice > 0 ? markPrice : 0m;
 
             decimal? sl = null;
             decimal? tp = null;
@@ -506,7 +520,6 @@ namespace FuturesBot.Services
                 if (o == null) continue;
 
                 string type = o.Type ?? string.Empty;
-                string side = o.Side ?? string.Empty;
 
                 decimal trigger = GetTrigger(o);
                 if (trigger <= 0) continue;
@@ -546,9 +559,17 @@ namespace FuturesBot.Services
                 }
             }
 
-            // Debug nhẹ khi thiếu SL/TP (giúp bắt lỗi mapping StopPrice/Type)
+            // Debug nhẹ + throttle (tránh spam mỗi 3s)
             if (!sl.HasValue || !tp.HasValue)
             {
+                var now = DateTime.UtcNow;
+                if (_lastMissingLogUtc.TryGetValue(symbol, out var last) &&
+                    (now - last) < TimeSpan.FromSeconds(60))
+                {
+                    return (sl, tp);
+                }
+                _lastMissingLogUtc[symbol] = now;
+
                 var sample = orders
                     .Select(o =>
                     {
@@ -558,7 +579,7 @@ namespace FuturesBot.Services
                     .Take(8);
 
                 await _notify.SendAsync(
-                    $"[{symbol}] Detect SL/TP missing. isLong={isLong}, entry={entryPrice}, mark={markPrice}, pivot={pivot}\n" +
+                    $"[{symbol}] Detect SL/TP missing. isLong={isLong}, entry={entryPriceFromCaller}, exEntry={exEntry}, mark={markPrice}, pivot={pivot}\n" +
                     string.Join("\n", sample));
             }
 
@@ -685,4 +706,4 @@ namespace FuturesBot.Services
             }
         }
     }
-} 
+}
