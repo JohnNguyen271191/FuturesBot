@@ -197,8 +197,6 @@ namespace FuturesBot.Services
         public async Task<PositionInfo> GetPositionAsync(string symbol)
         {
             string json = "";
-            Exception? lastEx = null;
-
             for (int attempt = 1; attempt <= 3; attempt++)
             {
                 try
@@ -217,7 +215,6 @@ namespace FuturesBot.Services
                 }
                 catch (Exception ex)
                 {
-                    lastEx = ex;
                     if (attempt < 3)
                     {
                         await _slack.SendAsync($"[WARN] GetPositionAsync retry {attempt} for {symbol}: {ex.Message}");
@@ -559,7 +556,7 @@ namespace FuturesBot.Services
         public async Task<IReadOnlyList<OpenOrderInfo>> GetOpenOrdersAsync(string symbol)
         {
             if (_config.PaperMode)
-                return Array.Empty<OpenOrderInfo>();
+                return [];
 
             var json = await SignedGetAsync($"{_config.Urls.OpenOrdersUrl}", new Dictionary<string, string>
             {
@@ -644,8 +641,6 @@ namespace FuturesBot.Services
 
             foreach (var i in incomeList)
             {
-                // Lọc thêm lần nữa cho chắc,
-                // phòng khi Binance trả dư (do startTime/endTime bị làm tròn)
                 if (i.Time < fromUtc || i.Time > to)
                     continue;
 
@@ -656,11 +651,11 @@ namespace FuturesBot.Services
                         break;
 
                     case "COMMISSION":
-                        result.Commission += i.Income; // commission luôn âm
+                        result.Commission += i.Income;
                         break;
 
                     case "FUNDING_FEE":
-                        result.Funding += i.Income; // funding âm hoặc dương
+                        result.Funding += i.Income;
                         break;
                 }
             }
@@ -776,7 +771,7 @@ namespace FuturesBot.Services
         public async Task<IReadOnlyList<OpenOrderInfo>> GetOpenAlgoOrdersAsync(string symbol)
         {
             if (_config.PaperMode)
-                return Array.Empty<OpenOrderInfo>();
+                return [];
 
             var json = await SignedGetAsync($"{_config.Urls.OpenAlgoOrdersUrl}", new Dictionary<string, string>
             {
