@@ -1,15 +1,9 @@
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading;
-using System.Threading.Tasks;
 using FuturesBot.Config;
 using FuturesBot.IServices;
 using FuturesBot.Services;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
-using static FuturesBot.Utils.EnumTypesHelper;
 
 Console.OutputEncoding = System.Text.Encoding.UTF8;
 
@@ -35,9 +29,6 @@ var host = Host
         services.AddSingleton<SlackNotifierService>();
         services.AddSingleton<PnlReporterService>();
         services.AddSingleton<LiveSyncService>();
-
-        // IMPORTANT: nếu OrderManager inject IStrategyService thì mày phải map ở đây:
-        // services.AddScoped<IStrategyService, TradingStrategy>();
 
         // Per-symbol scoped services
         services.AddScoped<OrderManagerService>();

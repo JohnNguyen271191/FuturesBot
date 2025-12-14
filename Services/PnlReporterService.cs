@@ -18,7 +18,7 @@ namespace FuturesBot.Services
         //    DAILY PnL COOLDOWN LOGIC
         // ==============================
 
-        // Vốn gốc dùng để tính % (mày set từ ngoài vào mỗi ngày hoặc khi start bot)
+        // Vốn gốc dùng để tính %
         private decimal _dailyBaseCapital = 0m;
 
         // Ngưỡng ăn/thua

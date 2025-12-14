@@ -1,6 +1,3 @@
-using System;
-using System.Collections.Generic;
-using System.Linq;
 using FuturesBot.Config;
 using FuturesBot.IServices;
 using FuturesBot.Models;
@@ -79,11 +76,6 @@ namespace FuturesBot.Services
         private const bool UseSwingForTrendStop = true;
         private const decimal SwingStopExtraBufferPercent = 0.0010m; // +0.10% quanh swing
 
-        // =================== EXIT TOLERANCE (FIX) ======================
-        // Exit nếu phá EMA dynamic + tolerance
-        private const decimal ExitEmaBreakToleranceMajor = 0.0010m; // 0.10%
-        private const decimal ExitEmaBreakToleranceAlt = 0.0015m;   // 0.15%
-
         // Nến climax + overextended xa EMA gần nhất (tránh vừa vào là đảo)
         private const int ClimaxLookback = 20;
         private const decimal ClimaxBodyMultiplier = 1.8m;
@@ -119,95 +111,6 @@ namespace FuturesBot.Services
         private const decimal StructureBreakToleranceAlt = 0.0030m;   // 0.30%
 
         // =====================================================================
-        //                           EXIT SIGNAL (FIXED)
-        // =====================================================================
-
-        /// <summary>
-        /// Exit:
-        ///  - LONG: nếu close phá xuống dưới EMA dynamic (EMA dưới giá gần nhất) với tolerance → ExitLong
-        ///  - SHORT: nếu close phá lên trên EMA dynamic (EMA trên giá gần nhất) với tolerance → ExitShort
-        /// </summary>
-        public TradeSignal GenerateExitSignal(
-            IReadOnlyList<Candle> candles15m,
-            bool hasLongPosition,
-            bool hasShortPosition,
-            CoinInfo coinInfo)
-        {
-            if (candles15m == null || candles15m.Count < 220)
-                return new TradeSignal();
-
-            bool isMajor = coinInfo.IsMajor;
-            decimal tol = isMajor ? ExitEmaBreakToleranceMajor : ExitEmaBreakToleranceAlt;
-
-            // dùng nến đã đóng
-            int i15 = candles15m.Count - 2;
-            if (i15 <= 0) return new TradeSignal();
-
-            var last15 = candles15m[i15];
-
-            var ema34_15 = _indicators.Ema(candles15m, 34);
-            var ema89_15 = _indicators.Ema(candles15m, 89);
-            var ema200_15 = _indicators.Ema(candles15m, 200);
-
-            decimal ema34Now = ema34_15[i15];
-            decimal ema89Now = ema89_15[i15];
-            decimal ema200Now = ema200_15[i15];
-
-            // ===== LONG: chọn EMA gần nhất bên dưới giá (support) =====
-            if (hasLongPosition)
-            {
-                var supports = new List<(int period, decimal v)>();
-                if (ema34Now > 0 && ema34Now <= last15.Close) supports.Add((34, ema34Now));
-                if (ema89Now > 0 && ema89Now <= last15.Close) supports.Add((89, ema89Now));
-                if (ema200Now > 0 && ema200Now <= last15.Close) supports.Add((200, ema200Now));
-
-                if (supports.Count > 0)
-                {
-                    var chosen = supports.OrderByDescending(x => x.v).First(); // gần nhất dưới giá
-                    decimal support = chosen.v;
-
-                    // phá support với tolerance
-                    if (last15.Close < support * (1m - tol))
-                    {
-                        return new TradeSignal
-                        {
-                            Type = SignalType.CloseLong,
-                            Reason = $"{coinInfo.Symbol}: Exit LONG – close phá xuống dưới EMA{chosen.period} M15 (dynamic support) với tol={tol:P2}.",
-                            Coin = coinInfo.Symbol
-                        };
-                    }
-                }
-            }
-
-            // ===== SHORT: chọn EMA gần nhất bên trên giá (resistance) =====
-            if (hasShortPosition)
-            {
-                var resistances = new List<(int period, decimal v)>();
-                if (ema34Now > 0 && ema34Now >= last15.Close) resistances.Add((34, ema34Now));
-                if (ema89Now > 0 && ema89Now >= last15.Close) resistances.Add((89, ema89Now));
-                if (ema200Now > 0 && ema200Now >= last15.Close) resistances.Add((200, ema200Now));
-
-                if (resistances.Count > 0)
-                {
-                    var chosen = resistances.OrderBy(x => x.v).First(); // gần nhất trên giá
-                    decimal res = chosen.v;
-
-                    if (last15.Close > res * (1m + tol))
-                    {
-                        return new TradeSignal
-                        {
-                            Type = SignalType.CloseShort,
-                            Reason = $"{coinInfo.Symbol}: Exit SHORT – close phá lên trên EMA{chosen.period} M15 (dynamic resistance) với tol={tol:P2}.",
-                            Coin = coinInfo.Symbol
-                        };
-                    }
-                }
-            }
-
-            return new TradeSignal();
-        }
-
-        // =====================================================================
         //                           ENTRY SIGNAL
         // =====================================================================
 
@@ -224,7 +127,6 @@ namespace FuturesBot.Services
             if (i15 <= 0 || iH1 <= 0) return new TradeSignal();
 
             var last15 = candles15m[i15];
-            var prev15 = candles15m[i15 - 1];
             var lastH1 = candles1h[iH1];
 
             // --- Indicators ---
@@ -234,7 +136,6 @@ namespace FuturesBot.Services
 
             var ema34_h1 = _indicators.Ema(candles1h, 34);
             var ema89_h1 = _indicators.Ema(candles1h, 89);
-            var ema200_h1 = _indicators.Ema(candles1h, 200);
 
             var rsi15 = _indicators.Rsi(candles15m, 6);
             var (macd15, sig15, _) = _indicators.Macd(candles15m, 5, 13, 5);
@@ -457,7 +358,6 @@ namespace FuturesBot.Services
                     macd15,
                     sig15,
                     last15,
-                    prev15,
                     coinInfo,
                     rrTrend,
                     volumeOkSoft);
@@ -486,7 +386,6 @@ namespace FuturesBot.Services
                     macd15,
                     sig15,
                     last15,
-                    prev15,
                     coinInfo,
                     rrTrend,
                     volumeOkSoft);
@@ -520,7 +419,6 @@ namespace FuturesBot.Services
             IReadOnlyList<decimal> macd15,
             IReadOnlyList<decimal> sig15,
             Candle last15,
-            Candle prev15,
             CoinInfo coinInfo,
             decimal riskRewardTrend,
             bool volumeOkSoft)
@@ -643,7 +541,6 @@ namespace FuturesBot.Services
             IReadOnlyList<decimal> macd15,
             IReadOnlyList<decimal> sig15,
             Candle last15,
-            Candle prev15,
             CoinInfo coinInfo,
             decimal riskRewardTrend,
             bool volumeOkSoft)

@@ -6,7 +6,6 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using System.Linq;
 using static FuturesBot.Utils.EnumTypesHelper;
 
 namespace FuturesBot.Services
@@ -939,36 +938,6 @@ namespace FuturesBot.Services
             }
 
             return list;
-        }
-
-        private async Task CancelOrderByIdAsync(string symbol, string orderId)
-        {
-            // PAPER MODE
-            if (_config.PaperMode)
-            {
-                await _slack.SendAsync($"[PAPER MODE] CancelOrderById {symbol} orderId={orderId}");
-                return;
-            }
-
-            long ts = GetBinanceTimestamp();
-
-            var qs = $"symbol={symbol}&orderId={orderId}&timestamp={ts}";
-            var signature = BinanceSignatureHelper.Sign(qs, _config.ApiSecret);
-
-            string url = $"{_config.Urls.OrderUrl}?{qs}&signature={signature}";
-            var req = new HttpRequestMessage(HttpMethod.Delete, url);
-
-            var resp = await _http.SendAsync(req);
-            var body = await resp.Content.ReadAsStringAsync();
-
-            if (!resp.IsSuccessStatusCode)
-            {
-                await _slack.SendAsync($"[CancelOrderByIdAsync ERROR] {symbol} orderId={orderId} => {body}");
-            }
-            else
-            {
-                await _slack.SendAsync($"[CancelOrderByIdAsync OK] {symbol} orderId={orderId} => {body}");
-            }
         }
 
         private async Task CancelAlgoOrderByIdAsync(long algoId)

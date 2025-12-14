@@ -1,9 +1,5 @@
 
-using System;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading.Tasks;
 using FuturesBot.Config;
 using FuturesBot.IServices;
 using FuturesBot.Models;
@@ -241,8 +237,7 @@ namespace FuturesBot.Services
 
                     if ((!hasEntry || !hasSL || !hasTP) && !missingNotified)
                     {
-                        await _notify.SendAsync(
-                            $"[{symbol}] POSITION: thiếu Entry/SL/TP. entry={entry}, sl={sl}, tp={tp} (sẽ auto-sync khi mày đặt tay)");
+                        await _notify.SendAsync($"[{symbol}] POSITION: thiếu Entry/SL/TP. entry={entry}, sl={sl}, tp={tp} (sẽ auto-sync)");
                         missingNotified = true;
                     }
 
@@ -260,8 +255,7 @@ namespace FuturesBot.Services
                             hasTP = true;
                             tpInitialized = false;
 
-                            await _notify.SendAsync(
-                                $"[{symbol}] Manual có SL nhưng thiếu TP → AUTO-TP={Math.Round(autoTp, 6)} theo RR={DefaultManualRR}");
+                            await _notify.SendAsync($"[{symbol}] Manual có SL nhưng thiếu TP → AUTO-TP={Math.Round(autoTp, 6)} theo RR={DefaultManualRR}");
 
                             var ok = await _exchange.PlaceTakeProfitAsync(symbol, posSide, absQty, autoTp);
                             if (!ok)

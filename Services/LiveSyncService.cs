@@ -104,10 +104,7 @@ namespace FuturesBot.Services
                         PnlUSDT = (side == SignalType.Long
                                     ? (exitPrice - last.EntryPrice) * qty
                                     : (last.EntryPrice - exitPrice) * qty)
-                                    + netPnlAsync.Commission,
-                        Realized = netPnlAsync.Realized,
-                        Commission = netPnlAsync.Commission,
-                        Funding = netPnlAsync.Funding
+                                    + netPnlAsync.Commission + netPnlAsync.Funding
                     };
 
                     await pnl.RegisterClosedTradeAsync(closed);
