@@ -16,7 +16,7 @@ namespace FuturesBot.Services
         private readonly SlackNotifierService _notify;
         private readonly BotConfig _botConfig;
 
-        // FIX -1003: giảm polling (mày có thể chỉnh lại nếu muốn)
+        // FIX -1003: giảm polling
         private const int MonitorIntervalMs = 10000; // cũ 3000
         private const int SlTpCheckEverySec = 30;    // check SL/TP từ sàn mỗi 30s
         private const int CandleFetchEverySec = 20;  // fetch candles mỗi 20s
@@ -218,7 +218,7 @@ namespace FuturesBot.Services
                     decimal absQty = Math.Abs(qty);
                     string posSide = isLongPosition ? "LONG" : "SHORT";
 
-                    // =================== FIX: luôn sync entry theo sàn ===================
+                    // luôn sync entry theo sàn (pivot chuẩn)
                     if (pos.EntryPrice > 0m)
                     {
                         if (entry <= 0m || Math.Abs(entry - pos.EntryPrice) / pos.EntryPrice > 0.0005m)
@@ -229,7 +229,7 @@ namespace FuturesBot.Services
                     bool hasSL = sl > 0m;
                     bool hasTP = tp > 0m;
 
-                    // =================== SYNC SL/TP TỪ SÀN (throttle 30s) ===================
+                    // =================== SYNC SL/TP TỪ SÀN (throttle) ===================
                     if ((DateTime.UtcNow - lastSlTpCheckUtc) >= TimeSpan.FromSeconds(SlTpCheckEverySec))
                     {
                         var (slOnEx, tpOnEx) = await DetectManualSlTpAsync(symbol, isLongPosition, entry, pos);
@@ -291,7 +291,6 @@ namespace FuturesBot.Services
                     // =================== AUTO-TP 1 lần: check TP trên sàn trước ===================
                     if (hasTP && !tpInitialized)
                     {
-                        // ép check 1 lần (nhưng detect dùng pos đã có)
                         var (_, tpCheck) = await DetectManualSlTpAsync(symbol, isLongPosition, entry, pos);
                         lastSlTpCheckUtc = DateTime.UtcNow;
 
@@ -306,13 +305,9 @@ namespace FuturesBot.Services
 
                             var ok = await _exchange.PlaceTakeProfitAsync(symbol, posSide, absQty, tp);
                             if (!ok)
-                            {
                                 await _notify.SendAsync($"[{symbol}] AUTO-TP FAILED → tp={tpDisplay}, qty={absQty}");
-                            }
                             else
-                            {
                                 tpInitialized = true;
-                            }
                         }
                     }
 
@@ -333,7 +328,6 @@ namespace FuturesBot.Services
                         bool hitTp = (isLongPosition && price >= tp) || (!isLongPosition && price <= tp);
                         if (hitTp)
                         {
-                            // đỡ spam: chỉ check lại nếu đã lâu không check
                             decimal? tpOnExchange2 = null;
                             if ((DateTime.UtcNow - lastSlTpCheckUtc) >= TimeSpan.FromSeconds(5))
                             {
@@ -409,7 +403,16 @@ namespace FuturesBot.Services
                             if (newSL != sl)
                             {
                                 sl = newSL;
-                                await UpdateStopLossAsync(symbol, newSL, isLongPosition, hasTP, tp, pos, ref lastSlTpCheckUtc);
+
+                                // FIX CS1988: UpdateStopLossAsync trả về lastCheck mới thay vì ref
+                                lastSlTpCheckUtc = await UpdateStopLossAsync(
+                                    symbol,
+                                    newSL,
+                                    isLongPosition,
+                                    hasTP,
+                                    tp,
+                                    pos,
+                                    lastSlTpCheckUtc);
                             }
                         }
                     }
@@ -489,9 +492,9 @@ namespace FuturesBot.Services
         }
 
         // ============================================================
-        //   DETECT TP/SL từ openOrders + openAlgoOrders (ROBUST)
-        //   FIX: trailing -> phân loại theo MARK PRICE (không theo entry)
-        //   FIX: KHÔNG gọi GetPositionAsync trong hàm này nữa
+        //   DETECT TP/SL từ openOrders + openAlgoOrders
+        //   FIX trailing: phân loại theo MARK PRICE (không theo entry)
+        //   FIX: không gọi GetPositionAsync trong hàm này nữa
         // ============================================================
 
         private async Task<(decimal? sl, decimal? tp)> DetectManualSlTpAsync(
@@ -547,12 +550,11 @@ namespace FuturesBot.Services
                 bool stop = IsStop(type);
                 if (!take && !stop) continue;
 
-                // ============ FIX CHÍNH: dùng markPrice để phân loại (trailing an toàn) ============
+                // MARK-based classification (giảm false-missing khi trailing)
                 if (markPrice > 0m)
                 {
                     if (isLong)
                     {
-                        // LONG: SL dưới mark, TP trên mark
                         if (stop && trigger < markPrice)
                             sl = sl.HasValue ? Math.Max(sl.Value, trigger) : trigger;
 
@@ -561,7 +563,6 @@ namespace FuturesBot.Services
                     }
                     else
                     {
-                        // SHORT: SL trên mark, TP dưới mark
                         if (stop && trigger > markPrice)
                             sl = sl.HasValue ? Math.Min(sl.Value, trigger) : trigger;
 
@@ -572,7 +573,7 @@ namespace FuturesBot.Services
                     continue;
                 }
 
-                // ============ FALLBACK: không có mark => dùng entryPivot ============
+                // fallback theo entry
                 if (entryPivot > 0m)
                 {
                     if (isLong)
@@ -665,7 +666,7 @@ namespace FuturesBot.Services
         }
 
         // ============================================================
-        //                    MOMENTUM REVERSAL (FIX: dùng nến đóng)
+        //                    MOMENTUM REVERSAL
         // ============================================================
 
         private (bool reverse, bool hardReverse) CheckMomentumReversal(
@@ -707,14 +708,14 @@ namespace FuturesBot.Services
         //                     UPDATE STOPLOSS (TRAILING)
         // ============================================================
 
-        private async Task UpdateStopLossAsync(
+        private async Task<DateTime> UpdateStopLossAsync(
             string symbol,
             decimal newSL,
             bool isLong,
             bool hasTp,
             decimal? expectedTp,
             PositionInfo currentPos,
-            ref DateTime lastSlTpCheckUtc)
+            DateTime lastSlTpCheckUtc)
         {
             await _notify.SendAsync($"[{symbol}] Trailing SL update → {newSL}");
 
@@ -725,14 +726,13 @@ namespace FuturesBot.Services
 
             if (qty <= 0m)
             {
-                // hiếm: fallback
                 var pos = await _exchange.GetPositionAsync(symbol);
                 qty = Math.Abs(pos.PositionAmt);
                 if (qty <= 0m)
                 {
                     await _notify.SendAsync($"[{symbol}] Không tìm thấy position khi update SL.");
                     ClearMonitoringPosition(symbol);
-                    return;
+                    return lastSlTpCheckUtc;
                 }
 
                 currentPos = pos;
@@ -741,7 +741,7 @@ namespace FuturesBot.Services
             string side = isLong ? "SELL" : "BUY";
             await _exchange.PlaceStopOnlyAsync(symbol, side, posSide, qty, newSL);
 
-            // giữ TP: chỉ check lại theo throttle (đỡ -1003)
+            // giữ TP: chỉ check lại theo throttle
             if (hasTp && expectedTp.HasValue)
             {
                 if ((DateTime.UtcNow - lastSlTpCheckUtc) >= TimeSpan.FromSeconds(SlTpCheckEverySec))
@@ -758,12 +758,12 @@ namespace FuturesBot.Services
 
                         var ok = await _exchange.PlaceTakeProfitAsync(symbol, posSide, qty, tpVal);
                         if (!ok)
-                        {
                             await _notify.SendAsync($"[{symbol}] Trailing giữ TP FAILED → tp={tpDisplay}");
-                        }
                     }
                 }
             }
+
+            return lastSlTpCheckUtc;
         }
     }
 }
