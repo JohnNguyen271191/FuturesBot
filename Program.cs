@@ -50,11 +50,9 @@ var lifetime = host.Services.GetRequiredService<IHostApplicationLifetime>();
 var vnTimeZone = TimeZoneInfo.FindSystemTimeZoneById("Asia/Ho_Chi_Minh");
 var nowVN = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, vnTimeZone);
 
-pnl.SetDailyBaseCapital(config.AccountBalance);
+pnl.SetDailyBaseCapital();
 
-await notifier.SendAsync(
-    $"=== FuturesBot {config.Intervals[0].FrameTime.ToUpper()} - {nowVN:dd/MM/yyyy HH:mm:ss} started ==="
-);
+await notifier.SendAsync($"=== FuturesBot {config.Intervals[0].FrameTime.ToUpper()} - {nowVN:dd/MM/yyyy HH:mm:ss} started ===");
 
 // ============================================================================
 // GLOBAL COOLDOWN WATCHER

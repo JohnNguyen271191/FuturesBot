@@ -6,9 +6,7 @@
         // Risk
         public decimal AccountBalance { get; set; } = 200m;      // vốn giả định để tính lot
         public decimal MaxDailyLossPercent { get; set; } = 5m;   // thua 5%/ngày nghỉ
-        public int MaxTradesPerDay { get; set; } = 6;
-        public int MaxLosingStreak { get; set; } = 3;
-        public TimeSpan CooldownAfterTrade { get; set; } = TimeSpan.FromMinutes(5);
+        public double CooldownDuration { get; set; } = 1;
 
         // Binance
         public string ApiKey { get; set; } = Environment.GetEnvironmentVariable("BINANCE_API_KEY") ?? "";

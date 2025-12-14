@@ -6,25 +6,6 @@ namespace FuturesBot.Services
     {
         private readonly BotConfig _config = config;
 
-        public int TradesToday { get; private set; }
-        public int LosingStreak { get; private set; }
-        public decimal DailyPnl { get; private set; }
-        public DateTime? LastTradeTime { get; private set; }
-
-        public bool CanOpenNewTrade()
-        {
-            if (TradesToday >= _config.MaxTradesPerDay) return false;
-            if (LosingStreak >= _config.MaxLosingStreak) return false;
-
-            var maxDailyLoss = _config.AccountBalance * _config.MaxDailyLossPercent / 100m;
-            if (DailyPnl <= -maxDailyLoss) return false;
-
-            if (LastTradeTime.HasValue &&  DateTime.UtcNow - LastTradeTime.Value < _config.CooldownAfterTrade)
-                return false;
-
-            return true;
-        }
-
         public decimal CalculatePositionSize(decimal entry, decimal stopLoss, decimal riskPerTradePercent)
         {
             var minQuantity = 0.002m;
@@ -35,18 +16,6 @@ namespace FuturesBot.Services
             // Futures: loss ≈ slDistance * qty
             var quantity = Math.Round(riskAmount / slDistance, 3);
             return quantity < minQuantity ? minQuantity : quantity;
-        }
-
-        public void RegisterResult(decimal pnl)
-        {
-            TradesToday++;
-            LastTradeTime = DateTime.UtcNow;
-
-            DailyPnl += pnl;
-            if (pnl < 0) LosingStreak++;
-            else LosingStreak = 0;
-
-            _config.AccountBalance += pnl;
         }
     }
 }

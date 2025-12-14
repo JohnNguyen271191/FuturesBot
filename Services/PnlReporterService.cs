@@ -1,15 +1,14 @@
 using FuturesBot.Models;
 using System.Text;
-using System.Linq;
-using System.Collections.Generic;
+using FuturesBot.Config;
 
 namespace FuturesBot.Services
 {
-    public class PnlReporterService(SlackNotifierService notifier)
+    public class PnlReporterService(SlackNotifierService notifier, BotConfig botConfig)
     {
         private readonly SlackNotifierService _notifier = notifier;
 
-        private readonly List<ClosedTrade> _closedTrades = new();
+        private readonly List<ClosedTrade> _closedTrades = [];
 
         private DateTime _currentDay = DateTime.UtcNow.Date;
         private bool _summarySentForToday = false;
@@ -21,23 +20,11 @@ namespace FuturesBot.Services
         // Vốn gốc dùng để tính %
         private decimal _dailyBaseCapital = 0m;
 
-        // Ngưỡng ăn/thua
-        private const decimal LossThresholdPercent = 0.03m;   // -3%
-        private const decimal ProfitThresholdPercent = 0.03m; // +3%
-
-        // Thời gian nghỉ
-        private static readonly TimeSpan LossCooldownDuration = TimeSpan.FromHours(1); // thua 3% nghỉ 1h
-        private static readonly TimeSpan ProfitCooldownDuration = TimeSpan.FromHours(2); // ăn 3% nghỉ 2h
-
         private DateTime? _cooldownUntil = null;
 
-        /// <summary>
-        /// Set vốn gốc trong ngày để tính % PnL.
-        /// Ví dụ: gọi lúc khởi động bot hoặc đầu ngày.
-        /// </summary>
-        public void SetDailyBaseCapital(decimal capital)
+        public void SetDailyBaseCapital()
         {
-            _dailyBaseCapital = capital;
+            _dailyBaseCapital = botConfig.AccountBalance;
         }
 
         /// <summary>
@@ -79,10 +66,7 @@ $@"[TRADE CLOSED] {trade.Symbol} {trade.Side}
 Entry : {trade.Entry}
 Exit  : {trade.Exit}
 Qty   : {trade.Quantity:F6}
-PnL   : {trade.PnlUSDT:F2} USDT
-Realized   : {trade.Realized:F2} USDT
-Commission : {trade.Commission:F2} USDT
-Funding    : {trade.Funding:F2} USDT";
+PnL   : {trade.PnlUSDT:F2} USDT";
 
             await _notifier.SendAsync(msg);
 
@@ -169,27 +153,24 @@ Funding    : {trade.Funding:F2} USDT";
 
             var totalPnl = tradesToday.Sum(t => t.PnlUSDT);
             var pnlPercent = totalPnl / _dailyBaseCapital;
+            var cooldownDuration = TimeSpan.FromHours(botConfig.CooldownDuration);
 
-            // Thua >= 3% → cooldown 1h
-            if (pnlPercent <= -LossThresholdPercent)
+            // Thua >= 5% → cooldown dựa vào cooldownDuration
+            if (pnlPercent <= -botConfig.MaxDailyLossPercent)
             {
-                _cooldownUntil = DateTime.UtcNow.Add(LossCooldownDuration);
+                _cooldownUntil = DateTime.UtcNow.Add(cooldownDuration);
 
-                await _notifier.SendAsync(
-                    $":warning: DAILY COOLDOWN TRIGGERED — Lỗ {pnlPercent:P2} (~{totalPnl:F2} USDT trên vốn {_dailyBaseCapital:F2}) → nghỉ {LossCooldownDuration.TotalHours} giờ, tới {_cooldownUntil:HH:mm} UTC."
-                );
+                await _notifier.SendAsync($":warning: DAILY COOLDOWN TRIGGERED — Lỗ {pnlPercent:P2} (~{totalPnl:F2} USDT trên vốn {_dailyBaseCapital:F2}) → nghỉ {cooldownDuration.TotalHours} giờ, tới {_cooldownUntil:HH:mm} UTC.");
 
                 return;
             }
 
-            // Lãi >= 3% → cooldown 2h
-            if (pnlPercent >= ProfitThresholdPercent)
+            // Lãi >= 5% → cooldown dựa vào cooldownDuration
+            if (pnlPercent >= botConfig.MaxDailyLossPercent)
             {
-                _cooldownUntil = DateTime.UtcNow.Add(ProfitCooldownDuration);
+                _cooldownUntil = DateTime.UtcNow.Add(cooldownDuration);
 
-                await _notifier.SendAsync(
-                    $":tada: DAILY COOLDOWN TRIGGERED — Lãi {pnlPercent:P2} (~{totalPnl:F2} USDT trên vốn {_dailyBaseCapital:F2}) → nghỉ {ProfitCooldownDuration.TotalHours} giờ, tới {_cooldownUntil:HH:mm} UTC."
-                );
+                await _notifier.SendAsync($":tada: DAILY COOLDOWN TRIGGERED — Lãi {pnlPercent:P2} (~{totalPnl:F2} USDT trên vốn {_dailyBaseCapital:F2}) → nghỉ {cooldownDuration.TotalHours} giờ, tới {_cooldownUntil:HH:mm} UTC.");
             }
         }
     }

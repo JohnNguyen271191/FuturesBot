@@ -31,19 +31,11 @@ namespace FuturesBot.Services
             // NEW: chặn nếu đã có vị thế hoặc lệnh chờ
             if (await _exchange.HasOpenPositionOrOrderAsync(coinInfo.Symbol))
             {
-                //await _notifier.SendAsync($"[BLOCKED] - {symbol.Coin} - Already have open position or pending order. Skip new signal : {signal.Reason}");
-                return;
-            }
-
-            if (!_risk.CanOpenNewTrade())
-            {
-                //await _notifier.SendAsync($"[BLOCKED] - {symbol.Coin} - Not eligible to open a position. Reason: {signal.Reason}");
                 return;
             }
 
             if (signal.EntryPrice is null || signal.StopLoss is null || signal.TakeProfit is null)
             {
-                //await _notifier.SendAsync($"[WARN] - {symbol.Coin} - The Signal not enough Entry/SL/TP.");
                 return;
             }
 
@@ -54,7 +46,6 @@ namespace FuturesBot.Services
             var qty = _risk.CalculatePositionSize(entry, sl, coinInfo.RiskPerTradePercent);
             if (qty <= 0)
             {
-                //await _notifier.SendAsync($"[WARN] - {symbol.Coin} - Position size = 0, signal ignore.");
                 return;
             }
 
