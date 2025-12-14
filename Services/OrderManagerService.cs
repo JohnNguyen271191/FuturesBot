@@ -65,7 +65,7 @@ namespace FuturesBot.Services
 
         public async Task MonitorLimitOrderAsync(TradeSignal signal)
         {
-            string symbol = signal.Coin;
+            string symbol = signal.Symbol;
             bool isLong = signal.Type == SignalType.Long;
 
             if (IsMonitoringPosition(symbol) || !TryStartMonitoringLimit(symbol))
@@ -165,7 +165,7 @@ namespace FuturesBot.Services
 
         public async Task MonitorPositionAsync(TradeSignal signal)
         {
-            string symbol = signal.Coin;
+            string symbol = signal.Symbol;
 
             if (!TryStartMonitoringPosition(symbol))
             {
@@ -434,7 +434,7 @@ namespace FuturesBot.Services
 
             var signal = new TradeSignal
             {
-                Coin = pos.Symbol,
+                Symbol = pos.Symbol,
                 Type = isLong ? SignalType.Long : SignalType.Short,
                 EntryPrice = entry,
                 StopLoss = sl,

@@ -1,5 +1,4 @@
-﻿using System.Runtime.CompilerServices;
-using static FuturesBot.Utils.EnumTypesHelper;
+﻿using static FuturesBot.Utils.EnumTypesHelper;
 
 namespace FuturesBot.Models
 {
@@ -11,6 +10,6 @@ namespace FuturesBot.Models
         public decimal? TakeProfit { get; set; }
         public string Reason { get; set; } = string.Empty;
         public DateTime Time { get; set; } = DateTime.UtcNow;
-        public string Coin { get; set; } = string.Empty;
+        public string Symbol { get; set; } = string.Empty;
     }
 }

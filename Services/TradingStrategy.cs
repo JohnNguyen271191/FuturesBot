@@ -165,7 +165,7 @@ namespace FuturesBot.Services
                     {
                         Type = SignalType.None,
                         Reason = $"{coinInfo.Symbol}: Volume M15 yếu ({volUsd15:F0} USDT, vsMedian={ratioVsMedian:P0}) → bỏ qua để tránh slippage.",
-                        Coin = coinInfo.Symbol
+                        Symbol = coinInfo.Symbol
                     };
                 }
             }
@@ -177,7 +177,7 @@ namespace FuturesBot.Services
                     {
                         Type = SignalType.None,
                         Reason = $"{coinInfo.Symbol}: Altcoin volume M15 yếu ({volUsd15:F0} USDT, vsMedian={ratioVsMedian:P0}) → bỏ qua.",
-                        Coin = coinInfo.Symbol
+                        Symbol = coinInfo.Symbol
                     };
                 }
 
@@ -196,7 +196,7 @@ namespace FuturesBot.Services
                             {
                                 Type = SignalType.None,
                                 Reason = $"{coinInfo.Symbol}: Altcoin đang sideway, EMA34 H1 đi ngang (slope={slope:P2}) → chỉ trade khi trend rõ.",
-                                Coin = coinInfo.Symbol
+                                Symbol = coinInfo.Symbol
                             };
                         }
                     }
@@ -215,7 +215,7 @@ namespace FuturesBot.Services
                 {
                     Type = SignalType.None,
                     Reason = $"{coinInfo.Symbol}: Altcoin SIDEWAY mạnh trên {(sidewayH1 ? "H1" : "M15")} → NO TRADE.",
-                    Coin = coinInfo.Symbol
+                    Symbol = coinInfo.Symbol
                 };
             }
 
@@ -231,7 +231,7 @@ namespace FuturesBot.Services
                 {
                     Type = SignalType.None,
                     Reason = $"{coinInfo.Symbol}: Bỏ qua entry vì vừa có nến climax và giá quá xa EMA gần nhất → chờ retest EMA.",
-                    Coin = coinInfo.Symbol
+                    Symbol = coinInfo.Symbol
                 };
             }
 
@@ -334,7 +334,7 @@ namespace FuturesBot.Services
                     {
                         Type = SignalType.None,
                         Reason = $"{coinInfo.Symbol}: Altcoin sideway/pullback, H1+M15 chưa align trend rõ → bỏ qua.",
-                        Coin = coinInfo.Symbol
+                        Symbol = coinInfo.Symbol
                     };
                 }
             }
@@ -371,7 +371,7 @@ namespace FuturesBot.Services
                 {
                     Type = SignalType.None,
                     Reason = $"{coinInfo.Symbol}: Block LONG vì Market Structure Lower-High (LH={lowerHigh}, lastH={lastSwingHigh:F2} < prevH={prevSwingHigh:F2}).",
-                    Coin = coinInfo.Symbol
+                    Symbol = coinInfo.Symbol
                 };
             }
 
@@ -399,7 +399,7 @@ namespace FuturesBot.Services
                 {
                     Type = SignalType.None,
                     Reason = $"{coinInfo.Symbol}: Block SHORT vì Market Structure Higher-Low (HL={higherLow}, lastL={lastSwingLow:F2} > prevL={prevSwingLow:F2}).",
-                    Coin = coinInfo.Symbol
+                    Symbol = coinInfo.Symbol
                 };
             }
 
@@ -442,7 +442,7 @@ namespace FuturesBot.Services
                 {
                     Type = SignalType.None,
                     Reason = $"{coinInfo.Symbol}: Uptrend nhưng không có EMA hỗ trợ dưới giá để retest.",
-                    Coin = coinInfo.Symbol
+                    Symbol = coinInfo.Symbol
                 };
             }
 
@@ -480,7 +480,7 @@ namespace FuturesBot.Services
                 {
                     Type = SignalType.None,
                     Reason = $"{coinInfo.Symbol}: Long chưa đạt (touch={touchSupport}, reject={reject}, momentum={momentum}, volOk={volumeOkSoft}).",
-                    Coin = coinInfo.Symbol
+                    Symbol = coinInfo.Symbol
                 };
             }
 
@@ -510,7 +510,7 @@ namespace FuturesBot.Services
                 {
                     Type = SignalType.None,
                     Reason = $"{coinInfo.Symbol}: SL invalid cho long (entry={entry:F4}, sl={sl:F4}).",
-                    Coin = coinInfo.Symbol
+                    Symbol = coinInfo.Symbol
                 };
             }
 
@@ -524,7 +524,7 @@ namespace FuturesBot.Services
                 StopLoss = sl,
                 TakeProfit = tp,
                 Reason = $"{coinInfo.Symbol}: LONG – retest EMA support({nearestSupport:F6}) + (rejection/momentum) + SL dynamic (EMA/swing).",
-                Coin = coinInfo.Symbol
+                Symbol = coinInfo.Symbol
             };
         }
 
@@ -564,7 +564,7 @@ namespace FuturesBot.Services
                 {
                     Type = SignalType.None,
                     Reason = $"{coinInfo.Symbol}: Downtrend nhưng không có EMA kháng cự trên giá để retest.",
-                    Coin = coinInfo.Symbol
+                    Symbol = coinInfo.Symbol
                 };
             }
 
@@ -601,7 +601,7 @@ namespace FuturesBot.Services
                 {
                     Type = SignalType.None,
                     Reason = $"{coinInfo.Symbol}: Short chưa đạt (retest={retest}, reject={reject}, momentum={momentum}, volOk={volumeOkSoft}).",
-                    Coin = coinInfo.Symbol
+                    Symbol = coinInfo.Symbol
                 };
             }
 
@@ -628,7 +628,7 @@ namespace FuturesBot.Services
                 {
                     Type = SignalType.None,
                     Reason = $"{coinInfo.Symbol}: SL invalid cho short (entry={entry:F4}, sl={sl:F4}).",
-                    Coin = coinInfo.Symbol
+                    Symbol = coinInfo.Symbol
                 };
             }
 
@@ -642,7 +642,7 @@ namespace FuturesBot.Services
                 StopLoss = sl,
                 TakeProfit = tp,
                 Reason = $"{coinInfo.Symbol}: SHORT – retest EMA resistance({nearestResistance:F6}) + (rejection/momentum) + SL dynamic (EMA/swing).",
-                Coin = coinInfo.Symbol
+                Symbol = coinInfo.Symbol
             };
         }
 
@@ -701,7 +701,7 @@ namespace FuturesBot.Services
                 {
                     Type = SignalType.None,
                     Reason = $"{coinInfo.Symbol}: SIDEWAY – không có bias rõ (ema34={ema34:F2}, ema89={ema89:F2}, ema200={ema200:F2}).",
-                    Coin = coinInfo.Symbol
+                    Symbol = coinInfo.Symbol
                 };
             }
 
@@ -756,7 +756,7 @@ namespace FuturesBot.Services
                     StopLoss = sl,
                     TakeProfit = tp,
                     Reason = $"{coinInfo.Symbol}: SIDEWAY SCALP SHORT – bias down + retest EMA (near={nearestRes:F2}) + rejection + RSI/MACD quay đầu.",
-                    Coin = coinInfo.Symbol
+                    Symbol = coinInfo.Symbol
                 };
             }
 
@@ -810,7 +810,7 @@ namespace FuturesBot.Services
                     StopLoss = sl,
                     TakeProfit = tp,
                     Reason = $"{coinInfo.Symbol}: SIDEWAY SCALP LONG – bias up + retest EMA (near={nearestSup:F2}) + rejection + RSI/MACD quay đầu.",
-                    Coin = coinInfo.Symbol
+                    Symbol = coinInfo.Symbol
                 };
             }
         }

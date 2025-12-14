@@ -10,6 +10,5 @@
 
         public bool IsFlat => PositionAmt == 0;
         public bool IsLong => PositionAmt > 0;
-        public bool IsShort => PositionAmt < 0;
     }
 }

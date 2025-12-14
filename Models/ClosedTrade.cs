@@ -12,8 +12,5 @@ namespace FuturesBot.Models
         public DateTime OpenTime { get; set; }
         public DateTime CloseTime { get; set; }
         public decimal PnlUSDT { get; set; }
-        public decimal Realized { get; set; }
-        public decimal Commission { get; set; }
-        public decimal Funding { get; set; }
     }
 }
