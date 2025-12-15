@@ -21,8 +21,9 @@ namespace FuturesBot.Services
         private const int SlTpCheckEverySec = 30;    // check SL/TP từ sàn mỗi 30s
         private const int CandleFetchEverySec = 20;  // fetch candles mỗi 20s
 
-        private const decimal EarlyExitRR = 0.5m;
-        private const decimal HardReverseRR = 0.2m;
+        private const decimal EarlyExitRR = 1.0m;   // chỉ cắt khi đã >= 1R
+        private const decimal HardReverseRR = 0.5m; // chỉ cắt khi đã sai rõ
+
         private const decimal EmaBreakTolerance = 0.001m;
 
         private static readonly TimeSpan LimitTimeout = TimeSpan.FromMinutes(20);
@@ -335,8 +336,19 @@ namespace FuturesBot.Services
                     {
                         if ((isLongPosition && price <= sl) || (!isLongPosition && price >= sl))
                         {
-                            await _notify.SendAsync($"[{symbol}] SL HIT (theo giá) → đóng lệnh để chắc chắn.");
-                            await _exchange.ClosePositionAsync(symbol, qty);
+                            var det = await DetectManualSlTpAsync(symbol, isLongPosition, entry, pos);
+
+                            // Nếu SL vẫn còn trên sàn → để sàn xử
+                            if (det.Sl.HasValue)
+                            {
+                                await _notify.SendAsync($"[{symbol}] SL touched (MarkPrice) → waiting exchange SL.");
+                            }
+                            else
+                            {
+                                await _notify.SendAsync($"[{symbol}] SL touched but missing on exchange → force close.");
+                                await _exchange.ClosePositionAsync(symbol, qty);
+                            }
+
                             return;
                         }
                     }
@@ -396,19 +408,27 @@ namespace FuturesBot.Services
                         {
                             var (reverse, hardReverse) = CheckMomentumReversal(cachedCandles, isLongPosition, entry);
 
+                            // ===== EARLY EXIT (confirm, chỉ khi đã >= 1R) =====
                             if (rr >= EarlyExitRR && reverse)
                             {
-                                await _notify.SendAsync($"[{symbol}] EARLY EXIT rr={rr:F2} → đóng lệnh.");
+                                // confirm thêm 1 cây nữa
+                                var confirm = CheckMomentumReversal(cachedCandles, isLongPosition, entry);
+                                if (confirm.reverse)
+                                {
+                                    await _notify.SendAsync($"[{symbol}] EARLY EXIT CONFIRMED rr={rr:F2} → close.");
+                                    await _exchange.ClosePositionAsync(symbol, qty);
+                                    return;
+                                }
+                            }
+
+                            // ===== HARD REVERSE (chỉ khi đã sai rõ) =====
+                            if (hardReverse && rr <= -HardReverseRR)
+                            {
+                                await _notify.SendAsync($"[{symbol}] HARD REVERSE rr={rr:F2} → close.");
                                 await _exchange.ClosePositionAsync(symbol, qty);
                                 return;
                             }
 
-                            if (hardReverse && rr >= -HardReverseRR)
-                            {
-                                await _notify.SendAsync($"[{symbol}] HARD REVERSE rr={rr:F2} → đóng lệnh.");
-                                await _exchange.ClosePositionAsync(symbol, qty);
-                                return;
-                            }
                         }
 
                         if (hasSL)
