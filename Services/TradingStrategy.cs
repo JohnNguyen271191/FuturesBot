@@ -1,3 +1,6 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
 using FuturesBot.Config;
 using FuturesBot.IServices;
 using FuturesBot.Models;
@@ -15,9 +18,6 @@ namespace FuturesBot.Services
     /// - Momentum MACD + RSI (mềm hơn để không bỏ lỡ quá nhiều kèo đẹp)
     /// - Entry offset để tránh vào đúng đỉnh/đáy (giảm rủi ro)
     /// - SL theo EMA gần nhất (dynamic) + buffer (có thể kết hợp swing)
-    /// - Khi đang có vị thế:
-    ///       LONG  => nếu đóng dưới EMA dynamic M15 phía dưới giá (kèm tolerance) → EXIT LONG
-    ///       SHORT => nếu đóng trên EMA dynamic M15 phía trên giá (kèm tolerance) → EXIT SHORT
     /// - Sideway scalp:
     ///       + Dùng khi H1 có bias rõ nhưng M15 chưa align / đang sideway quanh EMA
     ///       + Chỉ trade theo hướng bias H1 (H1 down chỉ short, H1 up chỉ long)
@@ -31,6 +31,8 @@ namespace FuturesBot.Services
     ///       + Altcoin gặp sideway H1/M15 → NO TRADE để né nhiễu.
     /// - V3 bổ sung:
     ///       + Market Structure (Lower-High / Higher-Low) để khóa LONG/SHORT khi cấu trúc báo ngược.
+    ///
+    /// - MODE 1 (NEW): MarketOnStrongReject (dạng marketable LIMIT để khớp ngay, giảm miss kèo)
     /// </summary>
     public class TradingStrategy(IndicatorService indicators) : IStrategyService
     {
@@ -109,6 +111,19 @@ namespace FuturesBot.Services
         private const int StructureNeedSwings = 2;
         private const decimal StructureBreakToleranceMajor = 0.0020m; // 0.20%
         private const decimal StructureBreakToleranceAlt = 0.0030m;   // 0.30%
+
+        // ========================= MODE 1: MARKET ON STRONG REJECT =========================
+        // Bật mode 1 cho MAJOR (khuyến nghị). Alt có thể false để tránh nhiễu.
+        private const bool EnableMarketOnStrongRejectForMajor = true;
+        private const bool EnableMarketOnStrongRejectForAlt = false;
+
+        // Strong reject: wick/body >= 2, close nằm trong 25% range phía “đúng hướng”
+        private const decimal StrongRejectWickToBody = 2.0m;
+        private const decimal StrongRejectCloseInRange = 0.25m; // 25%
+        private const decimal StrongRejectMinVolVsMedian = 0.80m; // >=80% median volUsd
+
+        // Marketable LIMIT offset (đảm bảo khớp ngay như market, nhưng vẫn là LIMIT)
+        private const decimal MarketableLimitOffset = 0.0002m; // 0.02%
 
         // =====================================================================
         //                           ENTRY SIGNAL
@@ -340,8 +355,6 @@ namespace FuturesBot.Services
             }
 
             // =================== (FIX) Pullback volume filter ===================
-            // Pullback thường volume thấp. Không chặn cứng nữa.
-            // Nếu muốn filter nhẹ: yêu cầu lastVol >= 0.7*avgVol khi không có rejection.
             decimal avgVol = PriceActionHelper.AverageVolume(candles15m, i15 - 1, PullbackVolumeLookback);
             bool volumeOkSoft = avgVol <= 0 || last15.Volume >= avgVol * 0.7m;
 
@@ -486,7 +499,6 @@ namespace FuturesBot.Services
 
             // 5) ENTRY & SL
             decimal anchor = nearestSupport;
-            decimal entry = anchor * (1m + EntryOffsetPercent);
 
             // SL base theo EMA
             decimal slByEma = anchor * (1m - AnchorSlBufferPercent);
@@ -499,9 +511,26 @@ namespace FuturesBot.Services
                 if (swingLow > 0)
                 {
                     decimal slBySwing = swingLow * (1m - SwingStopExtraBufferPercent);
-                    // chọn cái "thấp hơn" để an toàn (nhưng vẫn phải hợp lý)
                     sl = Math.Min(slByEma, slBySwing);
                 }
+            }
+
+            // ===== MODE 1: Strong Reject => marketable LIMIT entry theo lastClose =====
+            bool allowMode1 = (coinInfo.IsMajor && EnableMarketOnStrongRejectForMajor) ||
+                              (!coinInfo.IsMajor && EnableMarketOnStrongRejectForAlt);
+
+            bool strongReject = allowMode1 && reject && IsStrongRejectionLong(candles15m, i15);
+
+            decimal entry;
+            if (strongReject)
+            {
+                // Buy LIMIT hơi cao hơn close để khớp ngay (marketable limit)
+                entry = last15.Close * (1m + MarketableLimitOffset);
+            }
+            else
+            {
+                // mặc định: entry theo anchor + offset (limit đẹp)
+                entry = anchor * (1m + EntryOffsetPercent);
             }
 
             if (sl >= entry || sl <= 0)
@@ -517,13 +546,14 @@ namespace FuturesBot.Services
             decimal risk = entry - sl;
             decimal tp = entry + risk * riskRewardTrend;
 
+            string modeTag = strongReject ? "MODE1(MARKETABLE_LIMIT)" : "LIMIT";
             return new TradeSignal
             {
                 Type = SignalType.Long,
                 EntryPrice = entry,
                 StopLoss = sl,
                 TakeProfit = tp,
-                Reason = $"{coinInfo.Symbol}: LONG – retest EMA support({nearestSupport:F6}) + (rejection/momentum) + SL dynamic (EMA/swing).",
+                Reason = $"{coinInfo.Symbol}: LONG – retest EMA support({nearestSupport:F6}) + (rejection/momentum) + SL dynamic (EMA/swing). Entry={modeTag}.",
                 Symbol = coinInfo.Symbol
             };
         }
@@ -607,7 +637,6 @@ namespace FuturesBot.Services
 
             // 5) ENTRY & SL
             decimal anchor = nearestResistance;
-            decimal entry = anchor * (1m - EntryOffsetPercent);
 
             decimal slByEma = anchor * (1m + AnchorSlBufferPercent);
 
@@ -618,8 +647,25 @@ namespace FuturesBot.Services
                 if (swingHigh > 0)
                 {
                     decimal slBySwing = swingHigh * (1m + SwingStopExtraBufferPercent);
-                    sl = Math.Max(slByEma, slBySwing); // chọn cao hơn để an toàn
+                    sl = Math.Max(slByEma, slBySwing);
                 }
+            }
+
+            // ===== MODE 1: Strong Reject => marketable LIMIT entry theo lastClose =====
+            bool allowMode1 = (coinInfo.IsMajor && EnableMarketOnStrongRejectForMajor) ||
+                              (!coinInfo.IsMajor && EnableMarketOnStrongRejectForAlt);
+
+            bool strongReject = allowMode1 && reject && IsStrongRejectionShort(candles15m, i15);
+
+            decimal entry;
+            if (strongReject)
+            {
+                // Sell LIMIT hơi thấp hơn close để khớp ngay (marketable limit)
+                entry = last15.Close * (1m - MarketableLimitOffset);
+            }
+            else
+            {
+                entry = anchor * (1m - EntryOffsetPercent);
             }
 
             if (sl <= entry)
@@ -635,13 +681,14 @@ namespace FuturesBot.Services
             decimal risk = sl - entry;
             decimal tp = entry - risk * riskRewardTrend;
 
+            string modeTag = strongReject ? "MODE1(MARKETABLE_LIMIT)" : "LIMIT";
             return new TradeSignal
             {
                 Type = SignalType.Short,
                 EntryPrice = entry,
                 StopLoss = sl,
                 TakeProfit = tp,
-                Reason = $"{coinInfo.Symbol}: SHORT – retest EMA resistance({nearestResistance:F6}) + (rejection/momentum) + SL dynamic (EMA/swing).",
+                Reason = $"{coinInfo.Symbol}: SHORT – retest EMA resistance({nearestResistance:F6}) + (rejection/momentum) + SL dynamic (EMA/swing). Entry={modeTag}.",
                 Symbol = coinInfo.Symbol
             };
         }
@@ -816,6 +863,61 @@ namespace FuturesBot.Services
         }
 
         // =====================================================================
+        //                    MODE 1 HELPERS: STRONG REJECTION
+        // =====================================================================
+
+        private bool IsStrongRejectionLong(IReadOnlyList<Candle> candles15m, int idxClosed)
+        {
+            if (idxClosed <= 0 || idxClosed >= candles15m.Count) return false;
+
+            var c = candles15m[idxClosed];
+            decimal range = c.High - c.Low;
+            if (range <= 0) return false;
+
+            decimal body = Math.Abs(c.Close - c.Open);
+            decimal bodySafe = Math.Max(body, range * 0.10m); // tránh body ~0 gây “ảo”
+            decimal lowerWick = Math.Min(c.Open, c.Close) - c.Low;
+
+            bool wickOk = lowerWick / bodySafe >= StrongRejectWickToBody;
+
+            // Close nằm sát HIGH (trong 25% range phía trên)
+            decimal closePosFromHigh = (c.High - c.Close) / range;
+            bool closeOk = closePosFromHigh <= StrongRejectCloseInRange;
+
+            // Volume không yếu so với median (tính theo volUsd để ổn định hơn)
+            decimal volUsd = c.Close * c.Volume;
+            decimal median = GetMedianVolUsd(candles15m, idxClosed, VolumeMedianLookback);
+            bool volOk = median <= 0 || (volUsd / median) >= StrongRejectMinVolVsMedian;
+
+            return wickOk && closeOk && volOk;
+        }
+
+        private bool IsStrongRejectionShort(IReadOnlyList<Candle> candles15m, int idxClosed)
+        {
+            if (idxClosed <= 0 || idxClosed >= candles15m.Count) return false;
+
+            var c = candles15m[idxClosed];
+            decimal range = c.High - c.Low;
+            if (range <= 0) return false;
+
+            decimal body = Math.Abs(c.Close - c.Open);
+            decimal bodySafe = Math.Max(body, range * 0.10m);
+            decimal upperWick = c.High - Math.Max(c.Open, c.Close);
+
+            bool wickOk = upperWick / bodySafe >= StrongRejectWickToBody;
+
+            // Close nằm sát LOW (trong 25% range phía dưới)
+            decimal closePosFromLow = (c.Close - c.Low) / range;
+            bool closeOk = closePosFromLow <= StrongRejectCloseInRange;
+
+            decimal volUsd = c.Close * c.Volume;
+            decimal median = GetMedianVolUsd(candles15m, idxClosed, VolumeMedianLookback);
+            bool volOk = median <= 0 || (volUsd / median) >= StrongRejectMinVolVsMedian;
+
+            return wickOk && closeOk && volOk;
+        }
+
+        // =====================================================================
         //                     HELPERS: CLIMAX / EMA / SIDEWAY
         // =====================================================================
 
@@ -901,12 +1003,6 @@ namespace FuturesBot.Services
             return distance >= OverextendedFromEmaPercent;
         }
 
-        /// <summary>
-        /// SIDEWAY mạnh khi đồng thời:
-        /// - EMA34 và EMA89 rất gần nhau
-        /// - EMA34 slope nhỏ
-        /// Và phải xảy ra liên tục SidewayConfirmBars cây để tránh false-positive.
-        /// </summary>
         private bool IsSidewayStrong(IReadOnlyList<Candle> candles, IReadOnlyList<decimal> ema34, IReadOnlyList<decimal> ema89)
         {
             if (candles.Count < SidewaySlopeLookback + SidewayConfirmBars + 5)
