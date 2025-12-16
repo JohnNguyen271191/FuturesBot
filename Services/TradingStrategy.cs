@@ -32,7 +32,8 @@ namespace FuturesBot.Services
     /// - V3 bổ sung:
     ///       + Market Structure (Lower-High / Higher-Low) để khóa LONG/SHORT khi cấu trúc báo ngược.
     ///
-    /// - MODE 1 (NEW): MarketOnStrongReject (dạng marketable LIMIT để khớp ngay, giảm miss kèo)
+    /// - MODE 1: MarketOnStrongReject (marketable LIMIT để khớp ngay, giảm miss kèo)
+    /// - MODE 2 (NEW): Pullback -> Reject -> Continuation (MAJOR only, SL tight)
     /// </summary>
     public class TradingStrategy(IndicatorService indicators) : IStrategyService
     {
@@ -84,7 +85,7 @@ namespace FuturesBot.Services
         private const decimal ClimaxVolumeMultiplier = 1.5m;
         private const decimal OverextendedFromEmaPercent = 0.01m; // 1% xa EMA gần nhất
 
-        // ========================= NEW: BTC vs ALT CONFIG ====================
+        // ========================= BTC vs ALT CONFIG ====================
 
         // Volume M15 ước lượng USDT = Close * Volume tối thiểu (ngưỡng mềm)
         private const decimal MinMajorVolumeUsd15m = 2_000_000m; // BTC/ETH
@@ -113,7 +114,6 @@ namespace FuturesBot.Services
         private const decimal StructureBreakToleranceAlt = 0.0030m;   // 0.30%
 
         // ========================= MODE 1: MARKET ON STRONG REJECT =========================
-        // Bật mode 1 cho MAJOR (khuyến nghị). Alt có thể false để tránh nhiễu.
         private const bool EnableMarketOnStrongRejectForMajor = true;
         private const bool EnableMarketOnStrongRejectForAlt = false;
 
@@ -124,6 +124,22 @@ namespace FuturesBot.Services
 
         // Marketable LIMIT offset (đảm bảo khớp ngay như market, nhưng vẫn là LIMIT)
         private const decimal MarketableLimitOffset = 0.0002m; // 0.02%
+
+        // ========================= MODE 2: PULLBACK -> REJECT -> CONTINUATION (NEW) =========================
+        private const bool EnableBreakdownContinuationForMajor = true;
+        private const bool EnableBreakoutContinuationForMajor = true;
+
+        private const int ContinuationLookback = 20;
+        private const decimal ContinuationBreakBuffer = 0.0012m;     // 0.12% phá rõ
+        private const decimal ContinuationPullbackBand = 0.0030m;    // 0.30% pullback nhỏ quanh level
+        private const decimal ContinuationMinVolVsMedian = 0.85m;    // >=85% median volUsd
+
+        private const decimal ContinuationMinRsiForShort = 20m;      // RSI quá thấp thì né short continuation
+        private const decimal ContinuationMaxRsiForLong = 80m;       // RSI quá cao thì né long continuation
+
+        private const decimal RiskRewardContinuationMajor = 1.3m;    // ăn continuation nhanh
+        private const decimal ContinuationTightSlBuffer = 0.0008m;   // 0.08% SL tight trên/ dưới nến reject
+        private const int ContinuationFindEventLookback = 12;        // tìm breakdown/breakout gần nhất trong N bar
 
         // =====================================================================
         //                           ENTRY SIGNAL
@@ -358,6 +374,44 @@ namespace FuturesBot.Services
             decimal avgVol = PriceActionHelper.AverageVolume(candles15m, i15 - 1, PullbackVolumeLookback);
             bool volumeOkSoft = avgVol <= 0 || last15.Volume >= avgVol * 0.7m;
 
+            // =================== MODE 2: PULLBACK -> REJECT -> CONTINUATION (MAJOR ONLY) ===================
+            if (isMajor)
+            {
+                if (EnableBreakdownContinuationForMajor &&
+                    (downTrend || h1BiasDown) &&
+                    !blockShortByStructure &&
+                    !extremeDump)
+                {
+                    var contShort = BuildBreakdownPullbackThenRejectShort(
+                        candles15m,
+                        i15,
+                        rsi15[i15],
+                        volUsd15,
+                        medianVolUsd,
+                        coinInfo);
+
+                    if (contShort.Type != SignalType.None)
+                        return contShort;
+                }
+
+                if (EnableBreakoutContinuationForMajor &&
+                    (upTrend || h1BiasUp) &&
+                    !blockLongByStructure &&
+                    !extremeUp)
+                {
+                    var contLong = BuildBreakoutPullbackThenRejectLong(
+                        candles15m,
+                        i15,
+                        rsi15[i15],
+                        volUsd15,
+                        medianVolUsd,
+                        coinInfo);
+
+                    if (contLong.Type != SignalType.None)
+                        return contLong;
+                }
+            }
+
             // =================== BUILD LONG / SHORT (THEO TREND MẠNH) =========
 
             if (upTrend && !blockLongByStructure)
@@ -417,6 +471,178 @@ namespace FuturesBot.Services
             }
 
             return new TradeSignal();
+        }
+
+        // =====================================================================
+        //                    MODE 2: PULLBACK -> REJECT -> CONTINUATION
+        // =====================================================================
+
+        private TradeSignal BuildBreakdownPullbackThenRejectShort(
+            IReadOnlyList<Candle> candles15m,
+            int i15,
+            decimal rsiNow,
+            decimal volUsd15,
+            decimal medianVolUsd,
+            CoinInfo coinInfo)
+        {
+            if (i15 < ContinuationLookback + 5) return new TradeSignal();
+
+            if (rsiNow < ContinuationMinRsiForShort) return new TradeSignal();
+
+            decimal ratio = medianVolUsd > 0 ? (volUsd15 / medianVolUsd) : 1m;
+            if (ratio < ContinuationMinVolVsMedian) return new TradeSignal();
+
+            var c = candles15m[i15];       // C (rejection)
+            var b = candles15m[i15 - 1];   // B (pullback)
+
+            // level = lowest low lookback trước đó (không tính B,C)
+            decimal level = FindLowestLow(candles15m, i15 - 2, ContinuationLookback);
+            if (level <= 0) return new TradeSignal();
+
+            // phải có breakdown event gần đây
+            int breakdownIdx = FindRecentBreakdownIndex(candles15m, i15 - 1, level, ContinuationFindEventLookback);
+            if (breakdownIdx < 0) return new TradeSignal();
+
+            // Pullback nhỏ chạm level (band)
+            bool pullbackTouch =
+                b.High >= level * (1m - ContinuationPullbackBand) &&
+                b.High <= level * (1m + ContinuationPullbackBand);
+
+            if (!pullbackTouch) return new TradeSignal();
+
+            // Nến C rejection tại level: lên chạm zone rồi đóng dưới level
+            bool reject =
+                c.High >= level * (1m - ContinuationPullbackBand) &&
+                c.Close < c.Open &&
+                c.Close < level;
+
+            if (!reject) return new TradeSignal();
+
+            // Tránh capitulation trên nến C
+            if (IsClimaxCandle(candles15m, i15)) return new TradeSignal();
+
+            // Entry: marketable LIMIT
+            decimal entry = c.Close * (1m - MarketableLimitOffset);
+
+            // SL tight: trên high nến C + buffer nhỏ
+            decimal sl = c.High * (1m + ContinuationTightSlBuffer);
+            if (sl <= entry) return new TradeSignal();
+
+            decimal risk = sl - entry;
+            decimal tp = entry - risk * RiskRewardContinuationMajor;
+
+            return new TradeSignal
+            {
+                Type = SignalType.Short,
+                EntryPrice = entry,
+                StopLoss = sl,
+                TakeProfit = tp,
+                Reason = $"{coinInfo.Symbol}: MODE2 PULLBACK SHORT – breakdownIdx={breakdownIdx}, pullback->reject @level={level:F2}, SL tight on reject-high, vsMedian={ratio:P0}, RSI={rsiNow:F1}.",
+                Symbol = coinInfo.Symbol
+            };
+        }
+
+        private TradeSignal BuildBreakoutPullbackThenRejectLong(
+            IReadOnlyList<Candle> candles15m,
+            int i15,
+            decimal rsiNow,
+            decimal volUsd15,
+            decimal medianVolUsd,
+            CoinInfo coinInfo)
+        {
+            if (i15 < ContinuationLookback + 5) return new TradeSignal();
+
+            if (rsiNow > ContinuationMaxRsiForLong) return new TradeSignal();
+
+            decimal ratio = medianVolUsd > 0 ? (volUsd15 / medianVolUsd) : 1m;
+            if (ratio < ContinuationMinVolVsMedian) return new TradeSignal();
+
+            var c = candles15m[i15];       // C (rejection)
+            var b = candles15m[i15 - 1];   // B (pullback)
+
+            decimal level = FindHighestHigh(candles15m, i15 - 2, ContinuationLookback);
+            if (level <= 0) return new TradeSignal();
+
+            int breakoutIdx = FindRecentBreakoutIndex(candles15m, i15 - 1, level, ContinuationFindEventLookback);
+            if (breakoutIdx < 0) return new TradeSignal();
+
+            bool pullbackTouch =
+                b.Low <= level * (1m + ContinuationPullbackBand) &&
+                b.Low >= level * (1m - ContinuationPullbackBand);
+
+            if (!pullbackTouch) return new TradeSignal();
+
+            bool reject =
+                c.Low <= level * (1m + ContinuationPullbackBand) &&
+                c.Close > c.Open &&
+                c.Close > level;
+
+            if (!reject) return new TradeSignal();
+
+            if (IsClimaxCandle(candles15m, i15)) return new TradeSignal();
+
+            decimal entry = c.Close * (1m + MarketableLimitOffset);
+
+            // SL tight: dưới low nến C + buffer nhỏ
+            decimal sl = c.Low * (1m - ContinuationTightSlBuffer);
+            if (sl >= entry || sl <= 0) return new TradeSignal();
+
+            decimal risk = entry - sl;
+            decimal tp = entry + risk * RiskRewardContinuationMajor;
+
+            return new TradeSignal
+            {
+                Type = SignalType.Long,
+                EntryPrice = entry,
+                StopLoss = sl,
+                TakeProfit = tp,
+                Reason = $"{coinInfo.Symbol}: MODE2 PULLBACK LONG – breakoutIdx={breakoutIdx}, pullback->reject @level={level:F2}, SL tight on reject-low, vsMedian={ratio:P0}, RSI={rsiNow:F1}.",
+                Symbol = coinInfo.Symbol
+            };
+        }
+
+        private int FindRecentBreakdownIndex(IReadOnlyList<Candle> candles, int endIdx, decimal level, int lookbackBars)
+        {
+            int start = Math.Max(0, endIdx - lookbackBars + 1);
+            for (int i = endIdx; i >= start; i--)
+            {
+                if (candles[i].Close < level * (1m - ContinuationBreakBuffer))
+                    return i;
+            }
+            return -1;
+        }
+
+        private int FindRecentBreakoutIndex(IReadOnlyList<Candle> candles, int endIdx, decimal level, int lookbackBars)
+        {
+            int start = Math.Max(0, endIdx - lookbackBars + 1);
+            for (int i = endIdx; i >= start; i--)
+            {
+                if (candles[i].Close > level * (1m + ContinuationBreakBuffer))
+                    return i;
+            }
+            return -1;
+        }
+
+        private decimal FindLowestLow(IReadOnlyList<Candle> candles, int endIdx, int lookback)
+        {
+            int start = Math.Max(0, endIdx - lookback + 1);
+            decimal min = decimal.MaxValue;
+            for (int i = start; i <= endIdx; i++)
+            {
+                if (candles[i].Low < min) min = candles[i].Low;
+            }
+            return min == decimal.MaxValue ? 0m : min;
+        }
+
+        private decimal FindHighestHigh(IReadOnlyList<Candle> candles, int endIdx, int lookback)
+        {
+            int start = Math.Max(0, endIdx - lookback + 1);
+            decimal max = 0m;
+            for (int i = start; i <= endIdx; i++)
+            {
+                if (candles[i].High > max) max = candles[i].High;
+            }
+            return max;
         }
 
         // =====================================================================
@@ -497,13 +723,10 @@ namespace FuturesBot.Services
                 };
             }
 
-            // 5) ENTRY & SL
             decimal anchor = nearestSupport;
 
-            // SL base theo EMA
             decimal slByEma = anchor * (1m - AnchorSlBufferPercent);
 
-            // OPTION: SL theo swing low (an toàn hơn)
             decimal sl = slByEma;
             if (UseSwingForTrendStop)
             {
@@ -515,7 +738,6 @@ namespace FuturesBot.Services
                 }
             }
 
-            // ===== MODE 1: Strong Reject => marketable LIMIT entry theo lastClose =====
             bool allowMode1 = (coinInfo.IsMajor && EnableMarketOnStrongRejectForMajor) ||
                               (!coinInfo.IsMajor && EnableMarketOnStrongRejectForAlt);
 
@@ -524,12 +746,10 @@ namespace FuturesBot.Services
             decimal entry;
             if (strongReject)
             {
-                // Buy LIMIT hơi cao hơn close để khớp ngay (marketable limit)
                 entry = last15.Close * (1m + MarketableLimitOffset);
             }
             else
             {
-                // mặc định: entry theo anchor + offset (limit đẹp)
                 entry = anchor * (1m + EntryOffsetPercent);
             }
 
@@ -600,20 +820,17 @@ namespace FuturesBot.Services
 
             decimal nearestResistance = resistances.Min();
 
-            // 2) retest
             bool retest =
                 nearestResistance > 0m &&
                 last15.High >= nearestResistance * (1 - EmaRetestBand) &&
                 last15.High <= nearestResistance * (1 + EmaRetestBand);
 
-            // 3) rejection
             bool reject =
                 nearestResistance > 0m &&
                 last15.Close < last15.Open &&
                 last15.High > nearestResistance &&
                 last15.Close < nearestResistance;
 
-            // 4) momentum mềm
             bool macdCrossDown = macd15[i15] < sig15[i15] && macd15[i15 - 1] >= sig15[i15 - 1];
             bool rsiBear = rsi15[i15] < RsiBearThreshold && rsi15[i15] <= rsi15[i15 - 1];
             bool rsiBearSoft = rsi15[i15] < 50m && rsi15[i15] <= rsi15[i15 - 1];
@@ -635,7 +852,6 @@ namespace FuturesBot.Services
                 };
             }
 
-            // 5) ENTRY & SL
             decimal anchor = nearestResistance;
 
             decimal slByEma = anchor * (1m + AnchorSlBufferPercent);
@@ -651,7 +867,6 @@ namespace FuturesBot.Services
                 }
             }
 
-            // ===== MODE 1: Strong Reject => marketable LIMIT entry theo lastClose =====
             bool allowMode1 = (coinInfo.IsMajor && EnableMarketOnStrongRejectForMajor) ||
                               (!coinInfo.IsMajor && EnableMarketOnStrongRejectForAlt);
 
@@ -660,7 +875,6 @@ namespace FuturesBot.Services
             decimal entry;
             if (strongReject)
             {
-                // Sell LIMIT hơi thấp hơn close để khớp ngay (marketable limit)
                 entry = last15.Close * (1m - MarketableLimitOffset);
             }
             else
@@ -718,11 +932,9 @@ namespace FuturesBot.Services
             decimal ema89 = ema89_15[i15];
             decimal ema200 = ema200_15[i15];
 
-            // 1) BIAS EMA 15M
             bool shortBias15 = ema34 <= ema89 && ema34 <= ema200;
             bool longBias15 = ema34 >= ema89 && ema34 >= ema200;
 
-            // 2) Ưu tiên bias theo H1
             bool shortBias;
             bool longBias;
 
@@ -875,16 +1087,14 @@ namespace FuturesBot.Services
             if (range <= 0) return false;
 
             decimal body = Math.Abs(c.Close - c.Open);
-            decimal bodySafe = Math.Max(body, range * 0.10m); // tránh body ~0 gây “ảo”
+            decimal bodySafe = Math.Max(body, range * 0.10m);
             decimal lowerWick = Math.Min(c.Open, c.Close) - c.Low;
 
             bool wickOk = lowerWick / bodySafe >= StrongRejectWickToBody;
 
-            // Close nằm sát HIGH (trong 25% range phía trên)
             decimal closePosFromHigh = (c.High - c.Close) / range;
             bool closeOk = closePosFromHigh <= StrongRejectCloseInRange;
 
-            // Volume không yếu so với median (tính theo volUsd để ổn định hơn)
             decimal volUsd = c.Close * c.Volume;
             decimal median = GetMedianVolUsd(candles15m, idxClosed, VolumeMedianLookback);
             bool volOk = median <= 0 || (volUsd / median) >= StrongRejectMinVolVsMedian;
@@ -906,7 +1116,6 @@ namespace FuturesBot.Services
 
             bool wickOk = upperWick / bodySafe >= StrongRejectWickToBody;
 
-            // Close nằm sát LOW (trong 25% range phía dưới)
             decimal closePosFromLow = (c.Close - c.Low) / range;
             bool closeOk = closePosFromLow <= StrongRejectCloseInRange;
 
