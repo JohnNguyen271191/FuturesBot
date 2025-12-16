@@ -178,7 +178,8 @@ static async Task RunSymbolWorkerAsync(
     // ==============================
     try
     {
-        await orderManager.AttachManualStateAsync(coinInfo.Symbol);
+        var posNow = await exchange.GetPositionAsync(coinInfo.Symbol);
+        await orderManager.AttachManualPositionAsync(posNow);
     }
     catch (Exception ex)
     {
@@ -203,7 +204,12 @@ static async Task RunSymbolWorkerAsync(
             if (DateTime.UtcNow - lastPosCheckUtc >= posCheckInterval)
             {
                 lastPosCheckUtc = DateTime.UtcNow;
-                await orderManager.AttachManualStateAsync(coinInfo.Symbol);
+
+                var pos = await exchange.GetPositionAsync(coinInfo.Symbol);
+                if (pos.PositionAmt != 0)
+                {
+                    await orderManager.AttachManualPositionAsync(pos);
+                }
             }
 
             // 2) ngủ tới gần lúc nến đóng (để entry chạy theo nhịp nến)
