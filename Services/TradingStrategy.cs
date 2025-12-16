@@ -34,6 +34,18 @@ namespace FuturesBot.Services
     ///
     /// - MODE 1: MarketOnStrongReject (marketable LIMIT để khớp ngay, giảm miss kèo)
     /// - MODE 2 (NEW): Pullback -> Reject -> Continuation (MAJOR only, SL tight)
+    ///
+    /// PATCH (anti-loss streak):
+    /// - Trend retest (LIMIT) ưu tiên BẮT BUỘC có rejection; chỉ cho phép “momentum thay reject”
+    ///   khi momentum thật sự mạnh (MACD cross + RSI cứng).
+    ///
+    /// PATCH (anti-squeeze SHORT):
+    /// - Không SHORT retest nếu nến vừa đóng là nến xanh mạnh (bullish impulse) ngay tại vùng retest,
+    ///   vì hay bị “kéo tiếp” -> quét SL.
+    ///
+    /// PATCH (anti-dump LONG):
+    /// - Không LONG retest nếu nến vừa đóng là nến đỏ mạnh (bearish impulse) ngay tại vùng retest,
+    ///   vì hay bị “đạp tiếp” -> quét SL.
     /// </summary>
     public class TradingStrategy(IndicatorService indicators) : IStrategyService
     {
@@ -140,6 +152,18 @@ namespace FuturesBot.Services
         private const decimal RiskRewardContinuationMajor = 1.3m;    // ăn continuation nhanh
         private const decimal ContinuationTightSlBuffer = 0.0008m;   // 0.08% SL tight trên/ dưới nến reject
         private const int ContinuationFindEventLookback = 12;        // tìm breakdown/breakout gần nhất trong N bar
+
+        // ========================= PATCH: MOMENTUM "HARD" (anti early entry) =========================
+        private const bool AllowMomentumInsteadOfReject = true;
+
+        // ========================= PATCH: ANTI-SQUEEZE / ANTI-DUMP =========================
+        private const bool EnableAntiSqueezeShort = true;
+        private const bool EnableAntiDumpLong = true;
+
+        private const decimal AntiImpulseBodyToRangeMin = 0.65m;      // body >= 65% range
+        private const decimal AntiImpulseCloseNearEdgeMax = 0.20m;    // close near high (bull) / near low (bear) within 20% range
+        private const decimal AntiImpulseMinVolVsMedian = 0.90m;      // volUsd >= 90% median (nếu có)
+        private const decimal AntiImpulseMaxDistToAnchor = 0.0025m;   // đang retest quanh anchor, dist <= 0.25%
 
         // =====================================================================
         //                           ENTRY SIGNAL
@@ -693,6 +717,17 @@ namespace FuturesBot.Services
                 last15.Low <= nearestSupport * (1 + EmaRetestBand) &&
                 last15.Low >= nearestSupport * (1 - EmaRetestBand);
 
+            // PATCH: ANTI-DUMP LONG (nến đỏ mạnh ngay vùng retest)
+            if (EnableAntiDumpLong && touchSupport && IsBearishImpulseAtRetest(candles15m, i15, nearestSupport))
+            {
+                return new TradeSignal
+                {
+                    Type = SignalType.None,
+                    Reason = $"{coinInfo.Symbol}: NO LONG – AntiDump: bearish impulse mạnh ngay vùng retest EMA({nearestSupport:F6}) → dễ bị đạp tiếp.",
+                    Symbol = coinInfo.Symbol
+                };
+            }
+
             // 3) rejection
             bool reject =
                 nearestSupport > 0m &&
@@ -700,25 +735,34 @@ namespace FuturesBot.Services
                 last15.Low < nearestSupport &&
                 last15.Close > nearestSupport;
 
-            // 4) momentum mềm
+            // 4) momentum
             bool macdCrossUp = macd15[i15] > sig15[i15] && macd15[i15 - 1] <= sig15[i15 - 1];
             bool rsiBull = rsi15[i15] > RsiBullThreshold && rsi15[i15] >= rsi15[i15 - 1];
+
             bool rsiBullSoft = rsi15[i15] > 50m && rsi15[i15] >= rsi15[i15 - 1];
             bool macdUpOrFlat = macd15[i15] >= macd15[i15 - 1];
 
-            bool momentum =
+            bool momentumSoft =
                 (macdCrossUp && rsiBull) ||
                 (rsiBull && macd15[i15] > 0) ||
                 (rsiBullSoft && macdUpOrFlat);
 
-            // Pullback volume: nếu volume yếu thì bắt buộc phải có rejection rõ
-            bool ok = touchSupport && (reject || (momentum && volumeOkSoft));
+            // PATCH: momentumHard mới được “thay reject”
+            bool momentumHard = macdCrossUp && rsiBull;
+
+            bool ok = touchSupport && reject;
+            if (!ok && AllowMomentumInsteadOfReject)
+            {
+                if (touchSupport && momentumHard && volumeOkSoft)
+                    ok = true;
+            }
+
             if (!ok)
             {
                 return new TradeSignal
                 {
                     Type = SignalType.None,
-                    Reason = $"{coinInfo.Symbol}: Long chưa đạt (touch={touchSupport}, reject={reject}, momentum={momentum}, volOk={volumeOkSoft}).",
+                    Reason = $"{coinInfo.Symbol}: Long chưa đạt (touch={touchSupport}, reject={reject}, momSoft={momentumSoft}, momHard={momentumHard}, volOk={volumeOkSoft}).",
                     Symbol = coinInfo.Symbol
                 };
             }
@@ -758,7 +802,7 @@ namespace FuturesBot.Services
                 return new TradeSignal
                 {
                     Type = SignalType.None,
-                    Reason = $"{coinInfo.Symbol}: SL invalid cho long (entry={entry:F4}, sl={sl:F4}).",
+                    Reason = $"{coinInfo.Symbol}: SL invalid cho long (entry={entry:F6}, sl={sl:F6}).",
                     Symbol = coinInfo.Symbol
                 };
             }
@@ -773,7 +817,7 @@ namespace FuturesBot.Services
                 EntryPrice = entry,
                 StopLoss = sl,
                 TakeProfit = tp,
-                Reason = $"{coinInfo.Symbol}: LONG – retest EMA support({nearestSupport:F6}) + (rejection/momentum) + SL dynamic (EMA/swing). Entry={modeTag}.",
+                Reason = $"{coinInfo.Symbol}: LONG – retest EMA support({nearestSupport:F6}) + reject (or momHard) + SL dynamic (EMA/swing). Entry={modeTag}.",
                 Symbol = coinInfo.Symbol
             };
         }
@@ -825,6 +869,17 @@ namespace FuturesBot.Services
                 last15.High >= nearestResistance * (1 - EmaRetestBand) &&
                 last15.High <= nearestResistance * (1 + EmaRetestBand);
 
+            // PATCH: ANTI-SQUEEZE SHORT (nến xanh mạnh ngay vùng retest)
+            if (EnableAntiSqueezeShort && retest && IsBullishImpulseAtRetest(candles15m, i15, nearestResistance))
+            {
+                return new TradeSignal
+                {
+                    Type = SignalType.None,
+                    Reason = $"{coinInfo.Symbol}: NO SHORT – AntiSqueeze: bullish impulse mạnh ngay vùng retest EMA({nearestResistance:F6}) → dễ bị kéo tiếp.",
+                    Symbol = coinInfo.Symbol
+                };
+            }
+
             bool reject =
                 nearestResistance > 0m &&
                 last15.Close < last15.Open &&
@@ -833,21 +888,31 @@ namespace FuturesBot.Services
 
             bool macdCrossDown = macd15[i15] < sig15[i15] && macd15[i15 - 1] >= sig15[i15 - 1];
             bool rsiBear = rsi15[i15] < RsiBearThreshold && rsi15[i15] <= rsi15[i15 - 1];
+
             bool rsiBearSoft = rsi15[i15] < 50m && rsi15[i15] <= rsi15[i15 - 1];
             bool macdDownOrFlat = macd15[i15] <= macd15[i15 - 1];
 
-            bool momentum =
+            bool momentumSoft =
                 (macdCrossDown && rsiBear) ||
                 (rsiBear && macd15[i15] < 0) ||
                 (rsiBearSoft && macdDownOrFlat);
 
-            bool ok = retest && (reject || (momentum && volumeOkSoft));
+            // PATCH: momentumHard mới được “thay reject”
+            bool momentumHard = macdCrossDown && rsiBear;
+
+            bool ok = retest && reject;
+            if (!ok && AllowMomentumInsteadOfReject)
+            {
+                if (retest && momentumHard && volumeOkSoft)
+                    ok = true;
+            }
+
             if (!ok)
             {
                 return new TradeSignal
                 {
                     Type = SignalType.None,
-                    Reason = $"{coinInfo.Symbol}: Short chưa đạt (retest={retest}, reject={reject}, momentum={momentum}, volOk={volumeOkSoft}).",
+                    Reason = $"{coinInfo.Symbol}: Short chưa đạt (retest={retest}, reject={reject}, momSoft={momentumSoft}, momHard={momentumHard}, volOk={volumeOkSoft}).",
                     Symbol = coinInfo.Symbol
                 };
             }
@@ -887,7 +952,7 @@ namespace FuturesBot.Services
                 return new TradeSignal
                 {
                     Type = SignalType.None,
-                    Reason = $"{coinInfo.Symbol}: SL invalid cho short (entry={entry:F4}, sl={sl:F4}).",
+                    Reason = $"{coinInfo.Symbol}: SL invalid cho short (entry={entry:F6}, sl={sl:F6}).",
                     Symbol = coinInfo.Symbol
                 };
             }
@@ -902,7 +967,7 @@ namespace FuturesBot.Services
                 EntryPrice = entry,
                 StopLoss = sl,
                 TakeProfit = tp,
-                Reason = $"{coinInfo.Symbol}: SHORT – retest EMA resistance({nearestResistance:F6}) + (rejection/momentum) + SL dynamic (EMA/swing). Entry={modeTag}.",
+                Reason = $"{coinInfo.Symbol}: SHORT – retest EMA resistance({nearestResistance:F6}) + reject (or momHard) + SL dynamic (EMA/swing). Entry={modeTag}.",
                 Symbol = coinInfo.Symbol
             };
         }
@@ -1124,6 +1189,84 @@ namespace FuturesBot.Services
             bool volOk = median <= 0 || (volUsd / median) >= StrongRejectMinVolVsMedian;
 
             return wickOk && closeOk && volOk;
+        }
+
+        // =====================================================================
+        //                     PATCH HELPERS: ANTI-IMPULSE AT RETEST
+        // =====================================================================
+
+        private bool IsBullishImpulseAtRetest(IReadOnlyList<Candle> candles15m, int idxClosed, decimal anchorResistance)
+        {
+            if (idxClosed <= 0 || idxClosed >= candles15m.Count) return false;
+
+            var c = candles15m[idxClosed];
+            if (anchorResistance <= 0) return false;
+
+            // đang retest quanh anchor?
+            decimal dist = Math.Abs(c.Close - anchorResistance) / anchorResistance;
+            if (dist > AntiImpulseMaxDistToAnchor) return false;
+
+            decimal range = c.High - c.Low;
+            if (range <= 0) return false;
+
+            bool bullish = c.Close > c.Open;
+            if (!bullish) return false;
+
+            decimal body = Math.Abs(c.Close - c.Open);
+            decimal bodyToRange = body / range;
+            if (bodyToRange < AntiImpulseBodyToRangeMin) return false;
+
+            // close near high
+            decimal closePosFromHigh = (c.High - c.Close) / range; // 0 = đóng đúng đỉnh
+            if (closePosFromHigh > AntiImpulseCloseNearEdgeMax) return false;
+
+            // volume confirm (nếu có median)
+            decimal volUsd = c.Close * c.Volume;
+            decimal median = GetMedianVolUsd(candles15m, idxClosed, VolumeMedianLookback);
+            if (median > 0)
+            {
+                decimal ratio = volUsd / median;
+                if (ratio < AntiImpulseMinVolVsMedian) return false;
+            }
+
+            return true;
+        }
+
+        private bool IsBearishImpulseAtRetest(IReadOnlyList<Candle> candles15m, int idxClosed, decimal anchorSupport)
+        {
+            if (idxClosed <= 0 || idxClosed >= candles15m.Count) return false;
+
+            var c = candles15m[idxClosed];
+            if (anchorSupport <= 0) return false;
+
+            // đang retest quanh anchor?
+            decimal dist = Math.Abs(c.Close - anchorSupport) / anchorSupport;
+            if (dist > AntiImpulseMaxDistToAnchor) return false;
+
+            decimal range = c.High - c.Low;
+            if (range <= 0) return false;
+
+            bool bearish = c.Close < c.Open;
+            if (!bearish) return false;
+
+            decimal body = Math.Abs(c.Close - c.Open);
+            decimal bodyToRange = body / range;
+            if (bodyToRange < AntiImpulseBodyToRangeMin) return false;
+
+            // close near low
+            decimal closePosFromLow = (c.Close - c.Low) / range; // 0 = đóng đúng đáy
+            if (closePosFromLow > AntiImpulseCloseNearEdgeMax) return false;
+
+            // volume confirm (nếu có median)
+            decimal volUsd = c.Close * c.Volume;
+            decimal median = GetMedianVolUsd(candles15m, idxClosed, VolumeMedianLookback);
+            if (median > 0)
+            {
+                decimal ratio = volUsd / median;
+                if (ratio < AntiImpulseMinVolVsMedian) return false;
+            }
+
+            return true;
         }
 
         // =====================================================================
