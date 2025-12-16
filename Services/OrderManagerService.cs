@@ -674,30 +674,6 @@ namespace FuturesBot.Services
             result.Sl = sl;
             result.Tp = tp;
 
-            // Debug nhẹ + throttle
-            if (!sl.HasValue || !tp.HasValue)
-            {
-                var now = DateTime.UtcNow;
-                if (_lastMissingLogUtc.TryGetValue(symbol, out var last) &&
-                    (now - last) < TimeSpan.FromSeconds(60))
-                {
-                    return result;
-                }
-                _lastMissingLogUtc[symbol] = now;
-
-                var sample = orders
-                    .Select(o =>
-                    {
-                        var trig = (o.StopPrice > 0 ? o.StopPrice : o.Price);
-                        return $"type={o.Type}, side={o.Side}, price={o.Price}, stop={o.StopPrice}, trig={trig}";
-                    })
-                    .Take(8);
-
-                await _notify.SendAsync(
-                    $"[{symbol}] Detect SL/TP missing. isLong={isLong}, entry={entryPriceFromCaller}, exEntry={exEntry}, mark={markPrice}, considered={result.ConsideredOrders}/{result.TotalOrders}\n" +
-                    string.Join("\n", sample));
-            }
-
             return result;
         }
 
