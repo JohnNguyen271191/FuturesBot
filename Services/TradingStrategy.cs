@@ -623,7 +623,8 @@ namespace FuturesBot.Services
                 StopLoss = sl,
                 TakeProfit = tp,
                 Reason = $"{coinInfo.Symbol}: MODE2 PULLBACK SHORT – pullback->reject @level={level:F2}, SL tight, vsMedian={ratio:P0}, RSI={rsiNow:F1}.",
-                Symbol = coinInfo.Symbol
+                Symbol = coinInfo.Symbol,
+                Mode = TradeMode.Mode2_Continuation
             };
         }
 
@@ -681,7 +682,8 @@ namespace FuturesBot.Services
                 StopLoss = sl,
                 TakeProfit = tp,
                 Reason = $"{coinInfo.Symbol}: MODE2 PULLBACK LONG – pullback->reject @level={level:F2}, SL tight, vsMedian={ratio:P0}, RSI={rsiNow:F1}.",
-                Symbol = coinInfo.Symbol
+                Symbol = coinInfo.Symbol,
+                Mode = TradeMode.Mode2_Continuation
             };
         }
 
@@ -940,7 +942,10 @@ namespace FuturesBot.Services
             decimal risk = entry - sl;
             decimal tp = entry + risk * rr;
 
-            string modeTag = strongReject ? "MODE1" : "LIMIT";
+            // ✅ MODE update: Mode1 khi strongReject, còn lại Trend
+            var mode = strongReject ? TradeMode.Mode1_StrongReject : TradeMode.Trend;
+            string modeTag = strongReject ? "MODE1" : "TREND_LIMIT";
+
             return new TradeSignal
             {
                 Type = SignalType.Long,
@@ -948,7 +953,8 @@ namespace FuturesBot.Services
                 StopLoss = sl,
                 TakeProfit = tp,
                 Reason = $"{coinInfo.Symbol}: V4 LONG – 2-step retest(A)+confirm(B) @EMA({anchor:F6}) + {(strongReject ? "StrongReject" : (momentumHard ? "MomHard" : "Reject"))}. Entry={modeTag}, RR={rr:F2}.",
-                Symbol = coinInfo.Symbol
+                Symbol = coinInfo.Symbol,
+                Mode = mode
             };
         }
 
@@ -1162,7 +1168,10 @@ namespace FuturesBot.Services
             decimal risk = sl - entry;
             decimal tp = entry - risk * rr;
 
-            string modeTag = strongReject ? "MODE1" : "LIMIT";
+            // ✅ MODE update: Mode1 khi strongReject, còn lại Trend
+            var mode = strongReject ? TradeMode.Mode1_StrongReject : TradeMode.Trend;
+            string modeTag = strongReject ? "MODE1" : "TREND_LIMIT";
+
             return new TradeSignal
             {
                 Type = SignalType.Short,
@@ -1170,7 +1179,8 @@ namespace FuturesBot.Services
                 StopLoss = sl,
                 TakeProfit = tp,
                 Reason = $"{coinInfo.Symbol}: V4 SHORT – 2-step retest(A)+confirm(B) @EMA({anchor:F6}) + {(strongReject ? "StrongReject" : (momentumHard ? "MomHard" : "Reject"))}. Entry={modeTag}, RR={rr:F2}.",
-                Symbol = coinInfo.Symbol
+                Symbol = coinInfo.Symbol,
+                Mode = mode
             };
         }
 
@@ -1281,7 +1291,8 @@ namespace FuturesBot.Services
                     StopLoss = sl,
                     TakeProfit = tp,
                     Reason = $"{coinInfo.Symbol}: SIDEWAY SCALP SHORT – retest EMA + reject + RSI/MACD quay đầu.",
-                    Symbol = coinInfo.Symbol
+                    Symbol = coinInfo.Symbol,
+                    Mode = TradeMode.Scalp
                 };
             }
 
@@ -1334,7 +1345,8 @@ namespace FuturesBot.Services
                     StopLoss = sl,
                     TakeProfit = tp,
                     Reason = $"{coinInfo.Symbol}: SIDEWAY SCALP LONG – retest EMA + reject + RSI/MACD quay đầu.",
-                    Symbol = coinInfo.Symbol
+                    Symbol = coinInfo.Symbol,
+                    Mode = TradeMode.Scalp
                 };
             }
         }
