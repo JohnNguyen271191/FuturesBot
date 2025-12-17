@@ -11,5 +11,6 @@ namespace FuturesBot.Models
         public string Reason { get; set; } = string.Empty;
         public DateTime Time { get; set; } = DateTime.UtcNow;
         public string Symbol { get; set; } = string.Empty;
+        public TradeMode Mode { get; set; } = TradeMode.None;
     }
 }
