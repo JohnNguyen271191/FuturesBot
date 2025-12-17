@@ -630,13 +630,17 @@ namespace FuturesBot.Services
             return true;
         }
 
+        /// <summary>
+        /// Net PnL trong khoảng thời gian:
+        /// - Realized + Funding: lấy từ /income
+        /// - Commission (fee): lấy từ /userTrades (bao gồm fee lúc OPEN + CLOSE + partial fills)
+        /// </summary>
         public async Task<NetPnlResult> GetNetPnlAsync(string symbol, DateTime fromUtc, DateTime? toUtc = null)
         {
             var result = new NetPnlResult();
-
             var to = toUtc ?? DateTime.UtcNow;
 
-            // Lấy income trong [from, to]
+            // 1) Realized + Funding từ income
             var incomeList = await GetIncomeAsync(symbol, fromUtc, to);
 
             foreach (var i in incomeList)
@@ -650,15 +654,17 @@ namespace FuturesBot.Services
                         result.Realized += i.Income;
                         break;
 
-                    case "COMMISSION":
-                        result.Commission += i.Income;
-                        break;
-
                     case "FUNDING_FEE":
                         result.Funding += i.Income;
                         break;
+
+                    // NOTE: bỏ COMMISSION ở income để tránh double-count / miss
+                    // Fee chuẩn nhất lấy từ userTrades
                 }
             }
+
+            // 2) Commission từ userTrades (fee lúc mở + đóng)
+            result.Commission = await GetCommissionFromUserTradesAsync(symbol, fromUtc, to);
 
             return result;
         }
@@ -837,7 +843,6 @@ namespace FuturesBot.Services
                 sb.Append(kv.Key).Append('=').Append(kv.Value);
             }
 
-            // IMPORTANT: do not append timestamp again here (already included in parameters)
             var queryString = sb.ToString();
             var signature = BinanceSignatureHelper.Sign(queryString, _config.ApiSecret);
             queryString += "&signature=" + signature;
@@ -868,7 +873,6 @@ namespace FuturesBot.Services
                 sb.Append(kv.Key).Append('=').Append(kv.Value);
             }
 
-            // IMPORTANT: do not append timestamp again here (already included in parameters)
             var queryString = sb.ToString();
             var signature = BinanceSignatureHelper.Sign(queryString, _config.ApiSecret);
             queryString += "&signature=" + signature;
@@ -933,6 +937,84 @@ namespace FuturesBot.Services
             }
 
             return list;
+        }
+
+        /// <summary>
+        /// Sum fee (commission) trong khoảng [fromUtc, toUtc] bằng /fapi/v1/userTrades
+        /// => bao gồm fee lúc mở lệnh + đóng lệnh + partial fills.
+        /// Map thẳng vào NetPnlResult.Commission (Binance fee thường là số âm).
+        /// </summary>
+        private async Task<decimal> GetCommissionFromUserTradesAsync(string symbol, DateTime fromUtc, DateTime toUtc)
+        {
+            if (_config.PaperMode) return 0m;
+
+            long startMs = new DateTimeOffset(fromUtc).ToUnixTimeMilliseconds();
+            long endMs = new DateTimeOffset(toUtc).ToUnixTimeMilliseconds();
+
+            const int limit = 1000;
+            decimal totalCommission = 0m;
+
+            // paginate bằng startTime (time của trade cuối + 1ms)
+            for (int guard = 0; guard < 20; guard++) // chống loop vô hạn
+            {
+                var query = new Dictionary<string, string>
+                {
+                    ["symbol"] = symbol,
+                    ["startTime"] = startMs.ToString(CultureInfo.InvariantCulture),
+                    ["endTime"] = endMs.ToString(CultureInfo.InvariantCulture),
+                    ["limit"] = limit.ToString(CultureInfo.InvariantCulture),
+                    ["recvWindow"] = "60000"
+                };
+
+                var json = await SignedGetAsync($"{_config.Urls.UserTradesUrl}", query);
+
+                using var doc = JsonDocument.Parse(json);
+                var root = doc.RootElement;
+
+                if (root.ValueKind != JsonValueKind.Array || root.GetArrayLength() == 0)
+                    break;
+
+                long lastTime = -1;
+
+                foreach (var el in root.EnumerateArray())
+                {
+                    long t = el.GetProperty("time").GetInt64();
+                    lastTime = Math.Max(lastTime, t);
+
+                    // filter chắc cú
+                    if (t < startMs || t > endMs) continue;
+
+                    // commission + asset
+                    var commStr = el.GetProperty("commission").GetString() ?? "0";
+                    var asset = el.GetProperty("commissionAsset").GetString() ?? "USDT";
+
+                    if (!decimal.TryParse(commStr, NumberStyles.Float, CultureInfo.InvariantCulture, out var comm))
+                        continue;
+
+                    // USDT-M futures thường fee = USDT. Nếu asset khác USDT, log để biết (khỏi convert bậy).
+                    if (!asset.Equals("USDT", StringComparison.OrdinalIgnoreCase))
+                    {
+                        await _slack.SendAsync($"[WARN] {symbol} commissionAsset={asset} (comm={commStr}) -> skip (no convert).");
+                        continue;
+                    }
+
+                    totalCommission += comm; // Binance trả fee thường là số âm
+                }
+
+                // nếu ít hơn limit => hết data
+                if (root.GetArrayLength() < limit)
+                    break;
+
+                // nếu không tăng được lastTime => dừng tránh loop
+                if (lastTime <= 0 || lastTime < startMs)
+                    break;
+
+                // next page
+                startMs = lastTime + 1;
+                if (startMs > endMs) break;
+            }
+
+            return totalCommission;
         }
 
         private async Task CancelAlgoOrderByIdAsync(long algoId)
