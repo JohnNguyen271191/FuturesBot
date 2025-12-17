@@ -17,6 +17,7 @@ namespace FuturesBot.Services
     /// 4) Anti-impulse: check ở nến A (retest) thay vì nến B (confirm)
     /// 5) Max distance to anchor: tránh entry trễ / RR xấu
     /// 6) RSI cap cho trend retest: tránh long quá nóng / short quá quá bán
+    /// 7) (NEW) Anti-late entry near recent extremum: tránh SHORT sát đáy / LONG sát đỉnh (case DOT)
     ///
     /// NOTE: dùng NẾN ĐÃ ĐÓNG (Count - 2)
     /// </summary>
@@ -108,6 +109,14 @@ namespace FuturesBot.Services
         // ========================= V4: MAX DISTANCE TO ANCHOR =========================
         private const decimal MaxEntryDistanceToAnchorMajor = 0.0035m; // 0.35%
         private const decimal MaxEntryDistanceToAnchorAlt = 0.0050m;   // 0.50%
+
+        // ========================= (NEW) ANTI-LATE ENTRY NEAR EXTREMUM =========================
+        // Case DOT: downtrend nhưng bot short sát đáy -> dễ hồi kỹ thuật quét SL.
+        private const int RecentExtremumLookback = 30;                // ~ 7.5h trên M15
+        private const decimal MinDistFromRecentLowMajor = 0.0040m;    // 0.40%
+        private const decimal MinDistFromRecentLowAlt = 0.0060m;      // 0.60%
+        private const decimal MinDistFromRecentHighMajor = 0.0040m;   // 0.40%
+        private const decimal MinDistFromRecentHighAlt = 0.0060m;     // 0.60%
 
         // ========================= SIDEWAY FILTER (FIX: bớt over-trigger) =========================
         private const int SidewaySlopeLookback = 10;
@@ -420,7 +429,6 @@ namespace FuturesBot.Services
             }
 
             // =================== V4 TREND STRENGTH FILTER (chỉ áp cho TREND TRADE) ===================
-            // Nếu trend đúng nhưng EMA separation + slope yếu => dễ chop => bỏ để tăng winrate
             bool trendStrengthOk = true;
             if (upTrend || downTrend)
             {
@@ -750,7 +758,7 @@ namespace FuturesBot.Services
             bool closeBackAbove = B.Close >= anchor * (1m + confirmBeyond);
             bool breakSmall = B.High > A.High;
 
-            // 5) Reject truyền thống (wick xuyên anchor rồi đóng trên) - ưu tiên trên B
+            // 5) Reject truyền thống
             bool rejectB =
                 bullishB &&
                 B.Low < anchor &&
@@ -762,7 +770,6 @@ namespace FuturesBot.Services
 
             bool bodyStrongB = IsBodyStrong(B, ConfirmBodyToRangeMin);
 
-            // V4: momentumHard chỉ hợp lệ khi confirm candle B mạnh + đóng vượt anchor rõ
             bool momentumHard = macdCrossUp && rsiBull && bodyStrongB && closeBackAbove;
 
             // 7) Điều kiện vào lệnh: 2-step + (rejectB hoặc momentumHard)
@@ -770,7 +777,6 @@ namespace FuturesBot.Services
 
             if (!ok && AllowMomentumInsteadOfReject)
             {
-                // cho phép thay reject bằng momentumHard (nhưng vẫn yêu cầu 2-step confirm)
                 ok = touchA && bullishB && closeBackAbove && breakSmall && momentumHard && volumeOkSoft;
             }
 
@@ -779,7 +785,7 @@ namespace FuturesBot.Services
                 return new TradeSignal
                 {
                     Type = SignalType.None,
-                    Reason = $"{coinInfo.Symbol}: V4 Long chưa đạt (touchA={touchA}, bullishB={bullishB}, close>{confirmBeyond:P2}={closeBackAbove}, break={breakSmall}, rejectB={rejectB}, momHard={momentumHard}, volOk={volumeOkSoft}).",
+                    Reason = $"{coinInfo.Symbol}: V4 Long chưa đạt (touchA={touchA}, bullishB={bullishB}, closeBackAbove={closeBackAbove}, break={breakSmall}, rejectB={rejectB}, momHard={momentumHard}, volOk={volumeOkSoft}).",
                     Symbol = coinInfo.Symbol
                 };
             }
@@ -821,6 +827,18 @@ namespace FuturesBot.Services
                         Symbol = coinInfo.Symbol
                     };
                 }
+            }
+
+            // (NEW) Anti-late entry near recent HIGH (tránh long sát đỉnh)
+            decimal minDistHigh = coinInfo.IsMajor ? MinDistFromRecentHighMajor : MinDistFromRecentHighAlt;
+            if (IsTooCloseToRecentHigh(candles15m, iB, entry, RecentExtremumLookback, minDistHigh))
+            {
+                return new TradeSignal
+                {
+                    Type = SignalType.None,
+                    Reason = $"{coinInfo.Symbol}: V4 NO LONG – Entry quá gần recent HIGH (lookback={RecentExtremumLookback}, minDist={minDistHigh:P2}) → tránh đu đỉnh.",
+                    Symbol = coinInfo.Symbol
+                };
             }
 
             if (sl >= entry || sl <= 0)
@@ -954,7 +972,7 @@ namespace FuturesBot.Services
                 return new TradeSignal
                 {
                     Type = SignalType.None,
-                    Reason = $"{coinInfo.Symbol}: V4 Short chưa đạt (touchA={touchA}, bearishB={bearishB}, close>{confirmBeyond:P2}Below={closeBackBelow}, break={breakSmall}, rejectB={rejectB}, momHard={momentumHard}, volOk={volumeOkSoft}).",
+                    Reason = $"{coinInfo.Symbol}: V4 Short chưa đạt (touchA={touchA}, bearishB={bearishB}, closeBackBelow={closeBackBelow}, break={breakSmall}, rejectB={rejectB}, momHard={momentumHard}, volOk={volumeOkSoft}).",
                     Symbol = coinInfo.Symbol
                 };
             }
@@ -996,6 +1014,18 @@ namespace FuturesBot.Services
                         Symbol = coinInfo.Symbol
                     };
                 }
+            }
+
+            // (NEW) Anti-late entry near recent LOW (tránh short sát đáy)
+            decimal minDistLow = coinInfo.IsMajor ? MinDistFromRecentLowMajor : MinDistFromRecentLowAlt;
+            if (IsTooCloseToRecentLow(candles15m, iB, entry, RecentExtremumLookback, minDistLow))
+            {
+                return new TradeSignal
+                {
+                    Type = SignalType.None,
+                    Reason = $"{coinInfo.Symbol}: V4 NO SHORT – Entry quá gần recent LOW (lookback={RecentExtremumLookback}, minDist={minDistLow:P2}) → tránh short đáy (case DOT).",
+                    Symbol = coinInfo.Symbol
+                };
             }
 
             if (sl <= entry)
@@ -1561,6 +1591,44 @@ namespace FuturesBot.Services
 
             decimal slope = Math.Abs(end - start) / start;
             return slope >= minAbsSlopeRatio;
+        }
+
+        // =====================================================================
+        //                      (NEW) ANTI-LATE ENTRY HELPERS
+        // =====================================================================
+
+        private bool IsTooCloseToRecentLow(IReadOnlyList<Candle> candles, int idxClosed, decimal entry, int lookback, decimal minDistRatio)
+        {
+            if (entry <= 0 || candles == null || candles.Count == 0) return false;
+            int end = Math.Min(idxClosed, candles.Count - 1);
+            int start = Math.Max(0, end - lookback + 1);
+
+            decimal low = decimal.MaxValue;
+            for (int i = start; i <= end; i++)
+                low = Math.Min(low, candles[i].Low);
+
+            if (low <= 0 || low == decimal.MaxValue) return false;
+
+            // entry gần đáy: (entry - low)/low < minDist => bỏ
+            decimal dist = (entry - low) / low;
+            return dist >= 0m && dist < minDistRatio;
+        }
+
+        private bool IsTooCloseToRecentHigh(IReadOnlyList<Candle> candles, int idxClosed, decimal entry, int lookback, decimal minDistRatio)
+        {
+            if (entry <= 0 || candles == null || candles.Count == 0) return false;
+            int end = Math.Min(idxClosed, candles.Count - 1);
+            int start = Math.Max(0, end - lookback + 1);
+
+            decimal high = 0m;
+            for (int i = start; i <= end; i++)
+                high = Math.Max(high, candles[i].High);
+
+            if (high <= 0) return false;
+
+            // entry gần đỉnh: (high - entry)/high < minDist => bỏ
+            decimal dist = (high - entry) / high;
+            return dist >= 0m && dist < minDistRatio;
         }
     }
 }
