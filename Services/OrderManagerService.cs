@@ -12,11 +12,6 @@ namespace FuturesBot.Services
 {
     /// <summary>
     /// OrderManagerService - WINRATE + FLEX EXIT (giống trade tay) + MODE AWARE
-    ///
-    /// Update theo mode (signal.Mode):
-    /// - Trend: giữ logic "ăn đều", protect sớm, time-stop vừa phải.
-    /// - Scalp: protect sớm hơn + quick take dễ hơn + time-stop ngắn hơn.
-    /// - Mode2_Continuation: ưu tiên hit nhanh, SL/TP thường tight => protect & time-stop nhanh, danger cắt sớm hơn.
     /// </summary>
     public class OrderManagerService
     {
@@ -29,7 +24,7 @@ namespace FuturesBot.Services
         private const int SlTpCheckEverySec = 30;
         private const int CandleFetchEverySec = 20;
 
-        private static readonly TimeSpan LimitTimeout = TimeSpan.FromMinutes(20);
+        private static readonly TimeSpan DefaultLimitTimeout = TimeSpan.FromMinutes(20);
 
         // Grace sau fill (sàn chưa sync kịp algoOrders)
         private const int SlTpGraceAfterFillSec = 8;
@@ -92,17 +87,16 @@ namespace FuturesBot.Services
             // EMA / boundary
             public decimal EmaBreakTolerance { get; init; }
 
-            // Limit monitoring timeout (mode1/mode2 thường fill nhanh)
+            // Limit monitoring timeout
             public TimeSpan LimitTimeout { get; init; }
 
             public string Tag => Mode.ToString();
 
             public static ModeProfile For(TradeMode mode)
             {
-                // Bạn có thể tinh chỉnh numbers này theo đúng “gu” của bạn.
                 return mode switch
                 {
-                    // ====== SCALP: hit nhanh, bảo toàn vốn cực sớm ======
+                    // ====== SCALP ======
                     TradeMode.Scalp => new ModeProfile
                     {
                         Mode = mode,
@@ -118,7 +112,7 @@ namespace FuturesBot.Services
                         LimitTimeout = TimeSpan.FromMinutes(10),
                     },
 
-                    // ====== MODE2 CONTINUATION: thường SL tight, target vừa ======
+                    // ====== MODE2 CONTINUATION ======
                     TradeMode.Mode2_Continuation => new ModeProfile
                     {
                         Mode = mode,
@@ -134,7 +128,7 @@ namespace FuturesBot.Services
                         LimitTimeout = TimeSpan.FromMinutes(8),
                     },
 
-                    // ====== TREND (default): ăn đều + bền ======
+                    // ====== TREND (default) ======
                     _ => new ModeProfile
                     {
                         Mode = TradeMode.Trend,
@@ -147,7 +141,7 @@ namespace FuturesBot.Services
                         TimeStopMinRR = 0.20m,
                         SafetyTpRR = DefaultSafetyTpRR,
                         EmaBreakTolerance = DefaultEmaBreakTolerance,
-                        LimitTimeout = LimitTimeout,
+                        LimitTimeout = DefaultLimitTimeout,
                     }
                 };
             }
@@ -195,7 +189,7 @@ namespace FuturesBot.Services
                     await Task.Delay(MonitorIntervalMs);
 
                     var elapsed = DateTime.UtcNow - startTime;
-                    if (elapsed > profile.LimitTimeout)
+                    if (elapsed > profile.LimitTimeout) // ✅ FIX: dùng profile.LimitTimeout (instance)
                     {
                         await _notify.SendAsync(
                             $"[{symbol}] LIMIT quá {profile.LimitTimeout.TotalMinutes:F0} phút chưa khớp → cancel open orders và stop LIMIT monitor.");
@@ -236,9 +230,6 @@ namespace FuturesBot.Services
 
                     decimal entry = signal.EntryPrice ?? lastClosed.Close;
 
-                    // Mode-aware boundary:
-                    // - Trend/Scalp: dùng "nearest invalidation EMA" theo entry (dynamic)
-                    // - Mode2_Continuation: vẫn dùng dynamic EMA nhưng tolerance theo profile (thường tight hơn)
                     decimal boundary = isLong
                         ? GetDynamicBoundaryForLong(entry, ema34, ema89, ema200)
                         : GetDynamicBoundaryForShort(entry, ema34, ema89, ema200);
@@ -295,8 +286,6 @@ namespace FuturesBot.Services
             decimal tp = signal.TakeProfit ?? 0m;
 
             bool missingNotified = false;
-
-            bool tpInitialized = false;
             bool autoTpPlaced = false;
 
             DateTime lastSlTpCheckUtc = DateTime.MinValue;
@@ -363,7 +352,6 @@ namespace FuturesBot.Services
                         {
                             tp = det.Tp.Value;
                             hasTP = true;
-                            tpInitialized = true;
                             await _notify.SendAsync($"[{symbol}] Sync TP từ sàn → TP={Math.Round(tp, 6)}");
                         }
                     }
@@ -418,10 +406,7 @@ namespace FuturesBot.Services
                             if (!ok)
                                 await _notify.SendAsync($"[{symbol}] SAFETY-TP FAILED → tp={Math.Round(safetyTp, 6)}, qty={absQty}");
                             else
-                            {
                                 autoTpPlaced = true;
-                                tpInitialized = true;
-                            }
                         }
                     }
 
@@ -451,11 +436,9 @@ namespace FuturesBot.Services
                         var c0 = cachedCandles[^2]; // last closed
                         var c1 = cachedCandles[^3];
 
-                        // timeStop anchor: openTime của last closed đầu tiên sau khi monitor start
                         if (!timeStopAnchorUtc.HasValue)
                             timeStopAnchorUtc = c0.OpenTime;
 
-                        // EMA boundary
                         decimal ema34 = ComputeEmaLast(cachedCandles, 34);
                         decimal ema89 = ComputeEmaLast(cachedCandles, 89);
                         decimal ema200 = ComputeEmaLast(cachedCandles, 200);
@@ -470,7 +453,7 @@ namespace FuturesBot.Services
 
                         bool weakening = IsWeakeningAfterMove(cachedCandles, isLongPosition);
 
-                        // ===== TIME-STOP (MODE AWARE) =====
+                        // ===== TIME-STOP =====
                         if (!timeStopTriggered && timeStopAnchorUtc.HasValue)
                         {
                             int barsPassed = CountClosedBarsSince(timeStopAnchorUtc.Value, c0.OpenTime, 15);
@@ -478,14 +461,14 @@ namespace FuturesBot.Services
                             {
                                 timeStopTriggered = true;
                                 await _notify.SendAsync(
-                                    $"[{symbol}] TIME-STOP: {barsPassed} nến M15 mà rr={rr:F2} < {profile.TimeStopMinRR:F2}R → close (kèo lỳ) | mode={profile.Tag}");
+                                    $"[{symbol}] TIME-STOP: {barsPassed} nến M15 mà rr={rr:F2} < {profile.TimeStopMinRR:F2}R → close | mode={profile.Tag}");
                                 await _exchange.ClosePositionAsync(symbol, qty);
                                 await SafeCancelLeftoverProtectiveAsync(symbol);
                                 return;
                             }
                         }
 
-                        // ===== Profit protect (MODE AWARE) =====
+                        // ===== Profit protect =====
                         if (rr >= profile.ProtectAtRR && hasSL && IsValidStopLoss(sl, isLongPosition, entry))
                         {
                             decimal targetSL = GetBreakEvenLockSL(entry, sl, risk, isLongPosition, profile.BreakEvenBufferR);
@@ -506,19 +489,19 @@ namespace FuturesBot.Services
                             }
                         }
 
-                        // ===== Quick take (MODE AWARE) =====
+                        // ===== Quick take =====
                         if (rr >= profile.QuickTakeMinRR && weakening)
                         {
                             if (rr >= profile.QuickTakeGoodRR || danger || IsOppositeStrongCandle(c0, isLongPosition))
                             {
-                                await _notify.SendAsync($"[{symbol}] QUICK TAKE: rr={rr:F2}, weakening/danger → close | mode={profile.Tag}");
+                                await _notify.SendAsync($"[{symbol}] QUICK TAKE: rr={rr:F2} → close | mode={profile.Tag}");
                                 await _exchange.ClosePositionAsync(symbol, qty);
                                 await SafeCancelLeftoverProtectiveAsync(symbol);
                                 return;
                             }
                         }
 
-                        // ===== Danger cut (MODE AWARE) =====
+                        // ===== Danger cut =====
                         if (rr <= profile.DangerCutIfRRBelow && danger)
                         {
                             await _notify.SendAsync($"[{symbol}] DANGER CUT: rr={rr:F2} + danger → close | mode={profile.Tag}");
@@ -575,7 +558,7 @@ namespace FuturesBot.Services
         }
 
         // ============================================================
-        //          MANUAL ATTACH POSITION (AUTO SAFETY TP) - MODE DEFAULT TREND
+        //          MANUAL ATTACH POSITION (AUTO SAFETY TP) - TREND DEFAULT
         // ============================================================
 
         public async Task AttachManualPositionAsync(PositionInfo pos)
@@ -598,7 +581,6 @@ namespace FuturesBot.Services
             decimal? sl = det.Sl;
             decimal? tp = det.Tp;
 
-            // manual attach: mặc định TREND profile (an toàn)
             var profile = ModeProfile.For(TradeMode.Trend);
 
             if (!tp.HasValue && sl.HasValue && entry > 0)
@@ -840,7 +822,7 @@ namespace FuturesBot.Services
         }
 
         // ============================================================
-        //              FLEX EXIT HELPERS (giống trade tay)
+        //              FLEX EXIT HELPERS
         // ============================================================
 
         private static decimal GetBreakEvenLockSL(decimal entry, decimal currentSL, decimal risk, bool isLong, decimal breakEvenBufferR)
@@ -954,7 +936,6 @@ namespace FuturesBot.Services
             return hadMove && score >= 2;
         }
 
-        // Count closed bars between two candle open times (assume fixed timeframe minutes)
         private static int CountClosedBarsSince(DateTime anchorOpenTime, DateTime lastClosedOpenTime, int timeframeMinutes)
         {
             if (timeframeMinutes <= 0) timeframeMinutes = 15;
@@ -965,7 +946,7 @@ namespace FuturesBot.Services
         }
 
         // ============================================================
-        //                     UPDATE STOPLOSS (TRAILING)
+        //                     UPDATE STOPLOSS
         // ============================================================
 
         private async Task<DateTime> UpdateStopLossAsync(
@@ -980,6 +961,10 @@ namespace FuturesBot.Services
             await _notify.SendAsync($"[{symbol}] Trailing SL update → {Math.Round(newSL, 6)}");
 
             await _exchange.CancelStopLossOrdersAsync(symbol);
+
+            // ✅ FIX CS8602: guard currentPos
+            if (currentPos == null)
+                currentPos = await _exchange.GetPositionAsync(symbol);
 
             decimal qty = Math.Abs(currentPos?.PositionAmt ?? 0m);
             string posSide = isLong ? "LONG" : "SHORT";
