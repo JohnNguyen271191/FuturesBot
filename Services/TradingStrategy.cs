@@ -792,7 +792,7 @@ namespace FuturesBot.Services
                 A.Low <= anchor * (1 + EmaRetestBand) &&
                 A.Low >= anchor * (1 - EmaRetestBand);
 
-            // 3) Anti-dump: check bearish impulse ở nến A (rất quan trọng V4)
+            // 3) Anti-dump: check bearish impulse ở nến A
             if (EnableAntiDumpLong && touchA && IsBearishImpulseAtRetest(candles15m, iA, anchor))
             {
                 return new TradeSignal

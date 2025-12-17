@@ -1,8 +1,4 @@
-using System;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading.Tasks;
 using FuturesBot.Config;
 using FuturesBot.IServices;
 using FuturesBot.Models;
@@ -948,12 +944,6 @@ namespace FuturesBot.Services
             try
             {
                 await _exchange.CancelAllOpenOrdersAsync(symbol);
-            }
-            catch { /* ignore */ }
-
-            try
-            {
-                await _exchange.CancelAllAlgoOrdersAsync(symbol);
             }
             catch { /* ignore */ }
 
