@@ -18,6 +18,8 @@ namespace FuturesBot.Services
     /// 5) Max distance to anchor: tránh entry trễ / RR xấu
     /// 6) RSI cap cho trend retest: tránh long quá nóng / short quá quá bán
     /// 7) (NEW) Anti-late entry near recent extremum: tránh SHORT sát đáy / LONG sát đỉnh (case DOT)
+    /// 8) (NEW) HUMAN-LIKE FILTER: tránh vào kèo sát đáy/đỉnh + WAIT danger zone (giống trade tay)
+    /// 9) (NEW) DYNAMIC RR: ưu tiên hitrate (RR thấp khi trend vừa/không quá khỏe; RR cao khi trend rất khỏe)
     ///
     /// NOTE: dùng NẾN ĐÃ ĐÓNG (Count - 2)
     /// </summary>
@@ -169,6 +171,31 @@ namespace FuturesBot.Services
         private const decimal AntiImpulseMinVolVsMedian = 0.90m;
         private const decimal AntiImpulseMaxDistToAnchor = 0.0025m;
 
+        // ========================= HUMAN-LIKE FILTER (BOT GIỐNG TAY) =========================
+        private const bool EnableHumanLikeFilter = true;
+
+        private const decimal DangerZoneBottomRatio = 0.30m;  // bottom 30% recent range -> WAIT (SHORT)
+        private const decimal DangerZoneTopRatio = 0.30m;     // top 30% recent range -> WAIT (LONG)
+        private const int HumanRecentRangeLookback = 40;      // ~10h M15
+
+        private const int ExtremumTouchLookback = 30;         // ~7.5h
+        private const int MinTouchesToBlock = 2;              // >=2 touches -> block
+        private const decimal ExtremumTouchEpsMajor = 0.0012m; // 0.12%
+        private const decimal ExtremumTouchEpsAlt = 0.0018m;   // 0.18%
+
+        private const int DivergenceLookback = 12;
+        private const decimal MinRsiDivergenceGap = 3.0m;
+
+        // ========================= DYNAMIC RR (ƯU TIÊN HITRATE) =========================
+        private const bool EnableDynamicRiskReward = true;
+
+        // Bot giống tay: RR trend nên "mềm" hơn, chỉ nâng RR khi trend thật sự khỏe
+        private const decimal TrendRR_MinMajor = 1.25m;
+        private const decimal TrendRR_MaxMajor = 2.00m;
+
+        private const decimal TrendRR_MinAlt = 1.15m;
+        private const decimal TrendRR_MaxAlt = 1.60m;
+
         // =====================================================================
         //                           ENTRY SIGNAL
         // =====================================================================
@@ -208,7 +235,7 @@ namespace FuturesBot.Services
 
             // =================== BTC vs ALT PROFILE =======================
 
-            decimal rrTrend = isMajor ? RiskRewardMajor : RiskReward;
+            decimal rrTrend = isMajor ? RiskRewardMajor : RiskReward; // (sẽ dynamic ở dưới nếu EnableDynamicRiskReward)
             decimal rrSideway = isMajor ? RiskRewardSidewayMajor : RiskRewardSideway;
             bool allowSideway = isMajor;
 
@@ -430,29 +457,52 @@ namespace FuturesBot.Services
 
             // =================== V4 TREND STRENGTH FILTER (chỉ áp cho TREND TRADE) ===================
             bool trendStrengthOk = true;
+
+            // chuẩn bị dữ liệu cho dynamic RR
+            decimal sep15Now = 0m;
+            decimal sepH1Now = 0m;
+            bool slopeOkNow = true;
+
             if (upTrend || downTrend)
             {
                 decimal price = last15.Close;
-                decimal sep15 = price > 0 ? Math.Abs(ema34_15Now - ema89_15Now) / price : 0m;
-                decimal sepH1 = lastH1.Close > 0 ? Math.Abs(ema34_h1[iH1] - ema89_h1[iH1]) / lastH1.Close : 0m;
+                sep15Now = price > 0 ? Math.Abs(ema34_15Now - ema89_15Now) / price : 0m;
+                sepH1Now = lastH1.Close > 0 ? Math.Abs(ema34_h1[iH1] - ema89_h1[iH1]) / lastH1.Close : 0m;
 
                 decimal minSep = isMajor ? MinEmaSeparationMajor : MinEmaSeparationAlt;
-                bool sepOk = sep15 >= minSep && sepH1 >= minSep * 0.75m; // H1 nhẹ hơn chút
+                bool sepOk = sep15Now >= minSep && sepH1Now >= minSep * 0.75m; // H1 nhẹ hơn chút
 
-                bool slopeOk = isMajor
+                slopeOkNow = isMajor
                     ? IsEmaSlopeOk(ema34_h1, iH1, EmaSlopeLookbackH1, MinMajorEmaSlopeH1)
                     : true; // alt đã check ở trên
 
-                trendStrengthOk = sepOk && slopeOk;
+                trendStrengthOk = sepOk && slopeOkNow;
 
                 if (!trendStrengthOk)
                 {
                     return new TradeSignal
                     {
                         Type = SignalType.None,
-                        Reason = $"{coinInfo.Symbol}: V4 NO TREND – Trend yếu/chop (sep15={sep15:P2}, sepH1={sepH1:P2}, slopeOk={slopeOk}).",
+                        Reason = $"{coinInfo.Symbol}: V4 NO TREND – Trend yếu/chop (sep15={sep15Now:P2}, sepH1={sepH1Now:P2}, slopeOk={slopeOkNow}).",
                         Symbol = coinInfo.Symbol
                     };
+                }
+
+                // =================== (NEW) DYNAMIC RR ===================
+                if (EnableDynamicRiskReward)
+                {
+                    rrTrend = GetDynamicTrendRR(
+                        isMajor: isMajor,
+                        sep15: sep15Now,
+                        sepH1: sepH1Now,
+                        slopeOk: slopeOkNow,
+                        ratioVsMedian: ratioVsMedian,
+                        volumeOkSoft: volumeOkSoft);
+
+                    // safety: clamp thêm lần nữa (tránh bug config)
+                    rrTrend = isMajor
+                        ? Clamp(rrTrend, TrendRR_MinMajor, TrendRR_MaxMajor)
+                        : Clamp(rrTrend, TrendRR_MinAlt, TrendRR_MaxAlt);
                 }
             }
 
@@ -809,6 +859,34 @@ namespace FuturesBot.Services
 
             bool strongReject = allowMode1 && rejectB && IsStrongRejectionLong(candles15m, iB);
 
+            // =================== HUMAN-LIKE FILTER (LONG) ===================
+            if (EnableHumanLikeFilter)
+            {
+                decimal proposedEntry = strongReject
+                    ? B.Close * (1m + MarketableLimitOffset)
+                    : anchor * (1m + EntryOffsetPercent);
+
+                if (Human_BlockLongNearExtremum(candles15m, rsi15, iB, proposedEntry, coinInfo.IsMajor))
+                {
+                    return new TradeSignal
+                    {
+                        Type = SignalType.None,
+                        Reason = $"{coinInfo.Symbol}: HUMAN FILTER – Block LONG (near recent HIGH / multi-touch / bearish divergence).",
+                        Symbol = coinInfo.Symbol
+                    };
+                }
+
+                if (Human_ShouldWaitLongInDangerZone(candles15m, iB, proposedEntry))
+                {
+                    return new TradeSignal
+                    {
+                        Type = SignalType.None,
+                        Reason = $"{coinInfo.Symbol}: HUMAN FILTER – WAIT 1 candle (LONG near top of recent range).",
+                        Symbol = coinInfo.Symbol
+                    };
+                }
+            }
+
             decimal entry = strongReject
                 ? B.Close * (1m + MarketableLimitOffset) // marketable limit
                 : anchor * (1m + EntryOffsetPercent);    // limit theo anchor
@@ -851,8 +929,16 @@ namespace FuturesBot.Services
                 };
             }
 
+            // =================== TP: dùng RR dynamic (đã tính từ GenerateSignal) ===================
+            // Bot giống tay: nếu chỉ vào vì momentumHard (không reject rõ) thì giảm RR chút để tăng hitrate
+            decimal rr = riskRewardTrend;
+            if (AllowMomentumInsteadOfReject && momentumHard && !rejectB)
+                rr = rr * 0.92m;
+
+            rr = coinInfo.IsMajor ? Clamp(rr, TrendRR_MinMajor, TrendRR_MaxMajor) : Clamp(rr, TrendRR_MinAlt, TrendRR_MaxAlt);
+
             decimal risk = entry - sl;
-            decimal tp = entry + risk * riskRewardTrend;
+            decimal tp = entry + risk * rr;
 
             string modeTag = strongReject ? "MODE1" : "LIMIT";
             return new TradeSignal
@@ -861,7 +947,7 @@ namespace FuturesBot.Services
                 EntryPrice = entry,
                 StopLoss = sl,
                 TakeProfit = tp,
-                Reason = $"{coinInfo.Symbol}: V4 LONG – 2-step retest(A)+confirm(B) @EMA({anchor:F6}) + {(strongReject ? "StrongReject" : (momentumHard ? "MomHard" : "Reject"))}. Entry={modeTag}.",
+                Reason = $"{coinInfo.Symbol}: V4 LONG – 2-step retest(A)+confirm(B) @EMA({anchor:F6}) + {(strongReject ? "StrongReject" : (momentumHard ? "MomHard" : "Reject"))}. Entry={modeTag}, RR={rr:F2}.",
                 Symbol = coinInfo.Symbol
             };
         }
@@ -996,6 +1082,34 @@ namespace FuturesBot.Services
 
             bool strongReject = allowMode1 && rejectB && IsStrongRejectionShort(candles15m, iB);
 
+            // =================== HUMAN-LIKE FILTER (SHORT) ===================
+            if (EnableHumanLikeFilter)
+            {
+                decimal proposedEntry = strongReject
+                    ? B.Close * (1m - MarketableLimitOffset)
+                    : anchor * (1m - EntryOffsetPercent);
+
+                if (Human_BlockShortNearExtremum(candles15m, rsi15, iB, proposedEntry, coinInfo.IsMajor))
+                {
+                    return new TradeSignal
+                    {
+                        Type = SignalType.None,
+                        Reason = $"{coinInfo.Symbol}: HUMAN FILTER – Block SHORT (near recent LOW / multi-touch / bullish divergence).",
+                        Symbol = coinInfo.Symbol
+                    };
+                }
+
+                if (Human_ShouldWaitShortInDangerZone(candles15m, iB, proposedEntry))
+                {
+                    return new TradeSignal
+                    {
+                        Type = SignalType.None,
+                        Reason = $"{coinInfo.Symbol}: HUMAN FILTER – WAIT 1 candle (SHORT near bottom of recent range).",
+                        Symbol = coinInfo.Symbol
+                    };
+                }
+            }
+
             decimal entry = strongReject
                 ? B.Close * (1m - MarketableLimitOffset)
                 : anchor * (1m - EntryOffsetPercent);
@@ -1038,8 +1152,15 @@ namespace FuturesBot.Services
                 };
             }
 
+            // =================== TP: dùng RR dynamic (đã tính từ GenerateSignal) ===================
+            decimal rr = riskRewardTrend;
+            if (AllowMomentumInsteadOfReject && momentumHard && !rejectB)
+                rr = rr * 0.92m;
+
+            rr = coinInfo.IsMajor ? Clamp(rr, TrendRR_MinMajor, TrendRR_MaxMajor) : Clamp(rr, TrendRR_MinAlt, TrendRR_MaxAlt);
+
             decimal risk = sl - entry;
-            decimal tp = entry - risk * riskRewardTrend;
+            decimal tp = entry - risk * rr;
 
             string modeTag = strongReject ? "MODE1" : "LIMIT";
             return new TradeSignal
@@ -1048,7 +1169,7 @@ namespace FuturesBot.Services
                 EntryPrice = entry,
                 StopLoss = sl,
                 TakeProfit = tp,
-                Reason = $"{coinInfo.Symbol}: V4 SHORT – 2-step retest(A)+confirm(B) @EMA({anchor:F6}) + {(strongReject ? "StrongReject" : (momentumHard ? "MomHard" : "Reject"))}. Entry={modeTag}.",
+                Reason = $"{coinInfo.Symbol}: V4 SHORT – 2-step retest(A)+confirm(B) @EMA({anchor:F6}) + {(strongReject ? "StrongReject" : (momentumHard ? "MomHard" : "Reject"))}. Entry={modeTag}, RR={rr:F2}.",
                 Symbol = coinInfo.Symbol
             };
         }
@@ -1609,7 +1730,6 @@ namespace FuturesBot.Services
 
             if (low <= 0 || low == decimal.MaxValue) return false;
 
-            // entry gần đáy: (entry - low)/low < minDist => bỏ
             decimal dist = (entry - low) / low;
             return dist >= 0m && dist < minDistRatio;
         }
@@ -1626,9 +1746,304 @@ namespace FuturesBot.Services
 
             if (high <= 0) return false;
 
-            // entry gần đỉnh: (high - entry)/high < minDist => bỏ
             decimal dist = (high - entry) / high;
             return dist >= 0m && dist < minDistRatio;
+        }
+
+        // =====================================================================
+        //                      DYNAMIC RR HELPERS
+        // =====================================================================
+
+        private decimal GetDynamicTrendRR(bool isMajor, decimal sep15, decimal sepH1, bool slopeOk, decimal ratioVsMedian, bool volumeOkSoft)
+        {
+            // score 0..1: trend càng khỏe => RR càng cao, trend vừa => RR thấp để tăng hitrate
+            decimal minSep = isMajor ? MinEmaSeparationMajor : MinEmaSeparationAlt;
+
+            // sepScore: 0 tại minSep, ~1 tại minSep*2.2
+            decimal sepScore = Normalize01(sep15, minSep, minSep * 2.2m);
+
+            // h1Score: 0 tại minSep*0.75, ~1 tại minSep*1.8
+            decimal h1Score = Normalize01(sepH1, minSep * 0.75m, minSep * 1.8m);
+
+            decimal slopeScore = slopeOk ? 1m : 0m;
+
+            // volScore: thiên về ratioVsMedian (0.7 -> 1.2)
+            decimal volScore = Normalize01(ratioVsMedian, 0.70m, 1.20m);
+
+            // volumeOkSoft nếu fail -> trừ nhẹ (đỡ vào kèo volume pullback yếu)
+            decimal softScore = volumeOkSoft ? 1m : 0.7m;
+
+            // mix
+            decimal score =
+                (sepScore * 0.45m) +
+                (h1Score * 0.20m) +
+                (slopeScore * 0.20m) +
+                (volScore * 0.15m);
+
+            score *= softScore;
+
+            score = Clamp(score, 0m, 1m);
+
+            decimal rrMin = isMajor ? TrendRR_MinMajor : TrendRR_MinAlt;
+            decimal rrMax = isMajor ? TrendRR_MaxMajor : TrendRR_MaxAlt;
+
+            decimal rr = rrMin + (rrMax - rrMin) * score;
+
+            // Bot giống tay: nếu ratioVsMedian quá thấp thì giảm RR thêm chút để dễ TP
+            if (ratioVsMedian < 0.85m)
+                rr *= 0.95m;
+
+            return rr;
+        }
+
+        private decimal Normalize01(decimal x, decimal min, decimal max)
+        {
+            if (max <= min) return 0m;
+            if (x <= min) return 0m;
+            if (x >= max) return 1m;
+            return (x - min) / (max - min);
+        }
+
+        private decimal Clamp(decimal x, decimal lo, decimal hi)
+        {
+            if (x < lo) return lo;
+            if (x > hi) return hi;
+            return x;
+        }
+
+        // =====================================================================
+        //                      HUMAN-LIKE FILTER HELPERS
+        // =====================================================================
+
+        private bool Human_ShouldWaitShortInDangerZone(IReadOnlyList<Candle> candles, int idxClosed, decimal entry)
+        {
+            if (entry <= 0) return false;
+            var (low, high) = Human_GetRecentRange(candles, idxClosed, HumanRecentRangeLookback);
+            decimal range = high - low;
+            if (low <= 0 || range <= 0) return false;
+
+            decimal pos = (entry - low) / range;
+            return pos >= 0m && pos < DangerZoneBottomRatio;
+        }
+
+        private bool Human_ShouldWaitLongInDangerZone(IReadOnlyList<Candle> candles, int idxClosed, decimal entry)
+        {
+            if (entry <= 0) return false;
+            var (low, high) = Human_GetRecentRange(candles, idxClosed, HumanRecentRangeLookback);
+            decimal range = high - low;
+            if (high <= 0 || range <= 0) return false;
+
+            decimal pos = (high - entry) / range;
+            return pos >= 0m && pos < DangerZoneTopRatio;
+        }
+
+        private bool Human_BlockShortNearExtremum(
+            IReadOnlyList<Candle> candles,
+            IReadOnlyList<decimal> rsi,
+            int idxClosed,
+            decimal entry,
+            bool isMajor)
+        {
+            if (entry <= 0) return false;
+
+            var (low, high) = Human_GetRecentRange(candles, idxClosed, ExtremumTouchLookback);
+            if (low <= 0 || high <= 0) return false;
+
+            decimal eps = isMajor ? ExtremumTouchEpsMajor : ExtremumTouchEpsAlt;
+            int touches = Human_CountTouchesLow(candles, idxClosed, ExtremumTouchLookback, low, eps);
+
+            bool bullDiv = Human_HasBullishDivergenceNearLow(candles, rsi, idxClosed, DivergenceLookback, low, eps);
+
+            decimal distToLow = (entry - low) / low;
+            bool nearLow = distToLow >= 0m && distToLow < (isMajor ? MinDistFromRecentLowMajor : MinDistFromRecentLowAlt);
+
+            return nearLow && (touches >= MinTouchesToBlock || bullDiv);
+        }
+
+        private bool Human_BlockLongNearExtremum(
+            IReadOnlyList<Candle> candles,
+            IReadOnlyList<decimal> rsi,
+            int idxClosed,
+            decimal entry,
+            bool isMajor)
+        {
+            if (entry <= 0) return false;
+
+            var (low, high) = Human_GetRecentRange(candles, idxClosed, ExtremumTouchLookback);
+            if (low <= 0 || high <= 0) return false;
+
+            decimal eps = isMajor ? ExtremumTouchEpsMajor : ExtremumTouchEpsAlt;
+            int touches = Human_CountTouchesHigh(candles, idxClosed, ExtremumTouchLookback, high, eps);
+
+            bool bearDiv = Human_HasBearishDivergenceNearHigh(candles, rsi, idxClosed, DivergenceLookback, high, eps);
+
+            decimal distToHigh = (high - entry) / high;
+            bool nearHigh = distToHigh >= 0m && distToHigh < (isMajor ? MinDistFromRecentHighMajor : MinDistFromRecentHighAlt);
+
+            return nearHigh && (touches >= MinTouchesToBlock || bearDiv);
+        }
+
+        private (decimal low, decimal high) Human_GetRecentRange(IReadOnlyList<Candle> candles, int idxClosed, int lookback)
+        {
+            if (candles == null || candles.Count == 0) return (0m, 0m);
+            int end = Math.Min(idxClosed, candles.Count - 1);
+            int start = Math.Max(0, end - lookback + 1);
+
+            decimal low = decimal.MaxValue;
+            decimal high = 0m;
+
+            for (int i = start; i <= end; i++)
+            {
+                low = Math.Min(low, candles[i].Low);
+                high = Math.Max(high, candles[i].High);
+            }
+
+            if (low == decimal.MaxValue) low = 0m;
+            return (low, high);
+        }
+
+        private int Human_CountTouchesLow(IReadOnlyList<Candle> candles, int idxClosed, int lookback, decimal low, decimal epsRatio)
+        {
+            int end = Math.Min(idxClosed, candles.Count - 1);
+            int start = Math.Max(0, end - lookback + 1);
+
+            int touches = 0;
+            decimal eps = low * epsRatio;
+
+            for (int i = start; i <= end; i++)
+            {
+                if (Math.Abs(candles[i].Low - low) <= eps)
+                    touches++;
+            }
+            return touches;
+        }
+
+        private int Human_CountTouchesHigh(IReadOnlyList<Candle> candles, int idxClosed, int lookback, decimal high, decimal epsRatio)
+        {
+            int end = Math.Min(idxClosed, candles.Count - 1);
+            int start = Math.Max(0, end - lookback + 1);
+
+            int touches = 0;
+            decimal eps = high * epsRatio;
+
+            for (int i = start; i <= end; i++)
+            {
+                if (Math.Abs(candles[i].High - high) <= eps)
+                    touches++;
+            }
+            return touches;
+        }
+
+        private bool Human_HasBullishDivergenceNearLow(
+            IReadOnlyList<Candle> candles,
+            IReadOnlyList<decimal> rsi,
+            int idxClosed,
+            int lookback,
+            decimal recentLow,
+            decimal epsRatio)
+        {
+            if (rsi == null || rsi.Count <= idxClosed) return false;
+
+            int end = Math.Min(idxClosed, candles.Count - 1);
+            int start = Math.Max(0, end - lookback + 1);
+            if (end - start < 5) return false;
+
+            int low1 = -1, low2 = -1;
+            decimal v1 = decimal.MaxValue, v2 = decimal.MaxValue;
+
+            for (int i = start; i <= end; i++)
+            {
+                decimal v = candles[i].Low;
+                if (v < v1)
+                {
+                    v2 = v1; low2 = low1;
+                    v1 = v;  low1 = i;
+                }
+                else if (v < v2)
+                {
+                    v2 = v;  low2 = i;
+                }
+            }
+
+            if (low1 < 0 || low2 < 0) return false;
+
+            decimal eps = recentLow * epsRatio;
+            bool near = Math.Abs(v1 - recentLow) <= eps || Math.Abs(v2 - recentLow) <= eps;
+            if (!near) return false;
+
+            decimal price1 = candles[low1].Low;
+            decimal price2 = candles[low2].Low;
+
+            decimal rsi1 = rsi[low1];
+            decimal rsi2 = rsi[low2];
+
+            if (low2 > low1)
+            {
+                (low1, low2) = (low2, low1);
+                (price1, price2) = (price2, price1);
+                (rsi1, rsi2) = (rsi2, rsi1);
+            }
+
+            bool lowerLow = price2 < price1;
+            bool higherRsi = rsi2 > rsi1 + MinRsiDivergenceGap;
+
+            return lowerLow && higherRsi;
+        }
+
+        private bool Human_HasBearishDivergenceNearHigh(
+            IReadOnlyList<Candle> candles,
+            IReadOnlyList<decimal> rsi,
+            int idxClosed,
+            int lookback,
+            decimal recentHigh,
+            decimal epsRatio)
+        {
+            if (rsi == null || rsi.Count <= idxClosed) return false;
+
+            int end = Math.Min(idxClosed, candles.Count - 1);
+            int start = Math.Max(0, end - lookback + 1);
+            if (end - start < 5) return false;
+
+            int hi1 = -1, hi2 = -1;
+            decimal v1 = 0m, v2 = 0m;
+
+            for (int i = start; i <= end; i++)
+            {
+                decimal v = candles[i].High;
+                if (v > v1)
+                {
+                    v2 = v1; hi2 = hi1;
+                    v1 = v;  hi1 = i;
+                }
+                else if (v > v2)
+                {
+                    v2 = v;  hi2 = i;
+                }
+            }
+
+            if (hi1 < 0 || hi2 < 0) return false;
+
+            decimal eps = recentHigh * epsRatio;
+            bool near = Math.Abs(v1 - recentHigh) <= eps || Math.Abs(v2 - recentHigh) <= eps;
+            if (!near) return false;
+
+            decimal price1 = candles[hi1].High;
+            decimal price2 = candles[hi2].High;
+
+            decimal rsi1 = rsi[hi1];
+            decimal rsi2 = rsi[hi2];
+
+            if (hi2 > hi1)
+            {
+                (hi1, hi2) = (hi2, hi1);
+                (price1, price2) = (price2, price1);
+                (rsi1, rsi2) = (rsi2, rsi1);
+            }
+
+            bool higherHigh = price2 > price1;
+            bool lowerRsi = rsi2 < rsi1 - MinRsiDivergenceGap;
+
+            return higherHigh && lowerRsi;
         }
     }
 }
