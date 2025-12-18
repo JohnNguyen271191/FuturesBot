@@ -12,6 +12,7 @@ namespace FuturesBot.Services
 {
     /// <summary>
     /// OrderManagerService - WINRATE + FLEX EXIT (giống trade tay) + MODE AWARE
+    /// FIX: RR theo USD PnL / USD Risk + thêm MinProfitUsd gate để tránh lock quá sớm (case lãi 0.03 mà lock)
     /// </summary>
     public class OrderManagerService
     {
@@ -81,6 +82,12 @@ namespace FuturesBot.Services
             public int TimeStopBars { get; init; }
             public decimal TimeStopMinRR { get; init; }
 
+            // --- NEW: Anti “0.03$ lock” gate ---
+            // Chỉ trigger PROTECT / QUICK TAKE / DANGER CUT nếu PnL đạt tối thiểu theo USD
+            public decimal MinProtectProfitUsd { get; init; }
+            public decimal MinQuickTakeProfitUsd { get; init; }
+            public decimal MinDangerCutAbsLossUsd { get; init; }
+
             // Safety TP
             public decimal SafetyTpRR { get; init; }
 
@@ -110,6 +117,11 @@ namespace FuturesBot.Services
                         SafetyTpRR = 1.30m,
                         EmaBreakTolerance = 0.0012m,
                         LimitTimeout = TimeSpan.FromMinutes(10),
+
+                        // ✅ FIX: scalp nhỏ, fee ảnh hưởng nhiều → đừng lock/close khi PnL còn vài cent
+                        MinProtectProfitUsd = 0.10m,
+                        MinQuickTakeProfitUsd = 0.15m,
+                        MinDangerCutAbsLossUsd = 0.12m,
                     },
 
                     // ====== MODE2 CONTINUATION ======
@@ -126,6 +138,10 @@ namespace FuturesBot.Services
                         SafetyTpRR = 1.60m,
                         EmaBreakTolerance = 0.0010m,
                         LimitTimeout = TimeSpan.FromMinutes(8),
+
+                        MinProtectProfitUsd = 0.15m,
+                        MinQuickTakeProfitUsd = 0.25m,
+                        MinDangerCutAbsLossUsd = 0.18m,
                     },
 
                     // ====== TREND (default) ======
@@ -142,6 +158,10 @@ namespace FuturesBot.Services
                         SafetyTpRR = DefaultSafetyTpRR,
                         EmaBreakTolerance = DefaultEmaBreakTolerance,
                         LimitTimeout = DefaultLimitTimeout,
+
+                        MinProtectProfitUsd = 0.25m,
+                        MinQuickTakeProfitUsd = 0.40m,
+                        MinDangerCutAbsLossUsd = 0.30m,
                     }
                 };
             }
@@ -189,7 +209,7 @@ namespace FuturesBot.Services
                     await Task.Delay(MonitorIntervalMs);
 
                     var elapsed = DateTime.UtcNow - startTime;
-                    if (elapsed > profile.LimitTimeout) // ✅ FIX: dùng profile.LimitTimeout (instance)
+                    if (elapsed > profile.LimitTimeout)
                     {
                         await _notify.SendAsync(
                             $"[{symbol}] LIMIT quá {profile.LimitTimeout.TotalMinutes:F0} phút chưa khớp → cancel open orders và stop LIMIT monitor.");
@@ -374,28 +394,42 @@ namespace FuturesBot.Services
                         lastCandleFetchUtc = DateTime.UtcNow;
                     }
 
-                    // =================== Compute RR / risk ===================
-                    decimal risk = 0m;
+                    // =================== Compute RR / risk (FIX: USD-based) ===================
+                    decimal riskPrice = 0m;
+                    decimal riskUsd = 0m;
+                    decimal pnlUsd = 0m;
                     bool canUseRR = false;
+
+                    if (hasEntry)
+                    {
+                        // Unrealized PnL (approx, USDT-m)
+                        pnlUsd = isLongPosition
+                            ? (price - entry) * absQty
+                            : (entry - price) * absQty;
+                    }
 
                     if (hasEntry && hasSL && IsValidStopLoss(sl, isLongPosition, entry))
                     {
-                        risk = isLongPosition ? (entry - sl) : (sl - entry);
-                        if (risk > 0m) canUseRR = true;
+                        riskPrice = isLongPosition ? (entry - sl) : (sl - entry);
+                        if (riskPrice > 0m)
+                        {
+                            riskUsd = riskPrice * absQty;
+                            if (riskUsd > 0m) canUseRR = true;
+                        }
                     }
 
                     decimal rr = 0m;
-                    if (canUseRR && risk > 0m)
-                        rr = isLongPosition ? (price - entry) / risk : (entry - price) / risk;
+                    if (canUseRR && riskUsd > 0m)
+                        rr = pnlUsd / riskUsd;
 
                     // =================== SAFETY TP (nếu thiếu TP) - MODE AWARE ===================
                     if (hasEntry && hasSL && !hasTP && !autoTpPlaced)
                     {
-                        if (risk > 0m)
+                        if (riskPrice > 0m)
                         {
                             decimal safetyTp = isLongPosition
-                                ? entry + risk * profile.SafetyTpRR
-                                : entry - risk * profile.SafetyTpRR;
+                                ? entry + riskPrice * profile.SafetyTpRR
+                                : entry - riskPrice * profile.SafetyTpRR;
 
                             tp = safetyTp;
                             hasTP = true;
@@ -461,17 +495,20 @@ namespace FuturesBot.Services
                             {
                                 timeStopTriggered = true;
                                 await _notify.SendAsync(
-                                    $"[{symbol}] TIME-STOP: {barsPassed} nến M15 mà rr={rr:F2} < {profile.TimeStopMinRR:F2}R → close | mode={profile.Tag}");
+                                    $"[{symbol}] TIME-STOP: {barsPassed} nến M15 mà rr={rr:F2} < {profile.TimeStopMinRR:F2}R → close | pnl={pnlUsd:F4} risk={riskUsd:F4} | mode={profile.Tag}");
                                 await _exchange.ClosePositionAsync(symbol, qty);
                                 await SafeCancelLeftoverProtectiveAsync(symbol);
                                 return;
                             }
                         }
 
-                        // ===== Profit protect =====
-                        if (rr >= profile.ProtectAtRR && hasSL && IsValidStopLoss(sl, isLongPosition, entry))
+                        // ===== Profit protect (FIX: thêm min profit USD) =====
+                        if (rr >= profile.ProtectAtRR
+                            && pnlUsd >= profile.MinProtectProfitUsd
+                            && hasSL
+                            && IsValidStopLoss(sl, isLongPosition, entry))
                         {
-                            decimal targetSL = GetBreakEvenLockSL(entry, sl, risk, isLongPosition, profile.BreakEvenBufferR);
+                            decimal targetSL = GetBreakEvenLockSL(entry, sl, riskPrice, isLongPosition, profile.BreakEvenBufferR);
 
                             if (IsBetterStopLoss(targetSL, sl, isLongPosition))
                             {
@@ -485,35 +522,39 @@ namespace FuturesBot.Services
                                     pos,
                                     lastSlTpCheckUtc);
 
-                                await _notify.SendAsync($"[{symbol}] PROTECT: rr={rr:F2} → lock SL={Math.Round(sl, 6)} | mode={profile.Tag}");
+                                await _notify.SendAsync($"[{symbol}] PROTECT: rr={rr:F2} pnl={pnlUsd:F4} risk={riskUsd:F4} → lock SL={Math.Round(sl, 6)} | mode={profile.Tag}");
                             }
                         }
 
-                        // ===== Quick take =====
-                        if (rr >= profile.QuickTakeMinRR && weakening)
+                        // ===== Quick take (FIX: thêm min profit USD) =====
+                        if (rr >= profile.QuickTakeMinRR && pnlUsd >= profile.MinQuickTakeProfitUsd && weakening)
                         {
                             if (rr >= profile.QuickTakeGoodRR || danger || IsOppositeStrongCandle(c0, isLongPosition))
                             {
-                                await _notify.SendAsync($"[{symbol}] QUICK TAKE: rr={rr:F2} → close | mode={profile.Tag}");
+                                await _notify.SendAsync($"[{symbol}] QUICK TAKE: rr={rr:F2} pnl={pnlUsd:F4} → close | mode={profile.Tag}");
                                 await _exchange.ClosePositionAsync(symbol, qty);
                                 await SafeCancelLeftoverProtectiveAsync(symbol);
                                 return;
                             }
                         }
 
-                        // ===== Danger cut =====
+                        // ===== Danger cut (FIX: thêm abs loss USD) =====
                         if (rr <= profile.DangerCutIfRRBelow && danger)
                         {
-                            await _notify.SendAsync($"[{symbol}] DANGER CUT: rr={rr:F2} + danger → close | mode={profile.Tag}");
-                            await _exchange.ClosePositionAsync(symbol, qty);
-                            await SafeCancelLeftoverProtectiveAsync(symbol);
-                            return;
+                            var absLossUsd = Math.Max(0m, -pnlUsd);
+                            if (absLossUsd >= profile.MinDangerCutAbsLossUsd)
+                            {
+                                await _notify.SendAsync($"[{symbol}] DANGER CUT: rr={rr:F2} loss={absLossUsd:F4} + danger → close | mode={profile.Tag}");
+                                await _exchange.ClosePositionAsync(symbol, qty);
+                                await SafeCancelLeftoverProtectiveAsync(symbol);
+                                return;
+                            }
                         }
 
-                        // ===== Exit on boundary break nếu đã dương chút =====
-                        if (danger && rr >= 0.10m)
+                        // ===== Exit on boundary break nếu đã dương chút (FIX: thêm min profit) =====
+                        if (danger && rr >= 0.10m && pnlUsd >= profile.MinProtectProfitUsd)
                         {
-                            await _notify.SendAsync($"[{symbol}] EXIT ON BOUNDARY BREAK: rr={rr:F2} → close | mode={profile.Tag}");
+                            await _notify.SendAsync($"[{symbol}] EXIT ON BOUNDARY BREAK: rr={rr:F2} pnl={pnlUsd:F4} → close | mode={profile.Tag}");
                             await _exchange.ClosePositionAsync(symbol, qty);
                             await SafeCancelLeftoverProtectiveAsync(symbol);
                             return;
