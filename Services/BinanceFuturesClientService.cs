@@ -939,83 +939,86 @@ namespace FuturesBot.Services
             return list;
         }
 
+        asset khác USDT, log để biết (khỏi convert bậy).
         /// <summary>
-        /// Sum fee (commission) trong khoảng [fromUtc, toUtc] bằng /fapi/v1/userTrades
-        /// => bao gồm fee lúc mở lệnh + đóng lệnh + partial fills.
-        /// Map thẳng vào NetPnlResult.Commission (Binance fee thường là số âm).
-        /// </summary>
-        private async Task<decimal> GetCommissionFromUserTradesAsync(string symbol, DateTime fromUtc, DateTime toUtc)
+/// Sum commission (USDT only) bằng /fapi/v1/userTrades
+/// FIX:
+/// - Paginate bằng fromId (KHÔNG dùng startTime+1ms)
+/// - Nới window thời gian để tránh miss trade biên
+/// </summary>
+private async Task<decimal> GetCommissionFromUserTradesAsync(
+    string symbol,
+    DateTime fromUtc,
+    DateTime toUtc)
+{
+    if (_config.PaperMode) return 0m;
+
+    // Nới biên thời gian cho chắc
+    var from2 = fromUtc.AddSeconds(-10);
+    var to2   = toUtc.AddSeconds(10);
+
+    long startMs = new DateTimeOffset(from2).ToUnixTimeMilliseconds();
+    long endMs   = new DateTimeOffset(to2).ToUnixTimeMilliseconds();
+
+    const int limit = 1000;
+    decimal totalCommission = 0m;
+
+    long? fromId = null;
+
+    for (int guard = 0; guard < 50; guard++)
+    {
+        var query = new Dictionary<string, string>
         {
-            if (_config.PaperMode) return 0m;
+            ["symbol"] = symbol,
+            ["startTime"] = startMs.ToString(CultureInfo.InvariantCulture),
+            ["endTime"]   = endMs.ToString(CultureInfo.InvariantCulture),
+            ["limit"]     = limit.ToString(),
+            ["recvWindow"] = "60000"
+        };
 
-            long startMs = new DateTimeOffset(fromUtc).ToUnixTimeMilliseconds();
-            long endMs = new DateTimeOffset(toUtc).ToUnixTimeMilliseconds();
+        if (fromId.HasValue)
+            query["fromId"] = fromId.Value.ToString();
 
-            const int limit = 1000;
-            decimal totalCommission = 0m;
+        var json = await SignedGetAsync(_config.Urls.UserTradesUrl, query);
 
-            // paginate bằng startTime (time của trade cuối + 1ms)
-            for (int guard = 0; guard < 20; guard++) // chống loop vô hạn
-            {
-                var query = new Dictionary<string, string>
-                {
-                    ["symbol"] = symbol,
-                    ["startTime"] = startMs.ToString(CultureInfo.InvariantCulture),
-                    ["endTime"] = endMs.ToString(CultureInfo.InvariantCulture),
-                    ["limit"] = limit.ToString(CultureInfo.InvariantCulture),
-                    ["recvWindow"] = "60000"
-                };
+        using var doc = JsonDocument.Parse(json);
+        var arr = doc.RootElement;
 
-                var json = await SignedGetAsync($"{_config.Urls.UserTradesUrl}", query);
+        if (arr.ValueKind != JsonValueKind.Array || arr.GetArrayLength() == 0)
+            break;
 
-                using var doc = JsonDocument.Parse(json);
-                var root = doc.RootElement;
+        long maxId = -1;
 
-                if (root.ValueKind != JsonValueKind.Array || root.GetArrayLength() == 0)
-                    break;
+        foreach (var el in arr.EnumerateArray())
+        {
+            long t = el.GetProperty("time").GetInt64();
+            if (t < startMs || t > endMs) continue;
 
-                long lastTime = -1;
+            long id = el.GetProperty("id").GetInt64();
+            if (id > maxId) maxId = id;
 
-                foreach (var el in root.EnumerateArray())
-                {
-                    long t = el.GetProperty("time").GetInt64();
-                    lastTime = Math.Max(lastTime, t);
+            var asset = el.GetProperty("commissionAsset").GetString();
+            if (!string.Equals(asset, "USDT", StringComparison.OrdinalIgnoreCase))
+                continue;
 
-                    // filter chắc cú
-                    if (t < startMs || t > endMs) continue;
+            var commStr = el.GetProperty("commission").GetString();
+            if (!decimal.TryParse(commStr, NumberStyles.Float, CultureInfo.InvariantCulture, out var comm))
+                continue;
 
-                    // commission + asset
-                    var commStr = el.GetProperty("commission").GetString() ?? "0";
-                    var asset = el.GetProperty("commissionAsset").GetString() ?? "USDT";
+            // Chuẩn hoá: fee luôn là số âm
+            if (comm > 0m) comm = -comm;
 
-                    if (!decimal.TryParse(commStr, NumberStyles.Float, CultureInfo.InvariantCulture, out var comm))
-                        continue;
-
-                    // USDT-M futures thường fee = USDT. Nếu asset khác USDT, log để biết (khỏi convert bậy).
-                    if (!asset.Equals("USDT", StringComparison.OrdinalIgnoreCase))
-                    {
-                        await _slack.SendAsync($"[WARN] {symbol} commissionAsset={asset} (comm={commStr}) -> skip (no convert).");
-                        continue;
-                    }
-
-                    totalCommission += comm; // Binance trả fee thường là số âm
-                }
-
-                // nếu ít hơn limit => hết data
-                if (root.GetArrayLength() < limit)
-                    break;
-
-                // nếu không tăng được lastTime => dừng tránh loop
-                if (lastTime <= 0 || lastTime < startMs)
-                    break;
-
-                // next page
-                startMs = lastTime + 1;
-                if (startMs > endMs) break;
-            }
-
-            return totalCommission;
+            totalCommission += comm;
         }
+
+        if (arr.GetArrayLength() < limit || maxId < 0)
+            break;
+
+        fromId = maxId + 1;
+    }
+
+    return totalCommission;
+}
 
         private async Task CancelAlgoOrderByIdAsync(long algoId)
         {
