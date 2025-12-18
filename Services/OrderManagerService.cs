@@ -12,7 +12,10 @@ namespace FuturesBot.Services
 {
     /// <summary>
     /// OrderManagerService - WINRATE + FLEX EXIT (giống trade tay) + MODE AWARE
-    /// FIX: RR theo USD PnL / USD Risk + thêm MinProfitUsd gate để tránh lock quá sớm (case lãi 0.03 mà lock)
+    /// FIX:
+    /// - RR theo USD PnL / USD Risk
+    /// - MinProfitUsd gate để tránh lock quá sớm (case lãi 0.03 mà lock)
+    /// - NEW: ATR-based trailing + anti kéo SL sát entry (chống quét ngu)
     /// </summary>
     public class OrderManagerService
     {
@@ -39,6 +42,12 @@ namespace FuturesBot.Services
         // =============== Reversal detection (default) ==============
         private const decimal ImpulseBodyToRangeMin = 0.65m;    // nến mạnh
         private const decimal ImpulseVolVsPrevMin = 1.20m;      // vol spike
+
+        // =============== ATR trailing (NEW) ========================
+        private const int AtrPeriod = 14;
+        private const decimal ScalpAtrMult = 0.8m;   // scalp: trailing chặt hơn nhưng vẫn ngoài noise
+        private const decimal TrendAtrMult = 1.2m;   // trend: trailing rộng hơn
+        private const decimal AtrToAllowProfitLock = 1.0m; // phải đi >= 1 ATR mới cho phép SL vượt entry (lock lời)
 
         // =============== Debug throttle ===========================
         private readonly ConcurrentDictionary<string, DateTime> _lastMissingLogUtc = new();
@@ -82,7 +91,7 @@ namespace FuturesBot.Services
             public int TimeStopBars { get; init; }
             public decimal TimeStopMinRR { get; init; }
 
-            // --- NEW: Anti “0.03$ lock” gate ---
+            // --- Anti “0.03$ lock” gate ---
             // Chỉ trigger PROTECT / QUICK TAKE / DANGER CUT nếu PnL đạt tối thiểu theo USD
             public decimal MinProtectProfitUsd { get; init; }
             public decimal MinQuickTakeProfitUsd { get; init; }
@@ -502,27 +511,90 @@ namespace FuturesBot.Services
                             }
                         }
 
-                        // ===== Profit protect (FIX: thêm min profit USD) =====
+                        // ===== Profit protect (ATR-based, anti kéo SL sát entry) =====
                         if (rr >= profile.ProtectAtRR
                             && pnlUsd >= profile.MinProtectProfitUsd
                             && hasSL
                             && IsValidStopLoss(sl, isLongPosition, entry))
                         {
-                            decimal targetSL = GetBreakEvenLockSL(entry, sl, riskPrice, isLongPosition, profile.BreakEvenBufferR);
-
-                            if (IsBetterStopLoss(targetSL, sl, isLongPosition))
+                            decimal atr = ComputeAtr(cachedCandles, AtrPeriod);
+                            if (atr > 0m)
                             {
-                                sl = targetSL;
-                                lastSlTpCheckUtc = await UpdateStopLossAsync(
-                                    symbol,
-                                    targetSL,
-                                    isLongPosition,
-                                    hasTP,
-                                    tp,
-                                    pos,
-                                    lastSlTpCheckUtc);
+                                decimal atrMult = signal.Mode == TradeMode.Scalp ? ScalpAtrMult : TrendAtrMult;
 
-                                await _notify.SendAsync($"[{symbol}] PROTECT: rr={rr:F2} pnl={pnlUsd:F4} risk={riskUsd:F4} → lock SL={Math.Round(sl, 6)} | mode={profile.Tag}");
+                                bool movedEnoughForProfitLock =
+                                    isLongPosition
+                                        ? price >= entry + atr * AtrToAllowProfitLock
+                                        : price <= entry - atr * AtrToAllowProfitLock;
+
+                                // Phase 1: lock về gần BE nhưng KHÔNG vượt entry (tránh quét ngu)
+                                // Phase 2: chỉ khi đi >= 1 ATR mới cho trailing theo ATR (có thể vượt entry)
+                                decimal targetSL;
+
+                                if (!movedEnoughForProfitLock)
+                                {
+                                    // giữ SL dưới entry (LONG) / trên entry (SHORT) một khoảng nhỏ theo ATR
+                                    // để tránh bị quét ngay tại entry vì noise/spread
+                                    decimal beGuard = Math.Min(atr * 0.25m, riskPrice * 0.50m);
+
+                                    targetSL = isLongPosition
+                                        ? (entry - beGuard)     // LONG: vẫn dưới entry
+                                        : (entry + beGuard);    // SHORT: vẫn trên entry
+                                }
+                                else
+                                {
+                                    // ATR trailing
+                                    targetSL = isLongPosition
+                                        ? (price - atr * atrMult)
+                                        : (price + atr * atrMult);
+                                }
+
+                                // additional safety: nếu chưa movedEnough thì tuyệt đối không cho vượt entry
+                                if (!movedEnoughForProfitLock)
+                                {
+                                    if (isLongPosition) targetSL = Math.Min(targetSL, entry);
+                                    else targetSL = Math.Max(targetSL, entry);
+                                }
+
+                                if (IsBetterStopLoss(targetSL, sl, isLongPosition))
+                                {
+                                    sl = targetSL;
+                                    lastSlTpCheckUtc = await UpdateStopLossAsync(
+                                        symbol,
+                                        targetSL,
+                                        isLongPosition,
+                                        hasTP,
+                                        tp,
+                                        pos,
+                                        lastSlTpCheckUtc);
+
+                                    await _notify.SendAsync(
+                                        $"[{symbol}] PROTECT ATR: rr={rr:F2} pnl={pnlUsd:F4} risk={riskUsd:F4} atr={atr:F4} moved={(movedEnoughForProfitLock ? "Y" : "N")} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
+                                }
+                            }
+                            else
+                            {
+                                // fallback: giữ logic cũ nếu ATR không tính được
+                                decimal targetSL = GetBreakEvenLockSL(entry, sl, riskPrice, isLongPosition, profile.BreakEvenBufferR);
+
+                                // anti: đừng cho vượt entry nếu chưa có ATR
+                                if (isLongPosition) targetSL = Math.Min(targetSL, entry);
+                                else targetSL = Math.Max(targetSL, entry);
+
+                                if (IsBetterStopLoss(targetSL, sl, isLongPosition))
+                                {
+                                    sl = targetSL;
+                                    lastSlTpCheckUtc = await UpdateStopLossAsync(
+                                        symbol,
+                                        targetSL,
+                                        isLongPosition,
+                                        hasTP,
+                                        tp,
+                                        pos,
+                                        lastSlTpCheckUtc);
+
+                                    await _notify.SendAsync($"[{symbol}] PROTECT (fallback): rr={rr:F2} pnl={pnlUsd:F4} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
+                                }
                             }
                         }
 
@@ -840,6 +912,34 @@ namespace FuturesBot.Services
             return ema;
         }
 
+        // ============================================================
+        //                       ATR HELPER (NEW)
+        // ============================================================
+
+        private static decimal ComputeAtr(IReadOnlyList<Candle> candles, int period = 14)
+        {
+            if (candles == null || candles.Count < period + 1) return 0m;
+
+            decimal sum = 0m;
+            for (int i = candles.Count - period; i < candles.Count; i++)
+            {
+                var c = candles[i];
+                var prev = candles[i - 1];
+
+                decimal tr = Math.Max(
+                    c.High - c.Low,
+                    Math.Max(
+                        Math.Abs(c.High - prev.Close),
+                        Math.Abs(c.Low - prev.Close)
+                    )
+                );
+
+                sum += tr;
+            }
+
+            return sum / period;
+        }
+
         private static decimal GetDynamicBoundaryForShort(decimal entry, decimal ema34, decimal ema89, decimal ema200)
         {
             var emas = new List<decimal> { ema34, ema89, ema200 }.Where(e => e > 0).ToList();
@@ -1003,7 +1103,7 @@ namespace FuturesBot.Services
 
             await _exchange.CancelStopLossOrdersAsync(symbol);
 
-            // ✅ FIX CS8602: guard currentPos
+            // guard currentPos
             if (currentPos == null)
                 currentPos = await _exchange.GetPositionAsync(symbol);
 
