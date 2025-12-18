@@ -16,6 +16,11 @@ namespace FuturesBot.Services
     /// - RR theo USD PnL / USD Risk
     /// - MinProfitUsd gate để tránh lock quá sớm (case lãi 0.03 mà lock)
     /// - NEW: ATR-based trailing + anti kéo SL sát entry (chống quét ngu)
+    ///
+    /// PATCH (HƯỚNG 2):
+    /// - Anti "trail ngu" bị quét pullback:
+    ///   + Chỉ cho phép trailing sớm khi có "pullback -> resume" (cấu trúc continuation)
+    ///   + Throttle trailing: tối thiểu X giây / tối thiểu bước SL theo ATR để tránh update liên tục
     /// </summary>
     public class OrderManagerService
     {
@@ -49,8 +54,19 @@ namespace FuturesBot.Services
         private const decimal TrendAtrMult = 1.2m;   // trend: trailing rộng hơn
         private const decimal AtrToAllowProfitLock = 1.0m; // phải đi >= 1 ATR mới cho phép SL vượt entry (lock lời)
 
+        // =============== PATCH: anti pullback trailing (HƯỚNG 2) ===
+        // 1) Chỉ trailing sớm nếu giá đã đi đủ một đoạn + có pullback->resume
+        private const decimal RequireMoveBeforeTrailAtrFrac = 0.60m;   // giá phải đi >= 0.6 ATR từ entry
+        private const decimal PullbackMustNotBreakEntryAtrFrac = 0.20m; // pullback không được xuyên entry quá sâu (theo ATR)
+        private const int TrailingMinUpdateIntervalSec = 45;           // tối thiểu 45s mới update SL 1 lần
+        private const decimal TrailingMinStepAtrFrac = 0.15m;          // SL phải "tốt hơn" tối thiểu 0.15 ATR mới update
+
         // =============== Debug throttle ===========================
         private readonly ConcurrentDictionary<string, DateTime> _lastMissingLogUtc = new();
+
+        // PATCH: trailing throttle per symbol
+        private readonly ConcurrentDictionary<string, DateTime> _lastTrailingUpdateUtc = new();
+        private readonly ConcurrentDictionary<string, decimal> _lastTrailingSl = new();
 
         // ============================================================
         // TRACK SYMBOL ĐANG ĐƯỢC GIÁM SÁT
@@ -527,6 +543,30 @@ namespace FuturesBot.Services
                                         ? price >= entry + atr * AtrToAllowProfitLock
                                         : price <= entry - atr * AtrToAllowProfitLock;
 
+                                // ============================
+                                // >>> PATCH START: HƯỚNG 2
+                                // - Nếu CHƯA đi đủ để lock profit (>= 1 ATR)
+                                //   thì KHÔNG trail SL chỉ vì rr/pnl đạt.
+                                // - Bắt buộc có "pullback -> resume" để tránh bị quét pullback rồi bay tiếp.
+                                // - Đồng thời throttle update (time + step theo ATR).
+                                // ============================
+                                if (!movedEnoughForProfitLock)
+                                {
+                                    bool movedMin = isLongPosition
+                                        ? price >= entry + atr * RequireMoveBeforeTrailAtrFrac
+                                        : price <= entry - atr * RequireMoveBeforeTrailAtrFrac;
+
+                                    bool pullbackResumeOk = movedMin && HasPullbackThenResume(c0, c1, isLongPosition, entry, atr);
+
+                                    if (!pullbackResumeOk)
+                                    {
+                                        // Skip trailing sớm để tránh "update liên tục rồi bị quét"
+                                        goto AFTER_PROTECT_BLOCK;
+                                    }
+                                }
+                                // >>> PATCH END
+                                // ============================
+
                                 // Phase 1: lock về gần BE nhưng KHÔNG vượt entry (tránh quét ngu)
                                 // Phase 2: chỉ khi đi >= 1 ATR mới cho trailing theo ATR (có thể vượt entry)
                                 decimal targetSL;
@@ -556,7 +596,8 @@ namespace FuturesBot.Services
                                     else targetSL = Math.Max(targetSL, entry);
                                 }
 
-                                if (IsBetterStopLoss(targetSL, sl, isLongPosition))
+                                // PATCH: throttle update (time + step)
+                                if (IsBetterStopLoss(targetSL, sl, isLongPosition) && CanUpdateTrailing(symbol, sl, targetSL, isLongPosition, atr))
                                 {
                                     sl = targetSL;
                                     lastSlTpCheckUtc = await UpdateStopLossAsync(
@@ -581,7 +622,7 @@ namespace FuturesBot.Services
                                 if (isLongPosition) targetSL = Math.Min(targetSL, entry);
                                 else targetSL = Math.Max(targetSL, entry);
 
-                                if (IsBetterStopLoss(targetSL, sl, isLongPosition))
+                                if (IsBetterStopLoss(targetSL, sl, isLongPosition) && CanUpdateTrailing(symbol, sl, targetSL, isLongPosition, 0m))
                                 {
                                     sl = targetSL;
                                     lastSlTpCheckUtc = await UpdateStopLossAsync(
@@ -597,6 +638,8 @@ namespace FuturesBot.Services
                                 }
                             }
                         }
+
+                    AFTER_PROTECT_BLOCK:
 
                         // ===== Quick take (FIX: thêm min profit USD) =====
                         if (rr >= profile.QuickTakeMinRR && pnlUsd >= profile.MinQuickTakeProfitUsd && weakening)
@@ -1084,6 +1127,73 @@ namespace FuturesBot.Services
             var mins = diff.TotalMinutes;
             if (mins < 0) return 0;
             return (int)Math.Floor(mins / timeframeMinutes);
+        }
+
+        // ============================================================
+        // PATCH HELPERS: pullback->resume + throttle trailing
+        // ============================================================
+
+        private static bool HasPullbackThenResume(Candle lastClosed, Candle prevClosed, bool isLong, decimal entry, decimal atr)
+        {
+            // prevClosed = pullback candle (ngược hướng)
+            bool pullback = isLong ? (prevClosed.Close < prevClosed.Open) : (prevClosed.Close > prevClosed.Open);
+            // lastClosed = resume candle (thuận hướng)
+            bool resume = isLong ? (lastClosed.Close > lastClosed.Open) : (lastClosed.Close < lastClosed.Open);
+
+            if (!pullback || !resume) return false;
+
+            // Pullback không được xuyên entry quá sâu (tránh pullback là đảo trend thật)
+            // LONG: low phải > entry - 0.2*ATR ; SHORT: high phải < entry + 0.2*ATR
+            if (atr > 0m)
+            {
+                if (isLong)
+                {
+                    if (prevClosed.Low <= entry - atr * PullbackMustNotBreakEntryAtrFrac)
+                        return false;
+                }
+                else
+                {
+                    if (prevClosed.High >= entry + atr * PullbackMustNotBreakEntryAtrFrac)
+                        return false;
+                }
+            }
+
+            // Resume phải "đẩy lại" ít nhất vượt close của pullback
+            if (isLong)
+                return lastClosed.Close > prevClosed.Close;
+            else
+                return lastClosed.Close < prevClosed.Close;
+        }
+
+        private bool CanUpdateTrailing(string symbol, decimal currentSl, decimal targetSl, bool isLong, decimal atr)
+        {
+            // 1) Interval gate
+            var now = DateTime.UtcNow;
+            if (_lastTrailingUpdateUtc.TryGetValue(symbol, out var lastUtc))
+            {
+                if ((now - lastUtc) < TimeSpan.FromSeconds(TrailingMinUpdateIntervalSec))
+                    return false;
+            }
+
+            // 2) Step gate (tránh update vi mô)
+            if (atr > 0m)
+            {
+                decimal minStep = atr * TrailingMinStepAtrFrac;
+                decimal delta = Math.Abs(targetSl - currentSl);
+                if (delta < minStep)
+                    return false;
+            }
+
+            // 3) Nếu target giống lần update trước (sàn lag / rounding) thì skip
+            if (_lastTrailingSl.TryGetValue(symbol, out var lastSl))
+            {
+                if (Math.Abs(lastSl - targetSl) < (atr > 0m ? atr * 0.05m : 0.000001m))
+                    return false;
+            }
+
+            _lastTrailingUpdateUtc[symbol] = now;
+            _lastTrailingSl[symbol] = targetSl;
+            return true;
         }
 
         // ============================================================
