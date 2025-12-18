@@ -1,3 +1,8 @@
+// ============================
+// TradingStrategy.cs (V4) - PART 1/4
+// Copy PART 1 -> PART 2 -> PART 3 -> PART 4 (dán liên tiếp)
+// ============================
+
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -113,7 +118,6 @@ namespace FuturesBot.Services
         private const decimal MaxEntryDistanceToAnchorAlt = 0.0050m;   // 0.50%
 
         // ========================= (NEW) ANTI-LATE ENTRY NEAR EXTREMUM =========================
-        // Case DOT: downtrend nhưng bot short sát đáy -> dễ hồi kỹ thuật quét SL.
         private const int RecentExtremumLookback = 30;                // ~ 7.5h trên M15
         private const decimal MinDistFromRecentLowMajor = 0.0040m;    // 0.40%
         private const decimal MinDistFromRecentLowAlt = 0.0060m;      // 0.60%
@@ -189,7 +193,6 @@ namespace FuturesBot.Services
         // ========================= DYNAMIC RR (ƯU TIÊN HITRATE) =========================
         private const bool EnableDynamicRiskReward = true;
 
-        // Bot giống tay: RR trend nên "mềm" hơn, chỉ nâng RR khi trend thật sự khỏe
         private const decimal TrendRR_MinMajor = 1.25m;
         private const decimal TrendRR_MaxMajor = 2.00m;
 
@@ -213,7 +216,7 @@ namespace FuturesBot.Services
             // nến đã đóng
             int i15 = candles15m.Count - 2;
             int iH1 = candles1h.Count - 2;
-            if (i15 <= 2 || iH1 <= 2) return new TradeSignal(); // cần thêm buffer cho 2-step retest
+            if (i15 <= 2 || iH1 <= 2) return new TradeSignal(); // buffer cho 2-step retest
 
             var last15 = candles15m[i15];
             var lastH1 = candles1h[iH1];
@@ -235,7 +238,7 @@ namespace FuturesBot.Services
 
             // =================== BTC vs ALT PROFILE =======================
 
-            decimal rrTrend = isMajor ? RiskRewardMajor : RiskReward; // (sẽ dynamic ở dưới nếu EnableDynamicRiskReward)
+            decimal rrTrend = isMajor ? RiskRewardMajor : RiskReward; // dynamic RR sẽ update ở dưới
             decimal rrSideway = isMajor ? RiskRewardSidewayMajor : RiskRewardSideway;
             bool allowSideway = isMajor;
 
@@ -456,27 +459,20 @@ namespace FuturesBot.Services
             }
 
             // =================== V4 TREND STRENGTH FILTER (chỉ áp cho TREND TRADE) ===================
-            bool trendStrengthOk = true;
-
-            // chuẩn bị dữ liệu cho dynamic RR
-            decimal sep15Now = 0m;
-            decimal sepH1Now = 0m;
-            bool slopeOkNow = true;
-
             if (upTrend || downTrend)
             {
                 decimal price = last15.Close;
-                sep15Now = price > 0 ? Math.Abs(ema34_15Now - ema89_15Now) / price : 0m;
-                sepH1Now = lastH1.Close > 0 ? Math.Abs(ema34_h1[iH1] - ema89_h1[iH1]) / lastH1.Close : 0m;
+                decimal sep15Now = price > 0 ? Math.Abs(ema34_15Now - ema89_15Now) / price : 0m;
+                decimal sepH1Now = lastH1.Close > 0 ? Math.Abs(ema34_h1[iH1] - ema89_h1[iH1]) / lastH1.Close : 0m;
 
                 decimal minSep = isMajor ? MinEmaSeparationMajor : MinEmaSeparationAlt;
-                bool sepOk = sep15Now >= minSep && sepH1Now >= minSep * 0.75m; // H1 nhẹ hơn chút
+                bool sepOk = sep15Now >= minSep && sepH1Now >= minSep * 0.75m;
 
-                slopeOkNow = isMajor
+                bool slopeOkNow = isMajor
                     ? IsEmaSlopeOk(ema34_h1, iH1, EmaSlopeLookbackH1, MinMajorEmaSlopeH1)
-                    : true; // alt đã check ở trên
+                    : true;
 
-                trendStrengthOk = sepOk && slopeOkNow;
+                bool trendStrengthOk = sepOk && slopeOkNow;
 
                 if (!trendStrengthOk)
                 {
@@ -499,7 +495,6 @@ namespace FuturesBot.Services
                         ratioVsMedian: ratioVsMedian,
                         volumeOkSoft: volumeOkSoft);
 
-                    // safety: clamp thêm lần nữa (tránh bug config)
                     rrTrend = isMajor
                         ? Clamp(rrTrend, TrendRR_MinMajor, TrendRR_MaxMajor)
                         : Clamp(rrTrend, TrendRR_MinAlt, TrendRR_MaxAlt);
@@ -564,6 +559,9 @@ namespace FuturesBot.Services
 
             return new TradeSignal();
         }
+        // ============================
+// TradingStrategy.cs (V4) - PART 2/4
+// ============================
 
         // =====================================================================
         //                    MODE 2: PULLBACK -> REJECT -> CONTINUATION
@@ -890,8 +888,8 @@ namespace FuturesBot.Services
             }
 
             decimal entry = strongReject
-                ? B.Close * (1m + MarketableLimitOffset) // marketable limit
-                : anchor * (1m + EntryOffsetPercent);    // limit theo anchor
+                ? B.Close * (1m + MarketableLimitOffset)
+                : anchor * (1m + EntryOffsetPercent);
 
             // V4: max distance to anchor (tránh vào trễ)
             decimal maxDist = coinInfo.IsMajor ? MaxEntryDistanceToAnchorMajor : MaxEntryDistanceToAnchorAlt;
@@ -931,8 +929,7 @@ namespace FuturesBot.Services
                 };
             }
 
-            // =================== TP: dùng RR dynamic (đã tính từ GenerateSignal) ===================
-            // Bot giống tay: nếu chỉ vào vì momentumHard (không reject rõ) thì giảm RR chút để tăng hitrate
+            // =================== TP: dùng RR dynamic ===================
             decimal rr = riskRewardTrend;
             if (AllowMomentumInsteadOfReject && momentumHard && !rejectB)
                 rr = rr * 0.92m;
@@ -942,7 +939,6 @@ namespace FuturesBot.Services
             decimal risk = entry - sl;
             decimal tp = entry + risk * rr;
 
-            // ✅ MODE update: Mode1 khi strongReject, còn lại Trend
             var mode = strongReject ? TradeMode.Mode1_StrongReject : TradeMode.Trend;
             string modeTag = strongReject ? "MODE1" : "TREND_LIMIT";
 
@@ -957,6 +953,9 @@ namespace FuturesBot.Services
                 Mode = mode
             };
         }
+        // ============================
+// TradingStrategy.cs (V4) - PART 3/4
+// ============================
 
         // =====================================================================
         //                       V4 WINRATE SHORT (2-STEP)
@@ -1158,7 +1157,7 @@ namespace FuturesBot.Services
                 };
             }
 
-            // =================== TP: dùng RR dynamic (đã tính từ GenerateSignal) ===================
+            // =================== TP: dùng RR dynamic ===================
             decimal rr = riskRewardTrend;
             if (AllowMomentumInsteadOfReject && momentumHard && !rejectB)
                 rr = rr * 0.92m;
@@ -1168,7 +1167,6 @@ namespace FuturesBot.Services
             decimal risk = sl - entry;
             decimal tp = entry - risk * rr;
 
-            // ✅ MODE update: Mode1 khi strongReject, còn lại Trend
             var mode = strongReject ? TradeMode.Mode1_StrongReject : TradeMode.Trend;
             string modeTag = strongReject ? "MODE1" : "TREND_LIMIT";
 
@@ -1185,7 +1183,7 @@ namespace FuturesBot.Services
         }
 
         // =====================================================================
-        //                        SIDEWAY SCALP (15M) - giữ nguyên
+        //                        SIDEWAY SCALP (15M)
         // =====================================================================
 
         private TradeSignal BuildSidewayScalp(
@@ -1350,6 +1348,9 @@ namespace FuturesBot.Services
                 };
             }
         }
+        // ============================
+// TradingStrategy.cs (V4) - PART 4/4
+// ============================
 
         // =====================================================================
         //                    MODE 1 HELPERS: STRONG REJECTION
@@ -1768,24 +1769,15 @@ namespace FuturesBot.Services
 
         private decimal GetDynamicTrendRR(bool isMajor, decimal sep15, decimal sepH1, bool slopeOk, decimal ratioVsMedian, bool volumeOkSoft)
         {
-            // score 0..1: trend càng khỏe => RR càng cao, trend vừa => RR thấp để tăng hitrate
             decimal minSep = isMajor ? MinEmaSeparationMajor : MinEmaSeparationAlt;
 
-            // sepScore: 0 tại minSep, ~1 tại minSep*2.2
             decimal sepScore = Normalize01(sep15, minSep, minSep * 2.2m);
-
-            // h1Score: 0 tại minSep*0.75, ~1 tại minSep*1.8
             decimal h1Score = Normalize01(sepH1, minSep * 0.75m, minSep * 1.8m);
 
             decimal slopeScore = slopeOk ? 1m : 0m;
-
-            // volScore: thiên về ratioVsMedian (0.7 -> 1.2)
             decimal volScore = Normalize01(ratioVsMedian, 0.70m, 1.20m);
-
-            // volumeOkSoft nếu fail -> trừ nhẹ (đỡ vào kèo volume pullback yếu)
             decimal softScore = volumeOkSoft ? 1m : 0.7m;
 
-            // mix
             decimal score =
                 (sepScore * 0.45m) +
                 (h1Score * 0.20m) +
@@ -1793,7 +1785,6 @@ namespace FuturesBot.Services
                 (volScore * 0.15m);
 
             score *= softScore;
-
             score = Clamp(score, 0m, 1m);
 
             decimal rrMin = isMajor ? TrendRR_MinMajor : TrendRR_MinAlt;
@@ -1801,7 +1792,6 @@ namespace FuturesBot.Services
 
             decimal rr = rrMin + (rrMax - rrMin) * score;
 
-            // Bot giống tay: nếu ratioVsMedian quá thấp thì giảm RR thêm chút để dễ TP
             if (ratioVsMedian < 0.85m)
                 rr *= 0.95m;
 
