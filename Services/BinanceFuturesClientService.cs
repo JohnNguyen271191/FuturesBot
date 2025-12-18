@@ -658,8 +658,8 @@ namespace FuturesBot.Services
                         result.Funding += i.Income;
                         break;
 
-                    // NOTE: bỏ COMMISSION ở income để tránh double-count / miss
-                    // Fee chuẩn nhất lấy từ userTrades
+                        // NOTE: bỏ COMMISSION ở income để tránh double-count / miss
+                        // Fee chuẩn nhất lấy từ userTrades
                 }
             }
 
@@ -939,86 +939,82 @@ namespace FuturesBot.Services
             return list;
         }
 
-        asset khác USDT, log để biết (khỏi convert bậy).
         /// <summary>
-/// Sum commission (USDT only) bằng /fapi/v1/userTrades
-/// FIX:
-/// - Paginate bằng fromId (KHÔNG dùng startTime+1ms)
-/// - Nới window thời gian để tránh miss trade biên
-/// </summary>
-private async Task<decimal> GetCommissionFromUserTradesAsync(
-    string symbol,
-    DateTime fromUtc,
-    DateTime toUtc)
-{
-    if (_config.PaperMode) return 0m;
-
-    // Nới biên thời gian cho chắc
-    var from2 = fromUtc.AddSeconds(-10);
-    var to2   = toUtc.AddSeconds(10);
-
-    long startMs = new DateTimeOffset(from2).ToUnixTimeMilliseconds();
-    long endMs   = new DateTimeOffset(to2).ToUnixTimeMilliseconds();
-
-    const int limit = 1000;
-    decimal totalCommission = 0m;
-
-    long? fromId = null;
-
-    for (int guard = 0; guard < 50; guard++)
-    {
-        var query = new Dictionary<string, string>
+        /// Sum commission (USDT only) bằng /fapi/v1/userTrades
+        /// FIX:
+        /// - Paginate bằng fromId (KHÔNG dùng startTime+1ms)
+        /// - Nới window thời gian để tránh miss trade biên
+        /// </summary>
+        private async Task<decimal> GetCommissionFromUserTradesAsync(string symbol, DateTime fromUtc, DateTime toUtc)
         {
-            ["symbol"] = symbol,
-            ["startTime"] = startMs.ToString(CultureInfo.InvariantCulture),
-            ["endTime"]   = endMs.ToString(CultureInfo.InvariantCulture),
-            ["limit"]     = limit.ToString(),
-            ["recvWindow"] = "60000"
-        };
+            if (_config.PaperMode) return 0m;
 
-        if (fromId.HasValue)
-            query["fromId"] = fromId.Value.ToString();
+            // Nới biên thời gian cho chắc
+            var from2 = fromUtc.AddSeconds(-10);
+            var to2 = toUtc.AddSeconds(10);
 
-        var json = await SignedGetAsync(_config.Urls.UserTradesUrl, query);
+            long startMs = new DateTimeOffset(from2).ToUnixTimeMilliseconds();
+            long endMs = new DateTimeOffset(to2).ToUnixTimeMilliseconds();
 
-        using var doc = JsonDocument.Parse(json);
-        var arr = doc.RootElement;
+            const int limit = 1000;
+            decimal totalCommission = 0m;
 
-        if (arr.ValueKind != JsonValueKind.Array || arr.GetArrayLength() == 0)
-            break;
+            long? fromId = null;
 
-        long maxId = -1;
+            for (int guard = 0; guard < 50; guard++)
+            {
+                var query = new Dictionary<string, string>
+                {
+                    ["symbol"] = symbol,
+                    ["startTime"] = startMs.ToString(CultureInfo.InvariantCulture),
+                    ["endTime"] = endMs.ToString(CultureInfo.InvariantCulture),
+                    ["limit"] = limit.ToString(),
+                    ["recvWindow"] = "60000"
+                };
 
-        foreach (var el in arr.EnumerateArray())
-        {
-            long t = el.GetProperty("time").GetInt64();
-            if (t < startMs || t > endMs) continue;
+                if (fromId.HasValue)
+                    query["fromId"] = fromId.Value.ToString();
 
-            long id = el.GetProperty("id").GetInt64();
-            if (id > maxId) maxId = id;
+                var json = await SignedGetAsync(_config.Urls.UserTradesUrl, query);
 
-            var asset = el.GetProperty("commissionAsset").GetString();
-            if (!string.Equals(asset, "USDT", StringComparison.OrdinalIgnoreCase))
-                continue;
+                using var doc = JsonDocument.Parse(json);
+                var arr = doc.RootElement;
 
-            var commStr = el.GetProperty("commission").GetString();
-            if (!decimal.TryParse(commStr, NumberStyles.Float, CultureInfo.InvariantCulture, out var comm))
-                continue;
+                if (arr.ValueKind != JsonValueKind.Array || arr.GetArrayLength() == 0)
+                    break;
 
-            // Chuẩn hoá: fee luôn là số âm
-            if (comm > 0m) comm = -comm;
+                long maxId = -1;
 
-            totalCommission += comm;
+                foreach (var el in arr.EnumerateArray())
+                {
+                    long t = el.GetProperty("time").GetInt64();
+                    if (t < startMs || t > endMs) continue;
+
+                    long id = el.GetProperty("id").GetInt64();
+                    if (id > maxId) maxId = id;
+
+                    var asset = el.GetProperty("commissionAsset").GetString();
+                    if (!string.Equals(asset, "USDT", StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    var commStr = el.GetProperty("commission").GetString();
+                    if (!decimal.TryParse(commStr, NumberStyles.Float, CultureInfo.InvariantCulture, out var comm))
+                        continue;
+
+                    // Chuẩn hoá: fee luôn là số âm
+                    if (comm > 0m) comm = -comm;
+
+                    totalCommission += comm;
+                }
+
+                if (arr.GetArrayLength() < limit || maxId < 0)
+                    break;
+
+                fromId = maxId + 1;
+            }
+
+            return totalCommission;
         }
-
-        if (arr.GetArrayLength() < limit || maxId < 0)
-            break;
-
-        fromId = maxId + 1;
-    }
-
-    return totalCommission;
-}
 
         private async Task CancelAlgoOrderByIdAsync(long algoId)
         {
