@@ -209,7 +209,6 @@ namespace FuturesBot.Services
                     if (string.IsNullOrWhiteSpace(json))
                         throw new Exception("Empty response from Binance.");
 
-                    // quick parse check
                     using var testDoc = JsonDocument.Parse(json);
                     break; // success
                 }
@@ -222,7 +221,6 @@ namespace FuturesBot.Services
                         continue;
                     }
 
-                    // Sau 3 lần retry vẫn fail => log rồi trả về position rỗng
                     await _slack.SendAsync($"[ERROR] GetPositionAsync FAILED for {symbol} after 3 attempts: {ex.Message}");
                     return new PositionInfo
                     {
@@ -238,7 +236,6 @@ namespace FuturesBot.Services
             using var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;
 
-            // Nếu Binance trả error object ({"code":...,"msg":...}) hoặc format lạ
             if (root.ValueKind != JsonValueKind.Array)
             {
                 try
@@ -269,7 +266,6 @@ namespace FuturesBot.Services
                 };
             }
 
-            // Array rỗng => không có vị thế
             if (root.GetArrayLength() == 0)
             {
                 return new PositionInfo
@@ -347,7 +343,6 @@ namespace FuturesBot.Services
             if (_config.PaperMode)
                 return false;
 
-            // 1) Check position còn không
             var posParams = new Dictionary<string, string>
             {
                 ["symbol"] = symbol,
@@ -369,9 +364,7 @@ namespace FuturesBot.Services
                     if (decimal.TryParse(positionAmtStr, out var positionAmt))
                     {
                         if (positionAmt != 0)
-                        {
                             return true;
-                        }
                     }
                 }
             }
@@ -380,7 +373,6 @@ namespace FuturesBot.Services
                 await _slack.SendAsync("[WARN] Cannot parse positionRisk response.");
             }
 
-            // 2) Check openOrders (order thường)
             var orderParams = new Dictionary<string, string>
             {
                 ["symbol"] = symbol,
@@ -393,16 +385,13 @@ namespace FuturesBot.Services
             {
                 using var doc = JsonDocument.Parse(ordersJson);
                 if (doc.RootElement.ValueKind == JsonValueKind.Array && doc.RootElement.GetArrayLength() > 0)
-                {
                     return true;
-                }
             }
             catch
             {
                 await _slack.SendAsync("[WARN] Cannot parse openOrders response.");
             }
 
-            // 3) Check openAlgoOrders (SL/TP/TRAILING)
             try
             {
                 var algoParams = new Dictionary<string, string>
@@ -445,7 +434,6 @@ namespace FuturesBot.Services
             if (arr.ValueKind != JsonValueKind.Array || arr.GetArrayLength() == 0)
                 return null;
 
-            // Lấy trade mới nhất
             var last = arr[arr.GetArrayLength() - 1];
 
             return new UserTradeInfo
@@ -483,7 +471,6 @@ namespace FuturesBot.Services
 
         public async Task CancelAllOpenOrdersAsync(string symbol)
         {
-            // ===== 1) Cancel all normal open orders (/fapi/v1/allOpenOrders) =====
             long ts = GetBinanceTimestamp();
 
             var qs = $"symbol={symbol}&timestamp={ts}";
@@ -510,7 +497,6 @@ namespace FuturesBot.Services
                 await _slack.SendAsync($"[CancelAllOpenOrdersAsync OK] (normal) {symbol} => {content}");
             }
 
-            // ===== 2) Cancel all algo open orders (/fapi/v1/algoOpenOrders) =====
             try
             {
                 long ts2 = GetBinanceTimestamp();
@@ -601,7 +587,6 @@ namespace FuturesBot.Services
 
             var stop = SymbolRulesService.TruncateToStep(stopPrice, rules.PriceStep);
 
-            // PAPER MODE
             if (_config.PaperMode)
             {
                 await _slack.SendAsync($"[PAPER MODE] PlaceStopOnly {side} {symbol} qty={qty} stop={stop}");
@@ -640,7 +625,6 @@ namespace FuturesBot.Services
             var result = new NetPnlResult();
             var to = toUtc ?? DateTime.UtcNow;
 
-            // 1) Realized + Funding từ income
             var incomeList = await GetIncomeAsync(symbol, fromUtc, to);
 
             foreach (var i in incomeList)
@@ -657,13 +641,9 @@ namespace FuturesBot.Services
                     case "FUNDING_FEE":
                         result.Funding += i.Income;
                         break;
-
-                        // NOTE: bỏ COMMISSION ở income để tránh double-count / miss
-                        // Fee chuẩn nhất lấy từ userTrades
                 }
             }
 
-            // 2) Commission từ userTrades (fee lúc mở + đóng)
             result.Commission = await GetCommissionFromUserTradesAsync(symbol, fromUtc, to);
 
             return result;
@@ -671,14 +651,12 @@ namespace FuturesBot.Services
 
         public async Task CancelStopLossOrdersAsync(string symbol)
         {
-            // PAPER MODE: chỉ log, không gọi API thật
             if (_config.PaperMode)
             {
                 await _slack.SendAsync($"[PAPER MODE] CancelStopLossOrdersAsync for {symbol}");
                 return;
             }
 
-            // 1) Lấy toàn bộ algo open orders cho symbol
             var param = new Dictionary<string, string>
             {
                 ["symbol"] = symbol,
@@ -696,7 +674,6 @@ namespace FuturesBot.Services
                 return;
             }
 
-            // 2) Lọc các lệnh StopLoss: orderType = STOP / STOP_MARKET
             var slAlgoIds = new List<long>();
             foreach (var el in root.EnumerateArray())
             {
@@ -716,7 +693,6 @@ namespace FuturesBot.Services
                 return;
             }
 
-            // 3) Cancel từng algo order theo algoId
             foreach (var algoId in slAlgoIds)
             {
                 await CancelAlgoOrderByIdAsync(algoId);
@@ -795,18 +771,16 @@ namespace FuturesBot.Services
 
             foreach (var el in root.EnumerateArray())
             {
-                // /fapi/v1/algoOpenOrders trả về:
-                // algoId, symbol, side, orderType, price, triggerPrice, quantity, ...
                 list.Add(new OpenOrderInfo
                 {
                     Symbol = el.GetProperty("symbol").GetString() ?? symbol,
-                    ClientOrderId = string.Empty, // algo không có clientOrderId
+                    ClientOrderId = string.Empty,
                     OrderId = el.GetProperty("algoId").GetInt64().ToString(),
                     Side = el.GetProperty("side").GetString() ?? string.Empty,
                     Type = el.GetProperty("orderType").GetString() ?? string.Empty,
                     Price = decimal.Parse(el.GetProperty("price").GetString() ?? "0", CultureInfo.InvariantCulture),
                     OrigQty = decimal.Parse(el.GetProperty("quantity").GetString() ?? "0", CultureInfo.InvariantCulture),
-                    ExecutedQty = 0m, // algo conditional chưa khớp
+                    ExecutedQty = 0m,
                     StopPrice = decimal.Parse(el.GetProperty("triggerPrice").GetString() ?? "0", CultureInfo.InvariantCulture),
                 });
             }
@@ -892,7 +866,6 @@ namespace FuturesBot.Services
 
         private long GetBinanceTimestamp()
         {
-            // lần đầu hoặc sau 5 phút thì sync lại
             if (_lastTimeSync == DateTime.MinValue ||
                 (DateTime.UtcNow - _lastTimeSync) > TimeSpan.FromMinutes(5))
             {
@@ -941,39 +914,48 @@ namespace FuturesBot.Services
 
         /// <summary>
         /// Sum commission (USDT only) bằng /fapi/v1/userTrades
-        /// FIX:
-        /// - Paginate bằng fromId (KHÔNG dùng startTime+1ms)
-        /// - Nới window thời gian để tránh miss trade biên
+        /// FIX (đúng ý mày "reset qua ngày"):
+        /// - Vẫn có thể nới window để query tránh miss biên
+        /// - Nhưng khi CỘNG commission phải lọc theo [fromUtc, toUtc] STRICT (không ăn fee của ngày trước)
+        /// - Paginate bằng fromId để không miss/loop
         /// </summary>
         private async Task<decimal> GetCommissionFromUserTradesAsync(string symbol, DateTime fromUtc, DateTime toUtc)
         {
             if (_config.PaperMode) return 0m;
 
-            // Nới biên thời gian cho chắc
-            var from2 = fromUtc.AddSeconds(-10);
-            var to2 = toUtc.AddSeconds(10);
+            // STRICT window: đúng khoảng thời gian caller muốn (vd: start-of-day -> now)
+            long strictStartMs = new DateTimeOffset(fromUtc).ToUnixTimeMilliseconds();
+            long strictEndMs = new DateTimeOffset(toUtc).ToUnixTimeMilliseconds();
 
-            long startMs = new DateTimeOffset(from2).ToUnixTimeMilliseconds();
-            long endMs = new DateTimeOffset(to2).ToUnixTimeMilliseconds();
+            if (strictEndMs < strictStartMs)
+                return 0m;
+
+            // Query window: nới nhẹ để tránh miss trade biên do clock/network
+            // (NHƯNG KHÔNG dùng query window để tính toán)
+            var queryFrom = fromUtc.AddSeconds(-10);
+            var queryTo = toUtc.AddSeconds(10);
+            long queryStartMs = new DateTimeOffset(queryFrom).ToUnixTimeMilliseconds();
+            long queryEndMs = new DateTimeOffset(queryTo).ToUnixTimeMilliseconds();
 
             const int limit = 1000;
             decimal totalCommission = 0m;
 
             long? fromId = null;
 
+            // safety: chống loop vô hạn
             for (int guard = 0; guard < 50; guard++)
             {
                 var query = new Dictionary<string, string>
                 {
                     ["symbol"] = symbol,
-                    ["startTime"] = startMs.ToString(CultureInfo.InvariantCulture),
-                    ["endTime"] = endMs.ToString(CultureInfo.InvariantCulture),
-                    ["limit"] = limit.ToString(),
+                    ["startTime"] = queryStartMs.ToString(CultureInfo.InvariantCulture),
+                    ["endTime"] = queryEndMs.ToString(CultureInfo.InvariantCulture),
+                    ["limit"] = limit.ToString(CultureInfo.InvariantCulture),
                     ["recvWindow"] = "60000"
                 };
 
                 if (fromId.HasValue)
-                    query["fromId"] = fromId.Value.ToString();
+                    query["fromId"] = fromId.Value.ToString(CultureInfo.InvariantCulture);
 
                 var json = await SignedGetAsync(_config.Urls.UserTradesUrl, query);
 
@@ -988,7 +970,10 @@ namespace FuturesBot.Services
                 foreach (var el in arr.EnumerateArray())
                 {
                     long t = el.GetProperty("time").GetInt64();
-                    if (t < startMs || t > endMs) continue;
+
+                    // ✅ IMPORTANT: lọc theo STRICT, không lọc theo query window
+                    if (t < strictStartMs || t > strictEndMs)
+                        continue;
 
                     long id = el.GetProperty("id").GetInt64();
                     if (id > maxId) maxId = id;
@@ -1001,14 +986,32 @@ namespace FuturesBot.Services
                     if (!decimal.TryParse(commStr, NumberStyles.Float, CultureInfo.InvariantCulture, out var comm))
                         continue;
 
-                    // Chuẩn hoá: fee luôn là số âm
-                    if (comm > 0m) comm = -comm;
+                    // Chuẩn hoá: commission luôn là số âm (Binance thường trả chuỗi dương)
+                    comm = -Math.Abs(comm);
 
                     totalCommission += comm;
                 }
 
-                if (arr.GetArrayLength() < limit || maxId < 0)
+                // Nếu page < limit => hết dữ liệu
+                if (arr.GetArrayLength() < limit)
                     break;
+
+                // Nếu không bắt được maxId (do tất cả nằm ngoài strict window),
+                // vẫn cần tiến fromId để tránh lặp page.
+                if (maxId < 0)
+                {
+                    // fallback: lấy id lớn nhất của page
+                    long pageMax = -1;
+                    foreach (var el in arr.EnumerateArray())
+                    {
+                        var id = el.GetProperty("id").GetInt64();
+                        if (id > pageMax) pageMax = id;
+                    }
+                    if (pageMax < 0) break;
+
+                    fromId = pageMax + 1;
+                    continue;
+                }
 
                 fromId = maxId + 1;
             }
@@ -1018,7 +1021,6 @@ namespace FuturesBot.Services
 
         private async Task CancelAlgoOrderByIdAsync(long algoId)
         {
-            // PAPER MODE
             if (_config.PaperMode)
             {
                 await _slack.SendAsync($"[PAPER MODE] CancelAlgoOrderById algoId={algoId}");
