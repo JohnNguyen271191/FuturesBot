@@ -972,8 +972,8 @@ namespace FuturesBot.Services
                     long t = el.GetProperty("time").GetInt64();
 
                     // ✅ IMPORTANT: lọc theo STRICT, không lọc theo query window
-                    if (t < strictStartMs || t > strictEndMs)
-                        continue;
+                    //if (t < strictStartMs || t > strictEndMs)
+                        //continue;
 
                     long id = el.GetProperty("id").GetInt64();
                     if (id > maxId) maxId = id;
