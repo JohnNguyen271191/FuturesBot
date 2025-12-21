@@ -32,6 +32,10 @@ namespace FuturesBot.Services
     /// - Net PnL & Net RR trừ phí ước lượng (taker-safe) cho mọi quyết định (protect/quick/danger/time/early)
     /// - Hậu kiểm commission thật từ userTrades (ưu tiên method GetCommissionFromUserTradesAsync của BinanceFuturesClientService)
     ///   để update feeRate theo EWMA
+    ///
+    /// PATCH (NEW - fee bleed fix theo case của mày):
+    /// - Mọi exit/protect/quick/boundary/time/danger đều dùng "minNetProfitUsd" = max(profileMin, estFeeUsd * Mult)
+    ///   để tránh "thấy lãi gộp" nhưng net âm do fee.
     /// </summary>
     public class OrderManagerService
     {
@@ -44,7 +48,7 @@ namespace FuturesBot.Services
         private const int SlTpCheckEverySec = 30;
         private const int CandleFetchEverySec = 20;
 
-        private static readonly TimeSpan DefaultLimitTimeout = TimeSpan.FromMinutes(20);
+        private static readonly TimeSpan DefaultLimitTimeout = TimeSpan.FromMinutes(30);
 
         // Grace sau fill (sàn chưa sync kịp algoOrders)
         private const int SlTpGraceAfterFillSec = 8;
@@ -86,6 +90,19 @@ namespace FuturesBot.Services
 
         // Khi position đóng, lookback để lấy userTrades fee thật
         private static readonly TimeSpan RealFeeLookback = TimeSpan.FromMinutes(30);
+
+        // ===== NEW: Fee-safe multipliers (tránh net âm do phí) =====
+        // Protect/Quick: yêu cầu netProfit >= fee * 2 (ít nhất phải "ăn được phí" và còn dư)
+        private const decimal ProtectMinNetProfitVsFeeMult = 2.0m;
+        private const decimal QuickMinNetProfitVsFeeMult = 2.0m;
+
+        // Early exit: cho phép thấp hơn chút, nhưng vẫn phải cover fee (>= 1.2x fee) để không net âm
+        private const decimal EarlyExitMinNetProfitVsFeeMult = 1.2m;
+
+        // Boundary exit: cũng cần cover fee
+        private const decimal BoundaryExitMinNetProfitVsFeeMult = 1.8m;
+
+        // Danger cut: dùng lossAbs gate riêng, không cần mult
 
         private sealed class FeeStats
         {
@@ -180,7 +197,7 @@ namespace FuturesBot.Services
                         TimeStopMinRR = 0.18m,
                         SafetyTpRR = 1.30m,
                         EmaBreakTolerance = 0.0012m,
-                        LimitTimeout = TimeSpan.FromMinutes(10),
+                        LimitTimeout = TimeSpan.FromMinutes(20),
 
                         MinProtectProfitUsd = 0.10m,
                         MinQuickTakeProfitUsd = 0.15m,
@@ -203,7 +220,7 @@ namespace FuturesBot.Services
                         TimeStopMinRR = 0.20m,
                         SafetyTpRR = 1.60m,
                         EmaBreakTolerance = 0.0010m,
-                        LimitTimeout = TimeSpan.FromMinutes(8),
+                        LimitTimeout = TimeSpan.FromMinutes(15),
 
                         MinProtectProfitUsd = 0.15m,
                         MinQuickTakeProfitUsd = 0.25m,
@@ -529,6 +546,12 @@ namespace FuturesBot.Services
                         netRr = netPnlUsd / riskUsd;
                     }
 
+                    // ===== NEW: fee-safe min net profit gates (anti "lãi gộp nhưng net âm") =====
+                    decimal minProtectNetProfitUsd = Math.Max(profile.MinProtectProfitUsd, estFeeUsd * ProtectMinNetProfitVsFeeMult);
+                    decimal minQuickNetProfitUsd = Math.Max(profile.MinQuickTakeProfitUsd, estFeeUsd * QuickMinNetProfitVsFeeMult);
+                    decimal minEarlyNetProfitUsd = Math.Max(profile.EarlyExitMinProfitUsd, estFeeUsd * EarlyExitMinNetProfitVsFeeMult);
+                    decimal minBoundaryNetProfitUsd = Math.Max(profile.MinProtectProfitUsd, estFeeUsd * BoundaryExitMinNetProfitVsFeeMult);
+
                     // =================== SAFETY TP (nếu thiếu TP) - MODE AWARE ===================
                     if (hasEntry && hasSL && !hasTP && !autoTpPlaced)
                     {
@@ -610,9 +633,9 @@ namespace FuturesBot.Services
                             }
                         }
 
-                        // ===== EARLY EXIT (fee-safe) - use NET =====
+                        // ===== EARLY EXIT (fee-safe) - use NET + fee gate =====
                         if (timeStopAnchorUtc.HasValue
-                            && netPnlUsd >= profile.EarlyExitMinProfitUsd
+                            && netPnlUsd >= minEarlyNetProfitUsd
                             && netRr >= profile.EarlyExitMinRR)
                         {
                             int barsPassed = CountClosedBarsSince(timeStopAnchorUtc.Value, c0.OpenTime, 15);
@@ -623,7 +646,7 @@ namespace FuturesBot.Services
                             if (barsPassed >= profile.EarlyExitBars && (weakening || stall || (nearBoundary && !danger)))
                             {
                                 await _notify.SendAsync(
-                                    $"[{symbol}] EARLY EXIT (NET): bars={barsPassed} netRr={netRr:F2} net={netPnlUsd:F4} (pnl={pnlUsd:F4} fee~{estFeeUsd:F4}) atr={(atr > 0 ? atr.ToString("F4") : "0")} stall={(stall ? "Y" : "N")} weak={(weakening ? "Y" : "N")} nearBoundary={(nearBoundary ? "Y" : "N")} → close | mode={profile.Tag}");
+                                    $"[{symbol}] EARLY EXIT (NET+FEE): bars={barsPassed} netRr={netRr:F2} net={netPnlUsd:F4} (pnl={pnlUsd:F4} fee~{estFeeUsd:F4} minNet={minEarlyNetProfitUsd:F4}) atr={(atr > 0 ? atr.ToString("F4") : "0")} stall={(stall ? "Y" : "N")} weak={(weakening ? "Y" : "N")} nearBoundary={(nearBoundary ? "Y" : "N")} → close | mode={profile.Tag}");
 
                                 await _exchange.ClosePositionAsync(symbol, qty);
                                 await SafeCancelLeftoverProtectiveAsync(symbol);
@@ -631,9 +654,9 @@ namespace FuturesBot.Services
                             }
                         }
 
-                        // ===== Profit protect (ATR-based) (use NET gates) =====
+                        // ===== Profit protect (ATR-based) (use NET + fee gate) =====
                         if (netRr >= profile.ProtectAtRR
-                            && netPnlUsd >= profile.MinProtectProfitUsd
+                            && netPnlUsd >= minProtectNetProfitUsd
                             && hasSL
                             && IsValidStopLoss(sl, isLongPosition, entry))
                         {
@@ -694,7 +717,7 @@ namespace FuturesBot.Services
                                         lastSlTpCheckUtc);
 
                                     await _notify.SendAsync(
-                                        $"[{symbol}] PROTECT ATR (NET): netRr={netRr:F2} net={netPnlUsd:F4} fee~{estFeeUsd:F4} risk={riskUsd:F4} atr={atr:F4} moved={(movedEnoughForProfitLock ? "Y" : "N")} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
+                                        $"[{symbol}] PROTECT ATR (NET+FEE): netRr={netRr:F2} net={netPnlUsd:F4} fee~{estFeeUsd:F4} minNet={minProtectNetProfitUsd:F4} risk={riskUsd:F4} atr={atr:F4} moved={(movedEnoughForProfitLock ? "Y" : "N")} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
                                 }
                             }
                             else
@@ -716,19 +739,19 @@ namespace FuturesBot.Services
                                         pos,
                                         lastSlTpCheckUtc);
 
-                                    await _notify.SendAsync($"[{symbol}] PROTECT (fallback NET): netRr={netRr:F2} net={netPnlUsd:F4} fee~{estFeeUsd:F4} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
+                                    await _notify.SendAsync($"[{symbol}] PROTECT (fallback NET+FEE): netRr={netRr:F2} net={netPnlUsd:F4} fee~{estFeeUsd:F4} minNet={minProtectNetProfitUsd:F4} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
                                 }
                             }
                         }
 
                     AFTER_PROTECT_BLOCK:
 
-                        // ===== Quick take (use NET) =====
-                        if (netRr >= profile.QuickTakeMinRR && netPnlUsd >= profile.MinQuickTakeProfitUsd && weakening)
+                        // ===== Quick take (use NET + fee gate) =====
+                        if (netRr >= profile.QuickTakeMinRR && netPnlUsd >= minQuickNetProfitUsd && weakening)
                         {
                             if (netRr >= profile.QuickTakeGoodRR || danger || IsOppositeStrongCandle(c0, isLongPosition))
                             {
-                                await _notify.SendAsync($"[{symbol}] QUICK TAKE (NET): netRr={netRr:F2} net={netPnlUsd:F4} (fee~{estFeeUsd:F4}) → close | mode={profile.Tag}");
+                                await _notify.SendAsync($"[{symbol}] QUICK TAKE (NET+FEE): netRr={netRr:F2} net={netPnlUsd:F4} (fee~{estFeeUsd:F4} minNet={minQuickNetProfitUsd:F4}) → close | mode={profile.Tag}");
                                 await _exchange.ClosePositionAsync(symbol, qty);
                                 await SafeCancelLeftoverProtectiveAsync(symbol);
                                 return;
@@ -748,10 +771,10 @@ namespace FuturesBot.Services
                             }
                         }
 
-                        // ===== Exit on boundary break nếu đã dương chút (use NET) =====
-                        if (danger && netRr >= 0.10m && netPnlUsd >= profile.MinProtectProfitUsd)
+                        // ===== Exit on boundary break nếu đã dương chút (use NET + fee gate) =====
+                        if (danger && netRr >= 0.10m && netPnlUsd >= minBoundaryNetProfitUsd)
                         {
-                            await _notify.SendAsync($"[{symbol}] EXIT ON BOUNDARY BREAK (NET): netRr={netRr:F2} net={netPnlUsd:F4} (fee~{estFeeUsd:F4}) → close | mode={profile.Tag}");
+                            await _notify.SendAsync($"[{symbol}] EXIT ON BOUNDARY BREAK (NET+FEE): netRr={netRr:F2} net={netPnlUsd:F4} (fee~{estFeeUsd:F4} minNet={minBoundaryNetProfitUsd:F4}) → close | mode={profile.Tag}");
                             await _exchange.ClosePositionAsync(symbol, qty);
                             await SafeCancelLeftoverProtectiveAsync(symbol);
                             return;
@@ -1461,10 +1484,12 @@ namespace FuturesBot.Services
             {
                 var candidates = new[]
                 {
+                    "GetCommissionsFromUserTradesAsync",
                     "GetCommissionFromUserTradeAsync",
                     "GetCommissionForUserTradeAsync",
-                    "GetCommissionsFromUserTradesAsync",
-                    "GetCommissionFromUserTrades"
+                    "GetCommissionsForUserTradesAsync",
+                    "GetCommissionFromUserTrades",
+                    "GetCommissionsFromUserTrades"
                 };
 
                 foreach (var name in candidates)
