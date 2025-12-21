@@ -30,7 +30,8 @@ namespace FuturesBot.Services
     ///
     /// PATCH (NEW - fee adaptive):
     /// - Net PnL & Net RR trừ phí ước lượng (taker-safe) cho mọi quyết định (protect/quick/danger/time/early)
-    /// - Hậu kiểm commission thật từ userTrades (nếu BinanceFuturesClientService có method) để update feeRate theo EWMA
+    /// - Hậu kiểm commission thật từ userTrades (ưu tiên method GetCommissionFromUserTradesAsync của BinanceFuturesClientService)
+    ///   để update feeRate theo EWMA
     /// </summary>
     public class OrderManagerService
     {
@@ -83,7 +84,7 @@ namespace FuturesBot.Services
         // EWMA update rate
         private const decimal FeeEwmaAlpha = 0.20m;
 
-        // Khi position đóng, lookback để lấy userTrades fee thật (tránh gọi quá rộng)
+        // Khi position đóng, lookback để lấy userTrades fee thật
         private static readonly TimeSpan RealFeeLookback = TimeSpan.FromMinutes(30);
 
         private sealed class FeeStats
@@ -167,7 +168,6 @@ namespace FuturesBot.Services
             {
                 return mode switch
                 {
-                    // ====== SCALP ======
                     TradeMode.Scalp => new ModeProfile
                     {
                         Mode = mode,
@@ -191,7 +191,6 @@ namespace FuturesBot.Services
                         EarlyExitMinProfitUsd = 0.12m,
                     },
 
-                    // ====== MODE2 CONTINUATION ======
                     TradeMode.Mode2_Continuation => new ModeProfile
                     {
                         Mode = mode,
@@ -215,7 +214,6 @@ namespace FuturesBot.Services
                         EarlyExitMinProfitUsd = 0.18m,
                     },
 
-                    // ====== TREND (default) ======
                     _ => new ModeProfile
                     {
                         Mode = TradeMode.Trend,
@@ -389,7 +387,6 @@ namespace FuturesBot.Services
 
             var positionMonitorStartedUtc = DateTime.UtcNow;
 
-            // TIME-STOP state
             bool timeStopTriggered = false;
             DateTime? timeStopAnchorUtc = null;
 
@@ -412,7 +409,7 @@ namespace FuturesBot.Services
 
                     if (qty == 0)
                     {
-                        // Try update adaptive fee based on real commission from userTrades (best-effort)
+                        // best-effort: update EWMA fee using real commission from userTrades
                         await TryAdaptiveFeeUpdateOnCloseAsync(symbol, lastKnownEntry, lastKnownMarkPrice, lastKnownAbsQty);
 
                         await _notify.SendAsync($"[{symbol}] Position closed → stop monitor.");
@@ -464,7 +461,6 @@ namespace FuturesBot.Services
                         }
                     }
 
-                    // notify thiếu thông tin (sau grace)
                     if (!inGrace)
                     {
                         if ((!hasEntry || !hasSL || !hasTP) && !missingNotified)
@@ -509,7 +505,7 @@ namespace FuturesBot.Services
                         }
                     }
 
-                    // Fee estimate (safe): assume taker both sides unless you want maker detection
+                    // Fee estimate (safe): assume taker both sides
                     if (hasEntry && absQty > 0m && entry > 0m && price > 0m)
                     {
                         decimal feeRate = GetEffectiveFeeRate(symbol);
@@ -614,9 +610,7 @@ namespace FuturesBot.Services
                             }
                         }
 
-                        // ============================================================
-                        // ✅ NEW: EARLY EXIT (fee-safe) - use NET
-                        // ============================================================
+                        // ===== EARLY EXIT (fee-safe) - use NET =====
                         if (timeStopAnchorUtc.HasValue
                             && netPnlUsd >= profile.EarlyExitMinProfitUsd
                             && netRr >= profile.EarlyExitMinRR)
@@ -741,7 +735,7 @@ namespace FuturesBot.Services
                             }
                         }
 
-                        // ===== Danger cut (loss should include fee estimate too) =====
+                        // ===== Danger cut (loss include fee estimate) =====
                         if (netRr <= profile.DangerCutIfRRBelow && danger)
                         {
                             var absLossUsd = Math.Max(0m, -netPnlUsd);
@@ -1399,12 +1393,8 @@ namespace FuturesBot.Services
 
         private decimal GetEffectiveFeeRate(string symbol)
         {
-            // ưu tiên EWMA theo symbol, nếu chưa có thì default taker-safe
             var s = _feeStatsBySymbol.GetOrAdd(symbol, _ => new FeeStats());
             if (s.EwmaRate <= 0m) s.EwmaRate = DefaultTakerFeeRate;
-
-            // Nếu muốn lấy từ config thì mày gắn vào đây (không đoán schema BotConfig của mày)
-            // Ví dụ (nếu có): return Math.Max(_botConfig.Fees?.Taker ?? DefaultTakerFeeRate, 0m);
             return s.EwmaRate;
         }
 
@@ -1415,25 +1405,23 @@ namespace FuturesBot.Services
                 if (entry <= 0m || lastMarkPrice <= 0m || absQty <= 0m)
                     return;
 
-                // notional xấp xỉ (close theo mark)
                 decimal notional2Sides = (entry * absQty) + (lastMarkPrice * absQty);
                 if (notional2Sides <= 0m) return;
 
-                // best-effort: lấy commission thật gần thời điểm close
                 var fromUtc = DateTime.UtcNow - RealFeeLookback;
                 var toUtc = DateTime.UtcNow;
 
-                decimal? realCommissionAbsUsd = await TryGetRealCommissionUsdFromUserTradesAsync(symbol, fromUtc, toUtc);
+                // ✅ DÙNG method GetCommissionFromUserTradesAsync của mày (tổng commission âm) -> lấy ABS
+                decimal? realCommissionAbsUsd = await TryGetRealCommissionAbsUsdAsync(symbol, fromUtc, toUtc);
                 if (!realCommissionAbsUsd.HasValue || realCommissionAbsUsd.Value <= 0m)
                     return;
 
                 decimal realizedRate = realCommissionAbsUsd.Value / notional2Sides;
-                if (realizedRate <= 0m || realizedRate > 0.01m) // chặn outlier (1% là quá dị)
+                if (realizedRate <= 0m || realizedRate > 0.01m) // chặn outlier
                     return;
 
                 var stats = _feeStatsBySymbol.GetOrAdd(symbol, _ => new FeeStats());
 
-                // EWMA
                 decimal old = stats.EwmaRate <= 0m ? DefaultTakerFeeRate : stats.EwmaRate;
                 decimal updated = old + FeeEwmaAlpha * (realizedRate - old);
 
@@ -1451,48 +1439,46 @@ namespace FuturesBot.Services
         }
 
         /// <summary>
-        /// Không đoán interface của mày nên tao gọi best-effort bằng reflection.
-        /// Hỗ trợ các kiểu trả về phổ biến:
-        /// - decimal (commission abs)
-        /// - NetPnlResult (Commission property, có thể âm => lấy abs)
-        /// - IEnumerable<UserTrade> (mỗi trade có Commission / commission / commissionAmount)
-        /// Nếu không match được => null.
+        /// Ưu tiên gọi đúng method của mày:
+        ///   GetCommissionFromUserTradesAsync(string symbol, DateTime fromUtc, DateTime toUtc)
+        /// method này return tổng commission (âm). Ở đây lấy ABS.
+        /// Nếu interface chưa expose, thì gọi best-effort bằng reflection.
         /// </summary>
-        private async Task<decimal?> TryGetRealCommissionUsdFromUserTradesAsync(string symbol, DateTime fromUtc, DateTime toUtc)
+        private async Task<decimal?> TryGetRealCommissionAbsUsdAsync(string symbol, DateTime fromUtc, DateTime toUtc)
         {
-            // Nếu mày có method chuẩn trong IExchangeClientService thì cứ thay block reflection này bằng call trực tiếp.
             object? svc = _exchange;
             if (svc == null) return null;
 
             var type = svc.GetType();
 
-            // Try candidates
-            var candidates = new[]
-            {
-                "GetCommissionsFromUserTradesAsync",
-                "GetCommissionsFromUserTrades",
-                "GetCommissionForUserTradeAsync",
-                "GetCommissionForUserTrade",
+            // 1) ưu tiên đúng tên mà mày đang có
+            MethodInfo? mi = type.GetMethod(
                 "GetCommissionFromUserTradesAsync",
-                "GetCommissionFromUserTrades",
-                "GetUserTradeCommissionAsync",
-                "GetUserTradeCommission"
-            };
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
 
-            MethodInfo? mi = null;
-            foreach (var name in candidates)
+            // 2) fallback vài tên phổ biến (tránh fail nếu mày rename)
+            if (mi == null)
             {
-                mi = type.GetMethod(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-                if (mi != null) break;
+                var candidates = new[]
+                {
+                    "GetCommissionFromUserTradeAsync",
+                    "GetCommissionForUserTradeAsync",
+                    "GetCommissionsFromUserTradesAsync",
+                    "GetCommissionFromUserTrades"
+                };
+
+                foreach (var name in candidates)
+                {
+                    mi = type.GetMethod(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                    if (mi != null) break;
+                }
             }
 
             if (mi == null) return null;
 
-            // Build args flexibly:
-            // Prefer signatures: (string symbol, DateTime fromUtc, DateTime toUtc) or (string symbol) or (string symbol, long startTimeMs)
             var ps = mi.GetParameters();
-            object?[] args;
 
+            object?[] args;
             if (ps.Length == 3
                 && ps[0].ParameterType == typeof(string)
                 && ps[1].ParameterType == typeof(DateTime)
@@ -1500,32 +1486,14 @@ namespace FuturesBot.Services
             {
                 args = new object?[] { symbol, fromUtc, toUtc };
             }
-            else if (ps.Length == 2
-                && ps[0].ParameterType == typeof(string)
-                && ps[1].ParameterType == typeof(DateTime))
-            {
-                args = new object?[] { symbol, fromUtc };
-            }
-            else if (ps.Length == 2
-                && ps[0].ParameterType == typeof(string)
-                && (ps[1].ParameterType == typeof(long) || ps[1].ParameterType == typeof(long?)))
-            {
-                long startMs = new DateTimeOffset(fromUtc).ToUnixTimeMilliseconds();
-                args = new object?[] { symbol, startMs };
-            }
-            else if (ps.Length == 1 && ps[0].ParameterType == typeof(string))
-            {
-                args = new object?[] { symbol };
-            }
             else
             {
-                // unknown signature
+                // Không match signature -> thôi
                 return null;
             }
 
             object? invokeResult = mi.Invoke(svc, args);
 
-            // Await Task if needed
             if (invokeResult is Task t)
             {
                 await t.ConfigureAwait(false);
@@ -1533,14 +1501,11 @@ namespace FuturesBot.Services
                 object? resObj = null;
                 var taskType = t.GetType();
                 if (taskType.IsGenericType)
-                {
                     resObj = taskType.GetProperty("Result")?.GetValue(t);
-                }
 
                 return ExtractCommissionAbsUsd(resObj);
             }
 
-            // Non-task
             return ExtractCommissionAbsUsd(invokeResult);
         }
 
@@ -1548,15 +1513,10 @@ namespace FuturesBot.Services
         {
             if (obj == null) return null;
 
-            // decimal direct
-            if (obj is decimal d)
-                return Math.Abs(d);
-
-            if (obj is double dd)
-                return (decimal)Math.Abs(dd);
-
-            if (obj is float ff)
-                return (decimal)Math.Abs(ff);
+            // decimal direct (method của mày return decimal)
+            if (obj is decimal d) return Math.Abs(d);
+            if (obj is double dd) return (decimal)Math.Abs(dd);
+            if (obj is float ff) return (decimal)Math.Abs(ff);
 
             // NetPnlResult style: has Commission property
             var t = obj.GetType();
@@ -1566,33 +1526,6 @@ namespace FuturesBot.Services
                 var v = pComm.GetValue(obj);
                 if (v is decimal cdec) return Math.Abs(cdec);
                 if (v is double cdbl) return (decimal)Math.Abs(cdbl);
-            }
-
-            // IEnumerable trades: sum commission fields
-            if (obj is System.Collections.IEnumerable en && obj is not string)
-            {
-                decimal sum = 0m;
-                bool any = false;
-
-                foreach (var item in en)
-                {
-                    if (item == null) continue;
-                    any = true;
-
-                    var it = item.GetType();
-
-                    // common names
-                    var p1 = it.GetProperty("Commission") ?? it.GetProperty("commission") ?? it.GetProperty("commissionAmount");
-                    if (p1 != null)
-                    {
-                        var v = p1.GetValue(item);
-                        if (v is decimal vdec) sum += Math.Abs(vdec);
-                        else if (v is double vdbl) sum += (decimal)Math.Abs(vdbl);
-                        else if (v is string s && decimal.TryParse(s, out var parsed)) sum += Math.Abs(parsed);
-                    }
-                }
-
-                return any ? sum : null;
             }
 
             return null;
