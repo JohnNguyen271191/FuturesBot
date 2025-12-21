@@ -21,6 +21,11 @@ namespace FuturesBot.Services
     /// - Anti "trail ngu" bị quét pullback:
     ///   + Chỉ cho phép trailing sớm khi có "pullback -> resume" (cấu trúc continuation)
     ///   + Throttle trailing: tối thiểu X giây / tối thiểu bước SL theo ATR để tránh update liên tục
+    ///
+    /// PATCH (NEW - theo case ETH 2h->3h):
+    /// - EARLY EXIT (fee-safe): nếu đã lời nhỏ nhưng market stall/weakening trong vài nến → đóng sớm để khỏi bleed fee
+    ///   + Không đợi rr lớn (0.35R...) như quick-take cũ
+    ///   + Dùng: pnlUsd + rr nhỏ + stall(ATR range hẹp) / weakening / boundary pressure
     /// </summary>
     public class OrderManagerService
     {
@@ -55,11 +60,16 @@ namespace FuturesBot.Services
         private const decimal AtrToAllowProfitLock = 1.0m; // phải đi >= 1 ATR mới cho phép SL vượt entry (lock lời)
 
         // =============== PATCH: anti pullback trailing (HƯỚNG 2) ===
-        // 1) Chỉ trailing sớm nếu giá đã đi đủ một đoạn + có pullback->resume
-        private const decimal RequireMoveBeforeTrailAtrFrac = 0.60m;   // giá phải đi >= 0.6 ATR từ entry
+        private const decimal RequireMoveBeforeTrailAtrFrac = 0.60m;    // giá phải đi >= 0.6 ATR từ entry
         private const decimal PullbackMustNotBreakEntryAtrFrac = 0.20m; // pullback không được xuyên entry quá sâu (theo ATR)
-        private const int TrailingMinUpdateIntervalSec = 45;           // tối thiểu 45s mới update SL 1 lần
-        private const decimal TrailingMinStepAtrFrac = 0.15m;          // SL phải "tốt hơn" tối thiểu 0.15 ATR mới update
+        private const int TrailingMinUpdateIntervalSec = 45;            // tối thiểu 45s mới update SL 1 lần
+        private const decimal TrailingMinStepAtrFrac = 0.15m;           // SL phải "tốt hơn" tối thiểu 0.15 ATR mới update
+
+        // =============== PATCH: EARLY EXIT (fee-safe) ==============
+        // Market stall: range rất hẹp theo ATR trong N nến => đóng sớm nếu đã lời một chút
+        private const decimal StallRangeAtrFrac = 0.45m;          // range (maxHigh-minLow) <= 0.45 ATR coi như stall
+        private const decimal NearBoundaryAtrFrac = 0.20m;        // coi như "đè biên EMA" nếu cách boundary <= 0.2 ATR
+        private const decimal StallSmallBodyToRangeMax = 0.45m;   // nhiều nến thân nhỏ => thiếu momentum
 
         // =============== Debug throttle ===========================
         private readonly ConcurrentDictionary<string, DateTime> _lastMissingLogUtc = new();
@@ -108,10 +118,14 @@ namespace FuturesBot.Services
             public decimal TimeStopMinRR { get; init; }
 
             // --- Anti “0.03$ lock” gate ---
-            // Chỉ trigger PROTECT / QUICK TAKE / DANGER CUT nếu PnL đạt tối thiểu theo USD
             public decimal MinProtectProfitUsd { get; init; }
             public decimal MinQuickTakeProfitUsd { get; init; }
             public decimal MinDangerCutAbsLossUsd { get; init; }
+
+            // --- NEW: Early exit (fee-safe) ---
+            public int EarlyExitBars { get; init; }
+            public decimal EarlyExitMinRR { get; init; }
+            public decimal EarlyExitMinProfitUsd { get; init; }
 
             // Safety TP
             public decimal SafetyTpRR { get; init; }
@@ -143,10 +157,14 @@ namespace FuturesBot.Services
                         EmaBreakTolerance = 0.0012m,
                         LimitTimeout = TimeSpan.FromMinutes(10),
 
-                        // ✅ FIX: scalp nhỏ, fee ảnh hưởng nhiều → đừng lock/close khi PnL còn vài cent
                         MinProtectProfitUsd = 0.10m,
                         MinQuickTakeProfitUsd = 0.15m,
                         MinDangerCutAbsLossUsd = 0.12m,
+
+                        // ✅ NEW: thoát sớm nếu đã lời nhỏ nhưng stall/weakening
+                        EarlyExitBars = 3,
+                        EarlyExitMinRR = 0.06m,
+                        EarlyExitMinProfitUsd = 0.12m,
                     },
 
                     // ====== MODE2 CONTINUATION ======
@@ -167,6 +185,10 @@ namespace FuturesBot.Services
                         MinProtectProfitUsd = 0.15m,
                         MinQuickTakeProfitUsd = 0.25m,
                         MinDangerCutAbsLossUsd = 0.18m,
+
+                        EarlyExitBars = 3,
+                        EarlyExitMinRR = 0.08m,
+                        EarlyExitMinProfitUsd = 0.18m,
                     },
 
                     // ====== TREND (default) ======
@@ -187,6 +209,10 @@ namespace FuturesBot.Services
                         MinProtectProfitUsd = 0.25m,
                         MinQuickTakeProfitUsd = 0.40m,
                         MinDangerCutAbsLossUsd = 0.30m,
+
+                        EarlyExitBars = 4,
+                        EarlyExitMinRR = 0.10m,
+                        EarlyExitMinProfitUsd = 0.25m,
                     }
                 };
             }
@@ -427,7 +453,6 @@ namespace FuturesBot.Services
 
                     if (hasEntry)
                     {
-                        // Unrealized PnL (approx, USDT-m)
                         pnlUsd = isLongPosition
                             ? (price - entry) * absQty
                             : (entry - price) * absQty;
@@ -512,6 +537,8 @@ namespace FuturesBot.Services
 
                         bool weakening = IsWeakeningAfterMove(cachedCandles, isLongPosition);
 
+                        decimal atr = ComputeAtr(cachedCandles, AtrPeriod);
+
                         // ===== TIME-STOP =====
                         if (!timeStopTriggered && timeStopAnchorUtc.HasValue)
                         {
@@ -527,13 +554,36 @@ namespace FuturesBot.Services
                             }
                         }
 
+                        // ============================================================
+                        // ✅ NEW: EARLY EXIT (fee-safe)
+                        // - Case kiểu ETH: đã lời nhỏ nhưng sideway/weakening → đóng sớm thay vì đợi 0.35R
+                        // ============================================================
+                        if (timeStopAnchorUtc.HasValue
+                            && pnlUsd >= profile.EarlyExitMinProfitUsd
+                            && rr >= profile.EarlyExitMinRR)
+                        {
+                            int barsPassed = CountClosedBarsSince(timeStopAnchorUtc.Value, c0.OpenTime, 15);
+
+                            bool stall = atr > 0m && IsStallByAtrRange(cachedCandles, atr, profile.EarlyExitBars, StallRangeAtrFrac);
+                            bool nearBoundary = atr > 0m && boundary > 0m && Math.Abs(c0.Close - boundary) <= atr * NearBoundaryAtrFrac;
+
+                            if (barsPassed >= profile.EarlyExitBars && (weakening || stall || (nearBoundary && !danger)))
+                            {
+                                await _notify.SendAsync(
+                                    $"[{symbol}] EARLY EXIT (fee-safe): bars={barsPassed} rr={rr:F2} pnl={pnlUsd:F4} atr={(atr > 0 ? atr.ToString("F4") : "0")} stall={(stall ? "Y" : "N")} weak={(weakening ? "Y" : "N")} nearBoundary={(nearBoundary ? "Y" : "N")} → close | mode={profile.Tag}");
+
+                                await _exchange.ClosePositionAsync(symbol, qty);
+                                await SafeCancelLeftoverProtectiveAsync(symbol);
+                                return;
+                            }
+                        }
+
                         // ===== Profit protect (ATR-based, anti kéo SL sát entry) =====
                         if (rr >= profile.ProtectAtRR
                             && pnlUsd >= profile.MinProtectProfitUsd
                             && hasSL
                             && IsValidStopLoss(sl, isLongPosition, entry))
                         {
-                            decimal atr = ComputeAtr(cachedCandles, AtrPeriod);
                             if (atr > 0m)
                             {
                                 decimal atrMult = signal.Mode == TradeMode.Scalp ? ScalpAtrMult : TrendAtrMult;
@@ -545,10 +595,6 @@ namespace FuturesBot.Services
 
                                 // ============================
                                 // >>> PATCH START: HƯỚNG 2
-                                // - Nếu CHƯA đi đủ để lock profit (>= 1 ATR)
-                                //   thì KHÔNG trail SL chỉ vì rr/pnl đạt.
-                                // - Bắt buộc có "pullback -> resume" để tránh bị quét pullback rồi bay tiếp.
-                                // - Đồng thời throttle update (time + step theo ATR).
                                 // ============================
                                 if (!movedEnoughForProfitLock)
                                 {
@@ -560,43 +606,35 @@ namespace FuturesBot.Services
 
                                     if (!pullbackResumeOk)
                                     {
-                                        // Skip trailing sớm để tránh "update liên tục rồi bị quét"
                                         goto AFTER_PROTECT_BLOCK;
                                     }
                                 }
                                 // >>> PATCH END
                                 // ============================
 
-                                // Phase 1: lock về gần BE nhưng KHÔNG vượt entry (tránh quét ngu)
-                                // Phase 2: chỉ khi đi >= 1 ATR mới cho trailing theo ATR (có thể vượt entry)
                                 decimal targetSL;
 
                                 if (!movedEnoughForProfitLock)
                                 {
-                                    // giữ SL dưới entry (LONG) / trên entry (SHORT) một khoảng nhỏ theo ATR
-                                    // để tránh bị quét ngay tại entry vì noise/spread
                                     decimal beGuard = Math.Min(atr * 0.25m, riskPrice * 0.50m);
 
                                     targetSL = isLongPosition
-                                        ? (entry - beGuard)     // LONG: vẫn dưới entry
-                                        : (entry + beGuard);    // SHORT: vẫn trên entry
+                                        ? (entry - beGuard)
+                                        : (entry + beGuard);
                                 }
                                 else
                                 {
-                                    // ATR trailing
                                     targetSL = isLongPosition
                                         ? (price - atr * atrMult)
                                         : (price + atr * atrMult);
                                 }
 
-                                // additional safety: nếu chưa movedEnough thì tuyệt đối không cho vượt entry
                                 if (!movedEnoughForProfitLock)
                                 {
                                     if (isLongPosition) targetSL = Math.Min(targetSL, entry);
                                     else targetSL = Math.Max(targetSL, entry);
                                 }
 
-                                // PATCH: throttle update (time + step)
                                 if (IsBetterStopLoss(targetSL, sl, isLongPosition) && CanUpdateTrailing(symbol, sl, targetSL, isLongPosition, atr))
                                 {
                                     sl = targetSL;
@@ -615,10 +653,8 @@ namespace FuturesBot.Services
                             }
                             else
                             {
-                                // fallback: giữ logic cũ nếu ATR không tính được
                                 decimal targetSL = GetBreakEvenLockSL(entry, sl, riskPrice, isLongPosition, profile.BreakEvenBufferR);
 
-                                // anti: đừng cho vượt entry nếu chưa có ATR
                                 if (isLongPosition) targetSL = Math.Min(targetSL, entry);
                                 else targetSL = Math.Max(targetSL, entry);
 
@@ -1130,20 +1166,61 @@ namespace FuturesBot.Services
         }
 
         // ============================================================
+        // NEW: stall detector (ATR-range)
+        // ============================================================
+
+        private static bool IsStallByAtrRange(IReadOnlyList<Candle> candles, decimal atr, int lookbackBars, decimal rangeAtrFrac)
+        {
+            if (candles == null || candles.Count < lookbackBars + 3) return false;
+            if (atr <= 0m) return false;
+
+            // dùng N nến đóng gần nhất (đã closed): lấy từ [^ (lookbackBars+1)] tới [^2]
+            int end = candles.Count - 2;
+            int start = Math.Max(0, end - lookbackBars + 1);
+
+            decimal maxHigh = decimal.MinValue;
+            decimal minLow = decimal.MaxValue;
+
+            int smallBodyCount = 0;
+            int total = 0;
+
+            for (int i = start; i <= end; i++)
+            {
+                var c = candles[i];
+                maxHigh = Math.Max(maxHigh, c.High);
+                minLow = Math.Min(minLow, c.Low);
+                total++;
+
+                decimal range = c.High - c.Low;
+                if (range > 0m)
+                {
+                    decimal body = Math.Abs(c.Close - c.Open);
+                    decimal bodyToRange = body / range;
+                    if (bodyToRange <= StallSmallBodyToRangeMax)
+                        smallBodyCount++;
+                }
+            }
+
+            decimal totalRange = maxHigh - minLow;
+            bool tightRange = totalRange <= atr * rangeAtrFrac;
+
+            // stall "đúng nghĩa": range hẹp + nhiều nến thân nhỏ
+            bool manySmallBodies = total > 0 && smallBodyCount >= Math.Max(2, (int)Math.Ceiling(total * 0.6m));
+
+            return tightRange && manySmallBodies;
+        }
+
+        // ============================================================
         // PATCH HELPERS: pullback->resume + throttle trailing
         // ============================================================
 
         private static bool HasPullbackThenResume(Candle lastClosed, Candle prevClosed, bool isLong, decimal entry, decimal atr)
         {
-            // prevClosed = pullback candle (ngược hướng)
             bool pullback = isLong ? (prevClosed.Close < prevClosed.Open) : (prevClosed.Close > prevClosed.Open);
-            // lastClosed = resume candle (thuận hướng)
             bool resume = isLong ? (lastClosed.Close > lastClosed.Open) : (lastClosed.Close < lastClosed.Open);
 
             if (!pullback || !resume) return false;
 
-            // Pullback không được xuyên entry quá sâu (tránh pullback là đảo trend thật)
-            // LONG: low phải > entry - 0.2*ATR ; SHORT: high phải < entry + 0.2*ATR
             if (atr > 0m)
             {
                 if (isLong)
@@ -1158,7 +1235,6 @@ namespace FuturesBot.Services
                 }
             }
 
-            // Resume phải "đẩy lại" ít nhất vượt close của pullback
             if (isLong)
                 return lastClosed.Close > prevClosed.Close;
             else
@@ -1167,7 +1243,6 @@ namespace FuturesBot.Services
 
         private bool CanUpdateTrailing(string symbol, decimal currentSl, decimal targetSl, bool isLong, decimal atr)
         {
-            // 1) Interval gate
             var now = DateTime.UtcNow;
             if (_lastTrailingUpdateUtc.TryGetValue(symbol, out var lastUtc))
             {
@@ -1175,7 +1250,6 @@ namespace FuturesBot.Services
                     return false;
             }
 
-            // 2) Step gate (tránh update vi mô)
             if (atr > 0m)
             {
                 decimal minStep = atr * TrailingMinStepAtrFrac;
@@ -1184,7 +1258,6 @@ namespace FuturesBot.Services
                     return false;
             }
 
-            // 3) Nếu target giống lần update trước (sàn lag / rounding) thì skip
             if (_lastTrailingSl.TryGetValue(symbol, out var lastSl))
             {
                 if (Math.Abs(lastSl - targetSl) < (atr > 0m ? atr * 0.05m : 0.000001m))
@@ -1213,7 +1286,6 @@ namespace FuturesBot.Services
 
             await _exchange.CancelStopLossOrdersAsync(symbol);
 
-            // guard currentPos
             if (currentPos == null)
                 currentPos = await _exchange.GetPositionAsync(symbol);
 
@@ -1237,7 +1309,6 @@ namespace FuturesBot.Services
             string side = isLong ? "SELL" : "BUY";
             await _exchange.PlaceStopOnlyAsync(symbol, side, posSide, qty, newSL);
 
-            // Giữ TP nếu bị mất (throttle)
             if (hasTp && expectedTp.HasValue)
             {
                 if ((DateTime.UtcNow - lastSlTpCheckUtc) >= TimeSpan.FromSeconds(SlTpCheckEverySec))
