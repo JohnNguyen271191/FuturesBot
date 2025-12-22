@@ -1,10 +1,10 @@
-// OrderManagerService.cs (PATCHED)
-// - FIX: add missing usings (System/Linq/Tasks/Collections.Generic)
-// - FIX: timeframe-aware (không hardcode M15) cho TIME-STOP / Count bars
-// - FIX: cancel protective BOTH normal + algo (best-effort via reflection) để tránh “mất TP / còn SL” & cancel sai hệ
-// - IMPROVE: plannedRR aware (cap thresholds theo plannedRR nếu TP có sẵn) để RR dynamic từ Strategy không bị OMS “đuổi” sai
-// - KEEP: dùng nến đã đóng (Count-2) như file hiện tại
-// NOTE: Không thay đổi signature public hiện có để mày copy-paste là chạy.
+// OrderManagerService.cs (PATCHED - MICRO PROFIT PROTECT by %RISK)
+// - NEW: Micro profit protect theo % risk trong appsettings (accountBalance + coinInfos.riskPerTradePercent)
+//   + đạt 0.25R -> lock (update trailing SL siêu nhanh, không đợi nến 3m đóng)
+//   + đạt 0.50R -> chốt nhanh (close position)
+// - KEEP: dùng nến đã đóng (Count-2) cho các logic còn lại
+// - KEEP: fee-safe gates + ATR trailing + cancel normal+algo best-effort
+// NOTE: Nếu property name trong BotConfig khác (AccountBalance/CoinInfos/RiskPerTradePercent) thì sửa helper GetPlannedRiskUsdFromConfig() cho đúng.
 
 using System;
 using System.Collections.Concurrent;
@@ -42,6 +42,10 @@ namespace FuturesBot.Services
     /// - Fee rate EWMA không được tụt dưới taker (floor)
     /// - Nếu kéo SL về gần/qua entry thì cộng "fee breakeven buffer" theo USD fee/qty
     /// - Không update SL nếu SL quá sát MarkPrice (< X ATR) để tránh quét pullback
+    ///
+    /// PATCH (NEW - MICRO PROFIT PROTECT by risk%):
+    /// - Dựa trên planned risk USD = accountBalance * riskPerTradePercent(symbol)
+    /// - 0.25R: lock (update SL tight) ; 0.50R: close ngay
     /// </summary>
     public class OrderManagerService
     {
@@ -106,6 +110,12 @@ namespace FuturesBot.Services
         // ===== NEW: Anti "SL too close" + fee BE buffer =====
         private const decimal MinSlDistanceAtrFrac = 0.35m;     // SL phải cách MarkPrice >= 0.35 ATR
         private const decimal FeeBreakevenBufferMult = 1.25m;   // cover fee + slip
+
+        // ===== NEW: MICRO PROFIT PROTECT by planned risk (R-based) =====
+        private const decimal MicroLockAtR = 0.25m;       // đạt 0.25R -> lock
+        private const decimal MicroTakeAtR = 0.50m;       // đạt 0.50R -> close nhanh
+        private const decimal MicroMinNetRrToAct = 0.05m; // tránh nhiễu fee
+        private const decimal MicroTrailAtrMult = 0.45m;  // trailing cực chặt khi lock
 
         private sealed class FeeStats
         {
@@ -560,7 +570,6 @@ namespace FuturesBot.Services
                     }
 
                     // ===== NEW: cap thresholds theo plannedRR (RR dynamic) =====
-                    // Ví dụ: plannedRR=1.25 thì QuickTakeGoodRR/TimeStopMinRR không nên “đòi” 0.75/0.4 quá gắt
                     decimal effProtectAtRR = profile.ProtectAtRR;
                     decimal effQuickMinRR = profile.QuickTakeMinRR;
                     decimal effQuickGoodRR = profile.QuickTakeGoodRR;
@@ -568,14 +577,11 @@ namespace FuturesBot.Services
 
                     if (plannedRR > 0.25m)
                     {
-                        // Protect: tối đa 30% plannedRR (nhưng không thấp hơn 0.15)
                         effProtectAtRR = Clamp(Math.Min(profile.ProtectAtRR, plannedRR * 0.30m), 0.15m, profile.ProtectAtRR);
 
-                        // Quick min/good: scale theo plannedRR (min ~35%, good ~55%)
                         effQuickMinRR = Clamp(Math.Min(profile.QuickTakeMinRR, plannedRR * 0.35m), 0.20m, profile.QuickTakeMinRR);
                         effQuickGoodRR = Clamp(Math.Min(profile.QuickTakeGoodRR, plannedRR * 0.55m), effQuickMinRR + 0.05m, profile.QuickTakeGoodRR);
 
-                        // TimeStop: nếu plannedRR thấp thì bớt đòi hỏi
                         effTimeStopMinRR = Clamp(Math.Min(profile.TimeStopMinRR, plannedRR * 0.30m), 0.20m, profile.TimeStopMinRR);
                     }
 
@@ -657,6 +663,80 @@ namespace FuturesBot.Services
 
                         bool weakening = IsWeakeningAfterMove(cachedCandles, isLongPosition);
                         decimal atr = ComputeAtr(cachedCandles, AtrPeriod);
+
+                        // ======================================================================
+                        // MICRO PROFIT PROTECT (R-based) - phản ứng nhanh theo MarkPrice/netPnl
+                        // - Không đợi nến 3m đóng mới chốt/lock
+                        // - Threshold theo planned risk USD trong appsettings (accountBalance*risk%)
+                        // ======================================================================
+                        if (hasEntry && canUseRR)
+                        {
+                            decimal plannedRiskUsd = GetPlannedRiskUsdFromConfig(symbol);
+                            decimal baseRiskUsd = plannedRiskUsd > 0m ? plannedRiskUsd : riskUsd;
+
+                            if (baseRiskUsd > 0m)
+                            {
+                                decimal microLockUsd = baseRiskUsd * MicroLockAtR;
+                                decimal microTakeUsd = baseRiskUsd * MicroTakeAtR;
+
+                                // 0.50R -> chốt nhanh
+                                if (netPnlUsd >= microTakeUsd && netRr >= MicroMinNetRrToAct)
+                                {
+                                    await _notify.SendAsync(
+                                        $"[{symbol}] MICRO TAKE (R): net={netPnlUsd:F4} >= {microTakeUsd:F4} ({MicroTakeAtR:F2}R of risk={baseRiskUsd:F4}) → close NOW | mode={profile.Tag}");
+                                    await _exchange.ClosePositionAsync(symbol, qty);
+                                    await SafeCancelLeftoverProtectiveAsync(symbol);
+                                    return;
+                                }
+
+                                // 0.25R -> lock bằng trailing siêu chặt
+                                if (hasSL && IsValidStopLoss(sl, isLongPosition, entry)
+                                    && netPnlUsd >= microLockUsd && netRr >= MicroMinNetRrToAct)
+                                {
+                                    decimal targetSL;
+
+                                    if (atr > 0m)
+                                    {
+                                        targetSL = isLongPosition
+                                            ? (price - atr * MicroTrailAtrMult)
+                                            : (price + atr * MicroTrailAtrMult);
+                                    }
+                                    else
+                                    {
+                                        targetSL = entry;
+                                    }
+
+                                    // fee BE buffer
+                                    decimal feeBeBuffer = GetFeeBreakevenBufferPrice(estFeeUsd, absQty);
+                                    if (feeBeBuffer > 0m)
+                                    {
+                                        if (isLongPosition) targetSL = Math.Max(targetSL, entry + feeBeBuffer);
+                                        else targetSL = Math.Min(targetSL, entry - feeBeBuffer);
+                                    }
+
+                                    if (!IsSlTooCloseToPrice(price, targetSL, atr))
+                                    {
+                                        if (IsBetterStopLoss(targetSL, sl, isLongPosition)
+                                            && CanUpdateTrailing(symbol, sl, targetSL, isLongPosition, atr))
+                                        {
+                                            sl = targetSL;
+
+                                            lastSlTpCheckUtc = await UpdateStopLossAsync(
+                                                symbol,
+                                                targetSL,
+                                                isLongPosition,
+                                                hasTP,
+                                                tp,
+                                                pos,
+                                                lastSlTpCheckUtc);
+
+                                            await _notify.SendAsync(
+                                                $"[{symbol}] MICRO LOCK (R): net={netPnlUsd:F4} >= {microLockUsd:F4} ({MicroLockAtR:F2}R) → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
+                                        }
+                                    }
+                                }
+                            }
+                        }
 
                         // ===== TIME-STOP (use NET RR) =====
                         if (!timeStopTriggered && timeStopAnchorUtc.HasValue)
@@ -1737,6 +1817,33 @@ namespace FuturesBot.Services
             catch
             {
                 // silent
+            }
+        }
+
+        // ============================================================
+        // NEW: planned risk USD from appsettings (% risk)
+        // ============================================================
+
+        private decimal GetPlannedRiskUsdFromConfig(string symbol)
+        {
+            try
+            {
+                if (_botConfig == null) return 0m;
+
+                decimal balance = _botConfig.AccountBalance;
+                if (balance <= 0m) return 0m;
+
+                var coin = _botConfig.CoinInfos?
+                    .FirstOrDefault(x => string.Equals(x.Symbol, symbol, StringComparison.OrdinalIgnoreCase));
+
+                var pct = coin?.RiskPerTradePercent ?? 0m;
+                if (pct <= 0m) return 0m;
+
+                return balance * (pct / 100m);
+            }
+            catch
+            {
+                return 0m;
             }
         }
     }
