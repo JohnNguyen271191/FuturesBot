@@ -914,7 +914,6 @@ namespace FuturesBot.Services
 
         /// <summary>
         /// Sum commission (USDT only) bằng /fapi/v1/userTrades
-        /// FIX (đúng ý mày "reset qua ngày"):
         /// - Vẫn có thể nới window để query tránh miss biên
         /// - Nhưng khi CỘNG commission phải lọc theo [fromUtc, toUtc] STRICT (không ăn fee của ngày trước)
         /// - Paginate bằng fromId để không miss/loop
