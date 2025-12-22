@@ -1,10 +1,11 @@
-// OrderManagerService.cs (PATCHED - MICRO PROFIT PROTECT by %RISK)
-// - NEW: Micro profit protect theo % risk trong appsettings (accountBalance + coinInfos.riskPerTradePercent)
-//   + đạt 0.25R -> lock (update trailing SL siêu nhanh, không đợi nến 3m đóng)
-//   + đạt 0.50R -> chốt nhanh (close position)
+// OrderManagerService.cs (PATCHED - TIME-STOP smarter + MICRO PROFIT PROTECT by %RISK)
+// - FIX: TIME-STOP không còn “đóng mù” chỉ vì netRR < minRR
+//        => chỉ close khi có dấu hiệu stall/weakening/nearBoundary/danger (đúng ý scalp)
+// - KEEP: Micro profit protect theo % risk (0.25R lock, 0.50R close nhanh)
 // - KEEP: dùng nến đã đóng (Count-2) cho các logic còn lại
 // - KEEP: fee-safe gates + ATR trailing + cancel normal+algo best-effort
-// NOTE: Nếu property name trong BotConfig khác (AccountBalance/CoinInfos/RiskPerTradePercent) thì sửa helper GetPlannedRiskUsdFromConfig() cho đúng.
+// NOTE: Nếu property name trong BotConfig khác (AccountBalance/CoinInfos/RiskPerTradePercent)
+//       thì sửa helper GetPlannedRiskUsdFromConfig() cho đúng.
 
 using System;
 using System.Collections.Concurrent;
@@ -46,6 +47,10 @@ namespace FuturesBot.Services
     /// PATCH (NEW - MICRO PROFIT PROTECT by risk%):
     /// - Dựa trên planned risk USD = accountBalance * riskPerTradePercent(symbol)
     /// - 0.25R: lock (update SL tight) ; 0.50R: close ngay
+    ///
+    /// PATCH (FIX - TIME-STOP smarter):
+    /// - TIME-STOP chỉ close khi có stall/weakening/nearBoundary/danger
+    ///   (tránh case "chạy trễ" vừa rũ xong thì bot cắt)
     /// </summary>
     public class OrderManagerService
     {
@@ -664,6 +669,10 @@ namespace FuturesBot.Services
                         bool weakening = IsWeakeningAfterMove(cachedCandles, isLongPosition);
                         decimal atr = ComputeAtr(cachedCandles, AtrPeriod);
 
+                        // --- stall & nearBoundary (reuse for time-stop + early-exit) ---
+                        bool stall = atr > 0m && IsStallByAtrRange(cachedCandles, atr, profile.EarlyExitBars, StallRangeAtrFrac);
+                        bool nearBoundary = atr > 0m && boundary > 0m && Math.Abs(c0.Close - boundary) <= atr * NearBoundaryAtrFrac;
+
                         // ======================================================================
                         // MICRO PROFIT PROTECT (R-based) - phản ứng nhanh theo MarkPrice/netPnl
                         // - Không đợi nến 3m đóng mới chốt/lock
@@ -738,15 +747,21 @@ namespace FuturesBot.Services
                             }
                         }
 
-                        // ===== TIME-STOP (use NET RR) =====
+                        // ===== TIME-STOP (use NET RR) - FIX: require stall/weakening/nearBoundary/danger =====
                         if (!timeStopTriggered && timeStopAnchorUtc.HasValue)
                         {
                             int barsPassed = CountClosedBarsSince(timeStopAnchorUtc.Value, c0.OpenTime, tfMinutes);
-                            if (barsPassed >= profile.TimeStopBars && netRr < effTimeStopMinRR)
+
+                            // only close if market shows "not going anywhere" signals
+                            bool timeStopConfirmBad = weakening || stall || nearBoundary || danger;
+
+                            if (barsPassed >= profile.TimeStopBars && netRr < effTimeStopMinRR && timeStopConfirmBad)
                             {
                                 timeStopTriggered = true;
+
                                 await _notify.SendAsync(
-                                    $"[{symbol}] TIME-STOP: {barsPassed} bars({tfMinutes}m) netRr={netRr:F2} < {effTimeStopMinRR:F2}R → close | pnl={pnlUsd:F4} fee~{estFeeUsd:F4} net={netPnlUsd:F4} risk={riskUsd:F4} plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} | mode={profile.Tag}");
+                                    $"[{symbol}] TIME-STOP: {barsPassed} bars({tfMinutes}m) netRr={netRr:F2} < {effTimeStopMinRR:F2}R + confirmBad={timeStopConfirmBad} (stall={(stall ? "Y" : "N")} weak={(weakening ? "Y" : "N")} nearB={(nearBoundary ? "Y" : "N")} danger={(danger ? "Y" : "N")}) → close | pnl={pnlUsd:F4} fee~{estFeeUsd:F4} net={netPnlUsd:F4} risk={riskUsd:F4} plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} | mode={profile.Tag}");
+
                                 await _exchange.ClosePositionAsync(symbol, qty);
                                 await SafeCancelLeftoverProtectiveAsync(symbol);
                                 return;
@@ -759,9 +774,6 @@ namespace FuturesBot.Services
                             && netRr >= profile.EarlyExitMinRR)
                         {
                             int barsPassed = CountClosedBarsSince(timeStopAnchorUtc.Value, c0.OpenTime, tfMinutes);
-
-                            bool stall = atr > 0m && IsStallByAtrRange(cachedCandles, atr, profile.EarlyExitBars, StallRangeAtrFrac);
-                            bool nearBoundary = atr > 0m && boundary > 0m && Math.Abs(c0.Close - boundary) <= atr * NearBoundaryAtrFrac;
 
                             if (barsPassed >= profile.EarlyExitBars && (weakening || stall || (nearBoundary && !danger)))
                             {
@@ -1743,7 +1755,7 @@ namespace FuturesBot.Services
 
         private async Task SafeCancelAllOpenOrdersBothAsync(string symbol)
         {
-            // normal
+            // normal (assumed exists in interface)
             try { await _exchange.CancelAllOpenOrdersAsync(symbol); } catch { }
 
             // algo best-effort
@@ -1752,11 +1764,51 @@ namespace FuturesBot.Services
 
         private async Task SafeCancelStopLossBothAsync(string symbol)
         {
-            // normal SL only (nếu _exchange implement đúng)
-            try { await _exchange.CancelStopLossOrdersAsync(symbol); } catch { }
+            // normal best-effort (reflection) => tránh fail compile nếu interface chưa có CancelStopLossOrdersAsync
+            await TryInvokeCancelNormalStopAsync(symbol);
 
             // algo best-effort cancel (ưu tiên cancel STOP/SL)
             await TryInvokeCancelAlgoAsync(symbol, cancelStopsOnly: true);
+        }
+
+        private async Task TryInvokeCancelNormalStopAsync(string symbol)
+        {
+            try
+            {
+                object? svc = _exchange;
+                if (svc == null) return;
+
+                var type = svc.GetType();
+
+                string[] candidates =
+                {
+                    "CancelStopLossOrdersAsync",
+                    "CancelStopOrdersAsync",
+                    "CancelAllStopOrdersAsync"
+                };
+
+                MethodInfo? mi = null;
+                foreach (var name in candidates)
+                {
+                    mi = type.GetMethod(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                    if (mi == null) continue;
+
+                    var ps = mi.GetParameters();
+                    if (ps.Length == 1 && ps[0].ParameterType == typeof(string))
+                        break;
+
+                    mi = null;
+                }
+
+                if (mi == null) return;
+
+                object? res = mi.Invoke(svc, new object?[] { symbol });
+                if (res is Task t) await t.ConfigureAwait(false);
+            }
+            catch
+            {
+                // silent
+            }
         }
 
         /// <summary>
