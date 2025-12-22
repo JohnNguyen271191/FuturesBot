@@ -7,8 +7,14 @@
 // - KEEP: Micro profit protect theo %RISK (0.25R lock, 0.50R close nhanh)
 // - KEEP: dùng nến đã đóng (Count-2) cho các logic còn lại
 // - KEEP: fee-safe gates + ATR trailing + cancel normal+algo best-effort
-// NOTE: Nếu property name trong BotConfig khác (AccountBalance/CoinInfos/RiskPerTradePercent)
-//       thì sửa helper GetPlannedRiskUsdFromConfig() cho đúng.
+//
+// PATCH NEW (ANTI FAKE DUMP -> PUMP):
+// - DANGER/BREAK không close ngay nữa, mà "confirm" N nến đã đóng.
+// - N = 2 cho MAJOR (isMajor trong BotConfig), N = 1 cho ALT.
+// - Vẫn có HARD CUT nếu lỗ sâu để tránh dump thật.
+//
+// NOTE: Nếu property name trong BotConfig khác (AccountBalance/CoinInfos/RiskPerTradePercent/IsMajor)
+//       thì helper GetPlannedRiskUsdFromConfig() + IsMajorSymbol() đã có reflection fallback.
 
 using System;
 using System.Collections.Concurrent;
@@ -58,6 +64,9 @@ namespace FuturesBot.Services
     /// PATCH (NEW - ANTI KILL GOOD SETUPS):
     /// - NO-KILL ZONE: plannedRR >= 1.20 → không QuickTake / không EarlyExit; TimeStop chỉ cắt khi danger/boundary thật
     /// - SCALP plannedRR >= 1.10 → cấm PROTECT ATR kéo SL vượt entry sớm; chỉ BE(+fee) + giữ TP
+    ///
+    /// PATCH (NEW - ANTI FAKE DUMP -> PUMP):
+    /// - DANGER CUT / EXIT ON BOUNDARY: confirm 2 nến cho MAJOR (isMajor), 1 nến cho ALT
     /// </summary>
     public class OrderManagerService
     {
@@ -133,6 +142,12 @@ namespace FuturesBot.Services
         private const decimal NoKillZonePlannedRR = 1.20m;           // plannedRR >= 1.20 -> ưu tiên giữ kèo
         private const decimal NoAtrProtectScalpPlannedRR = 1.10m;    // scalp plannedRR >= 1.10 -> chỉ BE(+fee), cấm lock ATR sớm
 
+        // ===== NEW: ANTI FAKE DUMP -> PUMP (Danger confirm) =====
+        private const int DangerConfirmBarsMajor = 2;            // MAJOR (BTC/ETH...) confirm 2 nến
+        private const int DangerConfirmBarsAlt = 1;              // ALT confirm 1 nến
+        private const decimal DangerHardCutNetRr = -0.80m;       // lỗ sâu => cho phép cut ngay (tránh dump thật)
+        private const decimal ReclaimAtrFrac = 0.15m;            // reclaim boundary tối thiểu 0.15 ATR -> coi là hồi thật
+
         private sealed class FeeStats
         {
             public decimal EwmaRate { get; set; } = DefaultTakerFeeRate; // bắt đầu safe
@@ -149,6 +164,11 @@ namespace FuturesBot.Services
         // PATCH: trailing throttle per symbol
         private readonly ConcurrentDictionary<string, DateTime> _lastTrailingUpdateUtc = new();
         private readonly ConcurrentDictionary<string, decimal> _lastTrailingSl = new();
+
+        // ===== NEW: pending danger confirm (anti fake dump->pump) =====
+        private readonly ConcurrentDictionary<string, DateTime> _pendingDangerSinceUtc = new(StringComparer.OrdinalIgnoreCase);
+        private readonly ConcurrentDictionary<string, int> _pendingDangerBars = new(StringComparer.OrdinalIgnoreCase);
+        private readonly ConcurrentDictionary<string, DateTime> _pendingDangerLastClosedOpenTime = new(StringComparer.OrdinalIgnoreCase);
 
         // ============================================================
         // TRACK SYMBOL ĐANG ĐƯỢC GIÁM SÁT
@@ -457,6 +477,7 @@ namespace FuturesBot.Services
 
                         await _notify.SendAsync($"[{symbol}] Position closed → stop monitor.");
                         await SafeCancelLeftoverProtectiveAsync(symbol);
+                        ClearDangerPending(symbol);
                         return;
                     }
 
@@ -653,6 +674,7 @@ namespace FuturesBot.Services
                             }
 
                             await SafeCancelLeftoverProtectiveAsync(symbol);
+                            ClearDangerPending(symbol);
                             return;
                         }
                     }
@@ -674,15 +696,40 @@ namespace FuturesBot.Services
                             ? GetDynamicBoundaryForLong(entry, ema34, ema89, ema200)
                             : GetDynamicBoundaryForShort(entry, ema34, ema89, ema200);
 
-                        bool danger =
-                            IsDangerImpulseReverse(c0, c1, isLongPosition)
-                            || (boundary > 0 && IsBoundaryBroken(c0.Close, boundary, isLongPosition, profile.EmaBreakTolerance));
-
                         bool weakening = IsWeakeningAfterMove(cachedCandles, isLongPosition);
                         decimal atr = ComputeAtr(cachedCandles, AtrPeriod);
 
                         bool stall = atr > 0m && IsStallByAtrRange(cachedCandles, atr, profile.EarlyExitBars, StallRangeAtrFrac);
                         bool nearBoundary = atr > 0m && boundary > 0m && Math.Abs(c0.Close - boundary) <= atr * NearBoundaryAtrFrac;
+
+                        // ===================== DANGER CONFIRM (anti fake dump->pump) =====================
+                        bool dangerCandidate =
+                            IsDangerImpulseReverse(c0, c1, isLongPosition)
+                            || (boundary > 0 && IsBoundaryBroken(c0.Close, boundary, isLongPosition, profile.EmaBreakTolerance));
+
+                        // reclaim check: nếu đã reclaim lại boundary đủ mạnh -> cancel pending
+                        bool reclaimed = false;
+                        if (atr > 0m && boundary > 0m)
+                        {
+                            if (isLongPosition)
+                                reclaimed = c0.Close >= boundary + atr * ReclaimAtrFrac;
+                            else
+                                reclaimed = c0.Close <= boundary - atr * ReclaimAtrFrac;
+                        }
+
+                        bool dangerHard = netRr <= DangerHardCutNetRr;
+
+                        // dangerConfirmed: chỉ true khi đã confirm đủ số nến theo major/alt,
+                        // hoặc dangerHard + loss đủ lớn (để tránh dump thật)
+                        bool dangerConfirmed = await ApplyDangerConfirmAsync(
+                            symbol: symbol,
+                            profile: profile,
+                            lastClosed: c0,
+                            dangerCandidate: dangerCandidate,
+                            reclaimed: reclaimed,
+                            dangerHard: dangerHard,
+                            netRr: netRr,
+                            netPnlUsd: netPnlUsd);
 
                         // ======================================================================
                         // MICRO PROFIT PROTECT (R-based)
@@ -703,6 +750,7 @@ namespace FuturesBot.Services
                                         $"[{symbol}] MICRO TAKE (R): net={netPnlUsd:F4} >= {microTakeUsd:F4} ({MicroTakeAtR:F2}R of risk={baseRiskUsd:F4}) → close NOW | mode={profile.Tag}");
                                     await _exchange.ClosePositionAsync(symbol, qty);
                                     await SafeCancelLeftoverProtectiveAsync(symbol);
+                                    ClearDangerPending(symbol);
                                     return;
                                 }
 
@@ -758,11 +806,11 @@ namespace FuturesBot.Services
                         {
                             int barsPassed = CountClosedBarsSince(timeStopAnchorUtc.Value, c0.OpenTime, tfMinutes);
 
-                            bool timeStopConfirmBad = weakening || stall || nearBoundary || danger;
+                            bool timeStopConfirmBad = weakening || stall || nearBoundary || dangerConfirmed;
 
                             // NO-KILL ZONE: plannedRR lớn -> chỉ time-stop nếu danger/boundary thật (hoặc stall+nearBoundary rất rõ)
                             bool allowTimeStop = !inNoKillZone
-                                || danger
+                                || dangerConfirmed
                                 || (nearBoundary && stall); // nếu bị đè biên + stall thật thì cho cắt
 
                             if (allowTimeStop && barsPassed >= profile.TimeStopBars && netRr < effTimeStopMinRR && timeStopConfirmBad)
@@ -770,10 +818,11 @@ namespace FuturesBot.Services
                                 timeStopTriggered = true;
 
                                 await _notify.SendAsync(
-                                    $"[{symbol}] TIME-STOP: {barsPassed} bars({tfMinutes}m) netRr={netRr:F2} < {effTimeStopMinRR:F2}R + confirmBad={timeStopConfirmBad} (stall={(stall ? "Y" : "N")} weak={(weakening ? "Y" : "N")} nearB={(nearBoundary ? "Y" : "N")} danger={(danger ? "Y" : "N")}) → close | pnl={pnlUsd:F4} fee~{estFeeUsd:F4} net={netPnlUsd:F4} risk={riskUsd:F4} plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} | mode={profile.Tag}");
+                                    $"[{symbol}] TIME-STOP: {barsPassed} bars({tfMinutes}m) netRr={netRr:F2} < {effTimeStopMinRR:F2}R + confirmBad={timeStopConfirmBad} (stall={(stall ? "Y" : "N")} weak={(weakening ? "Y" : "N")} nearB={(nearBoundary ? "Y" : "N")} danger={(dangerConfirmed ? "Y" : "N")}) → close | pnl={pnlUsd:F4} fee~{estFeeUsd:F4} net={netPnlUsd:F4} risk={riskUsd:F4} plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} | mode={profile.Tag}");
 
                                 await _exchange.ClosePositionAsync(symbol, qty);
                                 await SafeCancelLeftoverProtectiveAsync(symbol);
+                                ClearDangerPending(symbol);
                                 return;
                             }
                         }
@@ -786,13 +835,14 @@ namespace FuturesBot.Services
                         {
                             int barsPassed = CountClosedBarsSince(timeStopAnchorUtc.Value, c0.OpenTime, tfMinutes);
 
-                            if (barsPassed >= profile.EarlyExitBars && (weakening || stall || (nearBoundary && !danger)))
+                            if (barsPassed >= profile.EarlyExitBars && (weakening || stall || (nearBoundary && !dangerConfirmed)))
                             {
                                 await _notify.SendAsync(
                                     $"[{symbol}] EARLY EXIT (NET+FEE): bars={barsPassed} netRr={netRr:F2} net={netPnlUsd:F4} (pnl={pnlUsd:F4} fee~{estFeeUsd:F4} minNet={minEarlyNetProfitUsd:F4}) atr={(atr > 0 ? atr.ToString("F4") : "0")} stall={(stall ? "Y" : "N")} weak={(weakening ? "Y" : "N")} nearBoundary={(nearBoundary ? "Y" : "N")} plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} → close | mode={profile.Tag}");
 
                                 await _exchange.ClosePositionAsync(symbol, qty);
                                 await SafeCancelLeftoverProtectiveAsync(symbol);
+                                ClearDangerPending(symbol);
                                 return;
                             }
                         }
@@ -967,40 +1017,48 @@ namespace FuturesBot.Services
                     AFTER_PROTECT_BLOCK:
 
                         // ===== Quick take (NET + fee gate) - NO-KILL ZONE: skip (trừ danger) =====
-                        bool allowQuickTake = !inNoKillZone || danger;
+                        bool allowQuickTake = !inNoKillZone || dangerConfirmed;
 
                         if (allowQuickTake && netRr >= effQuickMinRR && netPnlUsd >= minQuickNetProfitUsd && weakening)
                         {
-                            if (netRr >= effQuickGoodRR || danger || IsOppositeStrongCandle(c0, isLongPosition))
+                            if (netRr >= effQuickGoodRR || dangerConfirmed || IsOppositeStrongCandle(c0, isLongPosition))
                             {
                                 await _notify.SendAsync($"[{symbol}] QUICK TAKE (NET+FEE): netRr={netRr:F2} net={netPnlUsd:F4} (fee~{estFeeUsd:F4} minNet={minQuickNetProfitUsd:F4}) plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} → close | mode={profile.Tag}");
                                 await _exchange.ClosePositionAsync(symbol, qty);
                                 await SafeCancelLeftoverProtectiveAsync(symbol);
+                                ClearDangerPending(symbol);
                                 return;
                             }
                         }
 
-                        // ===== Danger cut (loss include fee estimate) =====
-                        if (netRr <= profile.DangerCutIfRRBelow && danger)
+                        // ===== Danger cut (LOSS include fee estimate) - CONFIRMED =====
+                        if (netRr <= profile.DangerCutIfRRBelow && dangerConfirmed)
                         {
                             var absLossUsd = Math.Max(0m, -netPnlUsd);
                             if (absLossUsd >= profile.MinDangerCutAbsLossUsd)
                             {
-                                await _notify.SendAsync($"[{symbol}] DANGER CUT (NET): netRr={netRr:F2} loss={absLossUsd:F4} + danger → close | mode={profile.Tag}");
+                                await _notify.SendAsync($"[{symbol}] DANGER CUT (CONFIRMED): netRr={netRr:F2} loss={absLossUsd:F4} + dangerConfirmed → close | mode={profile.Tag}");
                                 await _exchange.ClosePositionAsync(symbol, qty);
                                 await SafeCancelLeftoverProtectiveAsync(symbol);
+                                ClearDangerPending(symbol);
                                 return;
                             }
                         }
 
-                        // ===== Exit on boundary break nếu đã dương chút (NET + fee gate) =====
-                        if (danger && netRr >= 0.10m && netPnlUsd >= minBoundaryNetProfitUsd)
+                        // ===== Exit on boundary break nếu đã dương chút (NET + fee gate) - CONFIRMED =====
+                        if (dangerConfirmed && netRr >= 0.10m && netPnlUsd >= minBoundaryNetProfitUsd)
                         {
-                            await _notify.SendAsync($"[{symbol}] EXIT ON BOUNDARY BREAK (NET+FEE): netRr={netRr:F2} net={netPnlUsd:F4} (fee~{estFeeUsd:F4} minNet={minBoundaryNetProfitUsd:F4}) plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} → close | mode={profile.Tag}");
+                            await _notify.SendAsync($"[{symbol}] EXIT ON BOUNDARY BREAK (CONFIRMED): netRr={netRr:F2} net={netPnlUsd:F4} (fee~{estFeeUsd:F4} minNet={minBoundaryNetProfitUsd:F4}) plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} → close | mode={profile.Tag}");
                             await _exchange.ClosePositionAsync(symbol, qty);
                             await SafeCancelLeftoverProtectiveAsync(symbol);
+                            ClearDangerPending(symbol);
                             return;
                         }
+                    }
+                    else
+                    {
+                        // không có đủ dữ liệu candle => clear pending để tránh treo state lâu
+                        ClearDangerPending(symbol);
                     }
 
                     // =================== TP hit (nếu có) ===================
@@ -1029,6 +1087,7 @@ namespace FuturesBot.Services
                             }
 
                             await SafeCancelLeftoverProtectiveAsync(symbol);
+                            ClearDangerPending(symbol);
                             return;
                         }
                     }
@@ -1037,6 +1096,7 @@ namespace FuturesBot.Services
             finally
             {
                 ClearMonitoringPosition(symbol);
+                ClearDangerPending(symbol);
             }
         }
 
@@ -1106,6 +1166,7 @@ namespace FuturesBot.Services
             if (IsMonitoringLimit(symbol) || IsMonitoringPosition(symbol))
             {
                 ClearAllMonitoring(symbol);
+                ClearDangerPending(symbol);
                 await _notify.SendAsync($"[{symbol}] đã clear monitoring.");
             }
         }
@@ -1906,13 +1967,46 @@ namespace FuturesBot.Services
             {
                 if (_botConfig == null) return 0m;
 
-                decimal balance = _botConfig.AccountBalance;
+                // Try direct
+                decimal balance = 0m;
+                try { balance = _botConfig.AccountBalance; } catch { }
+
+                // Reflection fallback
+                if (balance <= 0m)
+                {
+                    var pBal = _botConfig.GetType().GetProperty("AccountBalance", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                               ?? _botConfig.GetType().GetProperty("Balance", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                    if (pBal != null)
+                    {
+                        var v = pBal.GetValue(_botConfig);
+                        if (v is decimal d) balance = d;
+                        else if (v is double dd) balance = (decimal)dd;
+                    }
+                }
+
                 if (balance <= 0m) return 0m;
 
-                var coin = _botConfig.CoinInfos?
-                    .FirstOrDefault(x => string.Equals(x.Symbol, symbol, StringComparison.OrdinalIgnoreCase));
+                var coinInfos = _botConfig.CoinInfos;
+                if (coinInfos == null) return 0m;
 
-                var pct = coin?.RiskPerTradePercent ?? 0m;
+                var coin = coinInfos.FirstOrDefault(x => string.Equals(x.Symbol, symbol, StringComparison.OrdinalIgnoreCase));
+                if (coin == null) return 0m;
+
+                decimal pct = 0m;
+                try { pct = coin.RiskPerTradePercent; } catch { }
+
+                if (pct <= 0m)
+                {
+                    var pPct = coin.GetType().GetProperty("RiskPerTradePercent", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                               ?? coin.GetType().GetProperty("RiskPercent", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                    if (pPct != null)
+                    {
+                        var v = pPct.GetValue(coin);
+                        if (v is decimal d) pct = d;
+                        else if (v is double dd) pct = (decimal)dd;
+                    }
+                }
+
                 if (pct <= 0m) return 0m;
 
                 return balance * (pct / 100m);
@@ -1921,6 +2015,139 @@ namespace FuturesBot.Services
             {
                 return 0m;
             }
+        }
+
+        // ============================================================
+        // NEW: MAJOR detection + Danger confirm bars
+        // ============================================================
+
+        private int GetDangerConfirmBars(string symbol)
+        {
+            return IsMajorSymbol(symbol) ? DangerConfirmBarsMajor : DangerConfirmBarsAlt;
+        }
+
+        private bool IsMajorSymbol(string symbol)
+        {
+            try
+            {
+                if (_botConfig?.CoinInfos == null) return false;
+
+                var coin = _botConfig.CoinInfos.FirstOrDefault(x =>
+                    string.Equals(x.Symbol, symbol, StringComparison.OrdinalIgnoreCase));
+
+                if (coin == null) return false;
+
+                // direct property
+                try
+                {
+                    // nếu class có IsMajor bool
+                    var v = coin.GetType().GetProperty("IsMajor", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(coin);
+                    if (v is bool b) return b;
+                }
+                catch { }
+
+                // fallback: Major / IsMain / Tier / Category etc.
+                try
+                {
+                    var p = coin.GetType().GetProperty("Major", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                         ?? coin.GetType().GetProperty("IsMain", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                    var v2 = p?.GetValue(coin);
+                    if (v2 is bool b2) return b2;
+                }
+                catch { }
+
+                // cuối cùng: hard fallback theo symbol phổ biến
+                if (symbol.Equals("BTCUSDT", StringComparison.OrdinalIgnoreCase)) return true;
+                if (symbol.Equals("ETHUSDT", StringComparison.OrdinalIgnoreCase)) return true;
+
+                return false;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private void ClearDangerPending(string symbol)
+        {
+            _pendingDangerSinceUtc.TryRemove(symbol, out _);
+            _pendingDangerBars.TryRemove(symbol, out _);
+            _pendingDangerLastClosedOpenTime.TryRemove(symbol, out _);
+        }
+
+        private async Task<bool> ApplyDangerConfirmAsync(
+            string symbol,
+            ModeProfile profile,
+            Candle lastClosed,
+            bool dangerCandidate,
+            bool reclaimed,
+            bool dangerHard,
+            decimal netRr,
+            decimal netPnlUsd)
+        {
+            // không danger / đã reclaim -> clear pending
+            if (!dangerCandidate || reclaimed)
+            {
+                if (_pendingDangerSinceUtc.ContainsKey(symbol))
+                {
+                    ClearDangerPending(symbol);
+
+                    if (reclaimed)
+                        await _notify.SendAsync($"[{symbol}] DANGER INVALIDATED (reclaim) → keep position | mode={profile.Tag}");
+                }
+                return false;
+            }
+
+            // HARD CUT: nếu lỗ sâu + absLoss đủ lớn => coi như confirmed ngay
+            if (dangerHard)
+            {
+                var absLossUsd = Math.Max(0m, -netPnlUsd);
+                if (absLossUsd >= profile.MinDangerCutAbsLossUsd)
+                {
+                    await _notify.SendAsync($"[{symbol}] DANGER HARD (NET): netRr={netRr:F2} loss={absLossUsd:F4} → allow immediate cut | mode={profile.Tag}");
+                    ClearDangerPending(symbol);
+                    return true;
+                }
+            }
+
+            int needBars = GetDangerConfirmBars(symbol);
+
+            // init pending
+            if (!_pendingDangerSinceUtc.ContainsKey(symbol))
+            {
+                _pendingDangerSinceUtc[symbol] = DateTime.UtcNow;
+                _pendingDangerBars[symbol] = 0;
+                _pendingDangerLastClosedOpenTime[symbol] = lastClosed.OpenTime;
+
+                await _notify.SendAsync($"[{symbol}] DANGER CANDIDATE → wait confirm {needBars} bar(s) (major={(IsMajorSymbol(symbol) ? "Y" : "N")}) | netRr={netRr:F2} | mode={profile.Tag}");
+                return false;
+            }
+
+            // chỉ tăng bar khi sang nến đã đóng mới
+            if (_pendingDangerLastClosedOpenTime.TryGetValue(symbol, out var lastSeenOpen))
+            {
+                if (lastSeenOpen != lastClosed.OpenTime)
+                {
+                    _pendingDangerLastClosedOpenTime[symbol] = lastClosed.OpenTime;
+                    _pendingDangerBars[symbol] = _pendingDangerBars.TryGetValue(symbol, out var b) ? (b + 1) : 1;
+                }
+            }
+            else
+            {
+                _pendingDangerLastClosedOpenTime[symbol] = lastClosed.OpenTime;
+                _pendingDangerBars[symbol] = 1;
+            }
+
+            int bars = _pendingDangerBars.TryGetValue(symbol, out var barsNow) ? barsNow : 0;
+
+            if (bars >= needBars)
+            {
+                ClearDangerPending(symbol);
+                await _notify.SendAsync($"[{symbol}] DANGER CONFIRMED: bars={bars}/{needBars} → eligible to cut/exit | mode={profile.Tag}");
+                return true;
+            }
+
+            return false;
         }
     }
 }
