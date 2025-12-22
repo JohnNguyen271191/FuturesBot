@@ -36,6 +36,11 @@ namespace FuturesBot.Services
     /// PATCH (NEW - fee bleed fix theo case của mày):
     /// - Mọi exit/protect/quick/boundary/time/danger đều dùng "minNetProfitUsd" = max(profileMin, estFeeUsd * Mult)
     ///   để tránh "thấy lãi gộp" nhưng net âm do fee.
+    ///
+    /// PATCH (NEW - anti "cắn trailing"):
+    /// - Fee rate EWMA không được tụt dưới taker (floor) -> tránh estimate fee ảo thấp => trail sớm
+    /// - Nếu kéo SL về gần/qua entry thì cộng "fee breakeven buffer" theo USD fee/qty
+    /// - Không update SL nếu SL quá sát MarkPrice (< X ATR) để tránh quét pullback
     /// </summary>
     public class OrderManagerService
     {
@@ -102,7 +107,9 @@ namespace FuturesBot.Services
         // Boundary exit: cũng cần cover fee
         private const decimal BoundaryExitMinNetProfitVsFeeMult = 1.8m;
 
-        // Danger cut: dùng lossAbs gate riêng, không cần mult
+        // ===== NEW: Anti "SL too close" + fee BE buffer =====
+        private const decimal MinSlDistanceAtrFrac = 0.35m;     // SL phải cách MarkPrice >= 0.35 ATR
+        private const decimal FeeBreakevenBufferMult = 1.25m;   // cover fee + slip
 
         private sealed class FeeStats
         {
@@ -552,6 +559,14 @@ namespace FuturesBot.Services
                     decimal minEarlyNetProfitUsd = Math.Max(profile.EarlyExitMinProfitUsd, estFeeUsd * EarlyExitMinNetProfitVsFeeMult);
                     decimal minBoundaryNetProfitUsd = Math.Max(profile.MinProtectProfitUsd, estFeeUsd * BoundaryExitMinNetProfitVsFeeMult);
 
+                    // extra strict cho Scalp: tránh "lãi tí xíu -> trail -> cắn"
+                    if (signal.Mode == TradeMode.Scalp)
+                    {
+                        minProtectNetProfitUsd = Math.Max(minProtectNetProfitUsd, estFeeUsd * 2.5m);
+                        minQuickNetProfitUsd = Math.Max(minQuickNetProfitUsd, estFeeUsd * 2.5m);
+                        minBoundaryNetProfitUsd = Math.Max(minBoundaryNetProfitUsd, estFeeUsd * 2.2m);
+                    }
+
                     // =================== SAFETY TP (nếu thiếu TP) - MODE AWARE ===================
                     if (hasEntry && hasSL && !hasTP && !autoTpPlaced)
                     {
@@ -704,6 +719,23 @@ namespace FuturesBot.Services
                                     else targetSL = Math.Max(targetSL, entry);
                                 }
 
+                                // ===== NEW: Fee BE buffer + anti "SL too close to price" =====
+                                decimal feeBeBuffer = GetFeeBreakevenBufferPrice(estFeeUsd, absQty);
+                                if (feeBeBuffer > 0m)
+                                {
+                                    if (isLongPosition)
+                                    {
+                                        if (targetSL >= entry) targetSL = Math.Max(targetSL, entry + feeBeBuffer);
+                                    }
+                                    else
+                                    {
+                                        if (targetSL <= entry) targetSL = Math.Min(targetSL, entry - feeBeBuffer);
+                                    }
+                                }
+
+                                if (IsSlTooCloseToPrice(price, targetSL, atr))
+                                    goto AFTER_PROTECT_BLOCK;
+
                                 if (IsBetterStopLoss(targetSL, sl, isLongPosition) && CanUpdateTrailing(symbol, sl, targetSL, isLongPosition, atr))
                                 {
                                     sl = targetSL;
@@ -726,6 +758,20 @@ namespace FuturesBot.Services
 
                                 if (isLongPosition) targetSL = Math.Min(targetSL, entry);
                                 else targetSL = Math.Max(targetSL, entry);
+
+                                // Fee BE buffer (fallback)
+                                decimal feeBeBuffer = GetFeeBreakevenBufferPrice(estFeeUsd, absQty);
+                                if (feeBeBuffer > 0m)
+                                {
+                                    if (isLongPosition)
+                                    {
+                                        if (targetSL >= entry) targetSL = Math.Max(targetSL, entry + feeBeBuffer);
+                                    }
+                                    else
+                                    {
+                                        if (targetSL <= entry) targetSL = Math.Min(targetSL, entry - feeBeBuffer);
+                                    }
+                                }
 
                                 if (IsBetterStopLoss(targetSL, sl, isLongPosition) && CanUpdateTrailing(symbol, sl, targetSL, isLongPosition, 0m))
                                 {
@@ -1353,6 +1399,9 @@ namespace FuturesBot.Services
 
             await _exchange.CancelStopLossOrdersAsync(symbol);
 
+            // nhẹ thôi, tránh cancel xong sàn chưa sync kịp (giảm gap bảo vệ)
+            await Task.Delay(150);
+
             if (currentPos == null)
                 currentPos = await _exchange.GetPositionAsync(symbol);
 
@@ -1417,7 +1466,10 @@ namespace FuturesBot.Services
         private decimal GetEffectiveFeeRate(string symbol)
         {
             var s = _feeStatsBySymbol.GetOrAdd(symbol, _ => new FeeStats());
-            if (s.EwmaRate <= 0m) s.EwmaRate = DefaultTakerFeeRate;
+
+            // ALWAYS floor to taker for safety (tránh fee estimate ảo thấp -> trail sớm)
+            if (s.EwmaRate < DefaultTakerFeeRate) s.EwmaRate = DefaultTakerFeeRate;
+
             return s.EwmaRate;
         }
 
@@ -1448,7 +1500,8 @@ namespace FuturesBot.Services
                 decimal old = stats.EwmaRate <= 0m ? DefaultTakerFeeRate : stats.EwmaRate;
                 decimal updated = old + FeeEwmaAlpha * (realizedRate - old);
 
-                stats.EwmaRate = Clamp(updated, DefaultMakerFeeRate * 0.5m, DefaultTakerFeeRate * 2.5m);
+                // IMPORTANT: floor >= taker (đừng để rơi xuống maker/ảo thấp)
+                stats.EwmaRate = Clamp(updated, DefaultTakerFeeRate, DefaultTakerFeeRate * 2.5m);
                 stats.Samples++;
                 stats.LastUpdateUtc = DateTime.UtcNow;
 
@@ -1554,6 +1607,22 @@ namespace FuturesBot.Services
             }
 
             return null;
+        }
+
+        // ============================================================
+        //  NEW: fee BE buffer + anti "SL too close"
+        // ============================================================
+
+        private static decimal GetFeeBreakevenBufferPrice(decimal estFeeUsd, decimal absQty)
+        {
+            if (estFeeUsd <= 0m || absQty <= 0m) return 0m;
+            return (estFeeUsd * FeeBreakevenBufferMult) / absQty;
+        }
+
+        private static bool IsSlTooCloseToPrice(decimal price, decimal sl, decimal atr)
+        {
+            if (atr <= 0m || price <= 0m || sl <= 0m) return false;
+            return Math.Abs(price - sl) < atr * MinSlDistanceAtrFrac;
         }
 
         private static decimal Clamp(decimal v, decimal min, decimal max)
