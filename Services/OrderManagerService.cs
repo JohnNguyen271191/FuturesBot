@@ -167,12 +167,18 @@ namespace FuturesBot.Services
 
                     bool hasPosition = pos.PositionAmt != 0;
                     bool hasOpenOrder = openOrders.Any();
+                    var coinInfo = _botConfig.CoinInfos.FirstOrDefault(i => i.Symbol.Equals(symbol));
+                    if (coinInfo == null)
+                    {
+                        await _notify.SendAsync($"[{symbol}] không tìm thấy trong setting.");
+                        return;
+                    }
 
                     if (hasPosition)
                     {
                         await _notify.SendAsync($"[{symbol}] LIMIT filled → chuyển sang monitor POSITION (mode={profile.Tag})");
                         ClearMonitoringLimit(symbol);
-                        _ = MonitorPositionAsync(signal);
+                        _ = MonitorPositionAsync(signal, coinInfo);
                         return;
                     }
 
@@ -182,12 +188,7 @@ namespace FuturesBot.Services
                         return;
                     }
 
-                    var coinInfo = _botConfig.CoinInfos.FirstOrDefault(i => i.Symbol.Equals(symbol));
-                    if (coinInfo == null)
-                    {
-                        await _notify.SendAsync($"[{symbol}] không tìm thấy trong setting.");
-                        return;
-                    }
+                    
                     var candles = await _exchange.GetRecentCandlesAsync(symbol, coinInfo.MainTimeFrame, 80);
                     if (candles == null || candles.Count < 3) continue;
 
@@ -237,7 +238,7 @@ namespace FuturesBot.Services
         //         MONITOR POSITION (FLEX EXIT) - MODE AWARE
         // ============================================================
 
-        public async Task MonitorPositionAsync(TradeSignal signal)
+        public async Task MonitorPositionAsync(TradeSignal signal, CoinInfo coinInfo)
         {
             string symbol = signal.Symbol;
             var profile = ModeProfile.For(signal.Mode);
@@ -269,13 +270,6 @@ namespace FuturesBot.Services
             decimal lastKnownAbsQty = 0m;
             decimal lastKnownMarkPrice = 0m;
             decimal lastKnownEntry = 0m;
-
-            var coinInfo = _botConfig.CoinInfos.FirstOrDefault(i => i.Symbol.Equals(symbol));
-            if (coinInfo == null)
-            {
-                await _notify.SendAsync($"[{symbol}] không tìm thấy trong setting.");
-                return;
-            }
 
             int tfMinutes = ParseIntervalMinutesSafe(coinInfo.MainTimeFrame);
 
@@ -997,7 +991,14 @@ namespace FuturesBot.Services
                 Mode = TradeMode.Trend
             };
 
-            _ = MonitorPositionAsync(signal);
+            var coinInfo = _botConfig.CoinInfos.FirstOrDefault(i => i.Symbol.Equals(pos.Symbol));
+            if (coinInfo == null)
+            {
+                await _notify.SendAsync($"[{pos.Symbol}] không tìm thấy trong setting.");
+                return;
+            }
+
+            _ = MonitorPositionAsync(signal, coinInfo);
         }
 
         public async Task ClearMonitoringTrigger(string symbol)
