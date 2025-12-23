@@ -10,14 +10,12 @@ using static FuturesBot.Utils.EnumTypesHelper;
 namespace FuturesBot.Services
 {
     /// <summary>
-    /// V4 WINRATE PATCH + MTF (NEW):
-    /// - TREND FILTER: 15M (EMA89 + EMA200)
-    /// - ENTRY TIMING: 3M  (EMA34 + EMA89)  [passed via candles1h param for backward-compat]
+    /// TradingStrategy V4 WINRATE PATCH + MTF (TF-agnostic)
     ///
-    /// IMPORTANT:
-    /// GenerateSignal(candles15m, candles1h, coinInfo)
-    /// - candles15m: TREND TF 15M
-    /// - candles1h : ENTRY TF 3M (service phải fetch 3m và truyền vô param này)
+    /// MAPPING (TF-agnostic, không fix cứng 15m/3m nữa):
+    /// GenerateSignal(candlesTrend, candlesEntry, coinInfo)
+    /// - candlesTrend: Trend TF (ví dụ 15m / 30m / 1h...)
+    /// - candlesEntry: Entry TF (ví dụ 3m / 5m / 15m...)
     ///
     /// NOTE: dùng NẾN ĐÃ ĐÓNG (Count - 2)
     /// </summary>
@@ -62,7 +60,7 @@ namespace FuturesBot.Services
         private const decimal TrendRetestRsiMinForShort = 32m;
 
         // Entry offset để tránh đỉnh/đáy (trend)
-        private const decimal EntryOffsetPercent = 0.003m;   // 0.3% cho trend
+        private const decimal EntryOffsetPercent = 0.003m;          // 0.3% cho trend
         private const decimal EntryOffsetPercentForScal = 0.001m;   // 0.1% cho scalp
 
         // SL neo EMA cho trend
@@ -81,15 +79,16 @@ namespace FuturesBot.Services
 
         // ========================= BTC vs ALT CONFIG ====================
 
-        private const decimal MinMajorVolumeUsd15m = 2_000_000m; // BTC/ETH (on TREND TF 15M)
-        private const decimal MinAltVolumeUsd15m = 600_000m;     // Altcoin
+        // Volume gate uses TREND candle (đặt theo USDT value của 1 nến trend)
+        private const decimal MinMajorVolumeUsdTrend = 2_000_000m; // BTC/ETH
+        private const decimal MinAltVolumeUsdTrend = 600_000m;     // Altcoin
 
         private const int VolumeMedianLookback = 40;
         private const decimal MinVolumeVsMedianRatioMajor = 0.55m;
         private const decimal MinVolumeVsMedianRatioAlt = 0.65m;
 
-        // Trend slope (on 15M EMA89)
-        private const int EmaSlopeLookbackTrend = 6; // ~ 90 minutes on 15m
+        // Trend slope (on TREND EMA89)
+        private const int EmaSlopeLookbackTrend = 6;
         private const decimal MinAltEmaSlopeTrend = 0.0025m;   // 0.25%
         private const decimal MinMajorEmaSlopeTrend = 0.0015m; // 0.15%
 
@@ -106,8 +105,8 @@ namespace FuturesBot.Services
         private const decimal MaxEntryDistanceToAnchorMajor = 0.0035m; // 0.35%
         private const decimal MaxEntryDistanceToAnchorAlt = 0.0050m;   // 0.50%
 
-        // ========================= (NEW) ANTI-LATE ENTRY NEAR EXTREMUM (TREND TF) =========================
-        private const int RecentExtremumLookback = 30;                // ~ 7.5h on 15m
+        // ========================= ANTI-LATE ENTRY NEAR EXTREMUM (TREND TF) =========================
+        private const int RecentExtremumLookback = 30;
         private const decimal MinDistFromRecentLowMajor = 0.0040m;    // 0.40%
         private const decimal MinDistFromRecentLowAlt = 0.0060m;      // 0.60%
         private const decimal MinDistFromRecentHighMajor = 0.0040m;   // 0.40%
@@ -119,7 +118,7 @@ namespace FuturesBot.Services
         private const decimal SidewaySlopeThreshold = 0.002m;    // 0.2%
         private const int SidewayConfirmBars = 3;
 
-        // ========================= MARKET STRUCTURE (TREND TF 15M) =========================
+        // ========================= MARKET STRUCTURE (TREND TF) =========================
         private const int StructureSwingStrength = 3;
         private const int StructureMaxLookbackBars = 80;
         private const int StructureNeedSwings = 2;
@@ -132,11 +131,10 @@ namespace FuturesBot.Services
 
         private const decimal StrongRejectWickToBody = 2.0m;
         private const decimal StrongRejectCloseInRange = 0.25m;
-        private const decimal StrongRejectMinVolVsMedian = 0.80m;
 
         private const decimal MarketableLimitOffset = 0.0002m; // 0.02%
 
-        // ========================= MODE 2: PULLBACK -> REJECT -> CONTINUATION (TREND TF 15M) =========================
+        // ========================= MODE 2: PULLBACK -> REJECT -> CONTINUATION (TREND TF) =========================
         private const bool EnableBreakdownContinuationForMajor = true;
         private const bool EnableBreakoutContinuationForMajor = true;
 
@@ -161,18 +159,17 @@ namespace FuturesBot.Services
 
         private const decimal AntiImpulseBodyToRangeMin = 0.65m;
         private const decimal AntiImpulseCloseNearEdgeMax = 0.20m;
-        private const decimal AntiImpulseMinVolVsMedian = 0.90m;
         private const decimal AntiImpulseMaxDistToAnchor = 0.0025m;
 
-        // ========================= HUMAN-LIKE FILTER (TREND TF 15M) =========================
+        // ========================= HUMAN-LIKE FILTER (TREND TF) =========================
         private const bool EnableHumanLikeFilter = true;
 
         private const decimal DangerZoneBottomRatio = 0.30m;  // bottom 30% recent range -> WAIT (SHORT)
         private const decimal DangerZoneTopRatio = 0.30m;     // top 30% recent range -> WAIT (LONG)
-        private const int HumanRecentRangeLookback = 40;      // ~10h M15
+        private const int HumanRecentRangeLookback = 40;
 
-        private const int ExtremumTouchLookback = 30;         // ~7.5h
-        private const int MinTouchesToBlock = 2;              // >=2 touches -> block
+        private const int ExtremumTouchLookback = 30;
+        private const int MinTouchesToBlock = 2;
         private const decimal ExtremumTouchEpsMajor = 0.0012m; // 0.12%
         private const decimal ExtremumTouchEpsAlt = 0.0018m;   // 0.18%
 
@@ -192,21 +189,11 @@ namespace FuturesBot.Services
         //                           ENTRY SIGNAL (MTF)
         // =====================================================================
 
-        /// <summary>
-        /// MTF mapping:
-        /// - candles15m: TREND TF 15M
-        /// - candles1h : ENTRY TF 3M (service should pass 3m candles here)
-        /// </summary>
-        public TradeSignal GenerateSignal(IReadOnlyList<Candle> candles15m, IReadOnlyList<Candle> candles1h, CoinInfo coinInfo)
+        public TradeSignal GenerateSignal(IReadOnlyList<Candle> candlesTrend, IReadOnlyList<Candle> candlesEntry, CoinInfo coinInfo)
         {
-            // rename for clarity (do NOT change signature to keep compatibility)
-            var candlesTrend = candles15m; // 15m
-            var candlesEntry = candles1h;  // 3m
-
-            if (candlesTrend == null || candlesEntry == null || candlesTrend.Count < MinBars || candlesEntry.Count < MinBars)
-                return new TradeSignal();
-
-            if (coinInfo == null)
+            if (candlesTrend == null || candlesEntry == null ||
+                candlesTrend.Count < MinBars || candlesEntry.Count < MinBars ||
+                coinInfo == null)
                 return new TradeSignal();
 
             bool isMajor = coinInfo.IsMajor;
@@ -219,7 +206,8 @@ namespace FuturesBot.Services
             var lastT = candlesTrend[iT];
             var lastE = candlesEntry[iE];
 
-            // ================== TREND TF INDICATORS (15M) ==================
+            // ================== TREND TF INDICATORS ==================
+            var ema34_T = _indicators.Ema(candlesTrend, 34);
             var ema89_T = _indicators.Ema(candlesTrend, 89);
             var ema200_T = _indicators.Ema(candlesTrend, 200);
 
@@ -229,7 +217,7 @@ namespace FuturesBot.Services
             decimal ema89T = ema89_T[iT];
             decimal ema200T = ema200_T[iT];
 
-            // ================== ENTRY TF INDICATORS (3M) ==================
+            // ================== ENTRY TF INDICATORS ==================
             var ema34_E = _indicators.Ema(candlesEntry, 34);
             var ema89_E = _indicators.Ema(candlesEntry, 89);
 
@@ -242,62 +230,58 @@ namespace FuturesBot.Services
             decimal rrSideway = isMajor ? RiskRewardSidewayMajor : RiskRewardSideway;
             bool allowSideway = isMajor;
 
-            // Volume gate uses TREND TF 15m candle
-            decimal volUsd15 = lastT.Close * lastT.Volume;
-
+            // Volume gate uses TREND candle
+            decimal volUsdTrend = lastT.Close * lastT.Volume;
             decimal medianVolUsd = GetMedianVolUsd(candlesTrend, iT, VolumeMedianLookback);
-            decimal ratioVsMedian = medianVolUsd > 0 ? (volUsd15 / medianVolUsd) : 1m;
+            decimal ratioVsMedian = medianVolUsd > 0 ? (volUsdTrend / medianVolUsd) : 1m;
 
             if (isMajor)
             {
-                if (volUsd15 < MinMajorVolumeUsd15m && ratioVsMedian < MinVolumeVsMedianRatioMajor)
+                if (volUsdTrend < MinMajorVolumeUsdTrend && ratioVsMedian < MinVolumeVsMedianRatioMajor)
                 {
                     return new TradeSignal
                     {
                         Type = SignalType.None,
-                        Reason = $"{coinInfo.Symbol}: Volume 15M yếu ({volUsd15:F0} USDT, vsMedian={ratioVsMedian:P0}) → bỏ qua.",
+                        Reason = $"{coinInfo.Symbol}: Volume Trend yếu ({volUsdTrend:F0} USDT, vsMedian={ratioVsMedian:P0}) → bỏ qua.",
                         Symbol = coinInfo.Symbol
                     };
                 }
             }
             else
             {
-                if (volUsd15 < MinAltVolumeUsd15m && ratioVsMedian < MinVolumeVsMedianRatioAlt)
+                if (volUsdTrend < MinAltVolumeUsdTrend && ratioVsMedian < MinVolumeVsMedianRatioAlt)
                 {
                     return new TradeSignal
                     {
                         Type = SignalType.None,
-                        Reason = $"{coinInfo.Symbol}: Alt volume 15M yếu ({volUsd15:F0} USDT, vsMedian={ratioVsMedian:P0}) → bỏ qua.",
+                        Reason = $"{coinInfo.Symbol}: Alt volume Trend yếu ({volUsdTrend:F0} USDT, vsMedian={ratioVsMedian:P0}) → bỏ qua.",
                         Symbol = coinInfo.Symbol
                     };
                 }
 
-                // Alt: slope on TREND EMA89 (15m)
+                // Alt: slope on TREND EMA89
                 if (!IsEmaSlopeOk(ema89_T, iT, EmaSlopeLookbackTrend, MinAltEmaSlopeTrend))
                 {
                     return new TradeSignal
                     {
                         Type = SignalType.None,
-                        Reason = $"{coinInfo.Symbol}: Alt sideway, EMA89 15M slope yếu → NO TRADE.",
+                        Reason = $"{coinInfo.Symbol}: Alt sideway, EMA89 Trend slope yếu → NO TRADE.",
                         Symbol = coinInfo.Symbol
                     };
                 }
             }
 
-            // =================== SIDEWAY FILTER (15M + 3M) ===========================
+            // =================== SIDEWAY FILTER (TREND + ENTRY) ===========================
 
-            // Use EMA34/89 for sideway check (need ema34 series)
-            var ema34_T = _indicators.Ema(candlesTrend, 34);
-            bool sidewayTrend15 = IsSidewayStrong(candlesTrend, ema34_T, ema89_T);
+            bool sidewayTrend = IsSidewayStrong(candlesTrend, ema34_T, ema89_T);
+            bool sidewayEntry = IsSidewayStrong(candlesEntry, ema34_E, ema89_E);
 
-            bool sidewayEntry3 = IsSidewayStrong(candlesEntry, ema34_E, ema89_E);
-
-            if (!isMajor && (sidewayTrend15 || sidewayEntry3))
+            if (!isMajor && (sidewayTrend || sidewayEntry))
             {
                 return new TradeSignal
                 {
                     Type = SignalType.None,
-                    Reason = $"{coinInfo.Symbol}: Altcoin SIDEWAY mạnh trên {(sidewayTrend15 ? "15M" : "3M")} → NO TRADE.",
+                    Reason = $"{coinInfo.Symbol}: Altcoin SIDEWAY mạnh trên {(sidewayTrend ? "TrendTF" : "EntryTF")} → NO TRADE.",
                     Symbol = coinInfo.Symbol
                 };
             }
@@ -313,18 +297,18 @@ namespace FuturesBot.Services
                 return new TradeSignal
                 {
                     Type = SignalType.None,
-                    Reason = $"{coinInfo.Symbol}: Climax + overextended xa EMA (15M) → chờ retest.",
+                    Reason = $"{coinInfo.Symbol}: Climax + overextended xa EMA (TrendTF) → chờ retest.",
                     Symbol = coinInfo.Symbol
                 };
             }
 
-            // =================== TREND FILTER (15M EMA89/200) ======================
+            // =================== TREND FILTER (TREND TF EMA89/200) ======================
 
-            bool trendUp15 =
+            bool trendUp =
                 lastT.Close > ema89T &&
                 ema89T > ema200T;
 
-            bool trendDown15 =
+            bool trendDown =
                 lastT.Close < ema89T &&
                 ema89T < ema200T;
 
@@ -335,19 +319,18 @@ namespace FuturesBot.Services
                 return new TradeSignal
                 {
                     Type = SignalType.None,
-                    Reason = $"{coinInfo.Symbol}: 15M gần EMA200 (dist={distTo200:P2}) → NO TRADE (chop zone).",
+                    Reason = $"{coinInfo.Symbol}: TrendTF gần EMA200 (dist={distTo200:P2}) → NO TRADE (chop zone).",
                     Symbol = coinInfo.Symbol
                 };
             }
 
-            // =================== ENTRY ALIGN (3M EMA34/89) ======================
+            // =================== ENTRY ALIGN (ENTRY TF EMA34/89) ======================
 
-            bool entryBiasUp3 = lastE.Close > ema34_E[iE] && ema34_E[iE] > ema89_E[iE];
-            bool entryBiasDown3 = lastE.Close < ema34_E[iE] && ema34_E[iE] < ema89_E[iE];
+            bool entryBiasUp = lastE.Close > ema34_E[iE] && ema34_E[iE] > ema89_E[iE];
+            bool entryBiasDown = lastE.Close < ema34_E[iE] && ema34_E[iE] < ema89_E[iE];
 
-            // Overall trend condition
-            bool upTrend = trendUp15 && entryBiasUp3;
-            bool downTrend = trendDown15 && entryBiasDown3;
+            bool upTrend = trendUp && entryBiasUp;
+            bool downTrend = trendDown && entryBiasDown;
 
             // Extreme cases (use TREND TF, avoid chasing)
             bool extremeUp =
@@ -360,26 +343,25 @@ namespace FuturesBot.Services
                 macdT[iT] < sigT[iT] &&
                 rsiT[iT] < ExtremeRsiLow;
 
-            // =================== MARKET STRUCTURE (TREND TF 15M) ==================
+            // =================== MARKET STRUCTURE (TREND TF) ==================
             decimal stTol = isMajor ? StructureBreakToleranceMajor : StructureBreakToleranceAlt;
-
             var (lowerHigh, higherLow, lastSwingHigh, prevSwingHigh, lastSwingLow, prevSwingLow)
                 = DetectMarketStructure(candlesTrend, iT, stTol);
 
             bool blockLongByStructure = lowerHigh && !higherLow;
             bool blockShortByStructure = higherLow && !lowerHigh;
 
-            // =================== SIDEWAY / PULLBACK SCALP (still based on 15M) ======================
+            // =================== SIDEWAY / PULLBACK SCALP (TREND TF) ======================
 
             if (!extremeUp && !extremeDump)
             {
                 bool shouldTrySideway =
-                    (!trendUp15 && !trendDown15) || sidewayTrend15;
+                    (!trendUp && !trendDown) || sidewayTrend;
 
                 if (allowSideway && shouldTrySideway)
                 {
-                    bool biasUp = trendUp15;
-                    bool biasDown = trendDown15;
+                    bool biasUp = trendUp;
+                    bool biasDown = trendDown;
 
                     if (blockLongByStructure)
                     {
@@ -409,27 +391,27 @@ namespace FuturesBot.Services
                     if (sidewaySignal.Type != SignalType.None)
                         return sidewaySignal;
                 }
-                else if (!isMajor && shouldTrySideway && !trendUp15 && !trendDown15)
+                else if (!isMajor && shouldTrySideway && !trendUp && !trendDown)
                 {
                     return new TradeSignal
                     {
                         Type = SignalType.None,
-                        Reason = $"{coinInfo.Symbol}: Altcoin sideway trên 15M → bỏ qua.",
+                        Reason = $"{coinInfo.Symbol}: Altcoin sideway trên TrendTF → bỏ qua.",
                         Symbol = coinInfo.Symbol
                     };
                 }
             }
 
-            // =================== Pullback volume filter (use ENTRY TF 3M soft check) ===================
-            int PullbackVolumeLookback = 5;
-            decimal avgVolE = PriceActionHelper.AverageVolume(candlesEntry, iE - 1, PullbackVolumeLookback);
+            // =================== Pullback volume filter (ENTRY TF soft check) ===================
+            int pullbackVolLookback = 5;
+            decimal avgVolE = PriceActionHelper.AverageVolume(candlesEntry, iE - 1, pullbackVolLookback);
             bool volumeOkSoft = avgVolE <= 0 || lastE.Volume >= avgVolE * 0.7m;
 
-            // =================== MODE 2 (MAJOR ONLY) - still on TREND TF 15M ===================
+            // =================== MODE 2 (MAJOR ONLY) - still on TREND TF ===================
             if (isMajor)
             {
                 if (EnableBreakdownContinuationForMajor &&
-                    (trendDown15) &&
+                    (trendDown) &&
                     !blockShortByStructure &&
                     !extremeDump)
                 {
@@ -437,7 +419,7 @@ namespace FuturesBot.Services
                         candlesTrend,
                         iT,
                         rsiT[iT],
-                        volUsd15,
+                        volUsdTrend,
                         medianVolUsd,
                         coinInfo);
 
@@ -446,7 +428,7 @@ namespace FuturesBot.Services
                 }
 
                 if (EnableBreakoutContinuationForMajor &&
-                    (trendUp15) &&
+                    (trendUp) &&
                     !blockLongByStructure &&
                     !extremeUp)
                 {
@@ -454,7 +436,7 @@ namespace FuturesBot.Services
                         candlesTrend,
                         iT,
                         rsiT[iT],
-                        volUsd15,
+                        volUsdTrend,
                         medianVolUsd,
                         coinInfo);
 
@@ -463,8 +445,8 @@ namespace FuturesBot.Services
                 }
             }
 
-            // =================== TREND STRENGTH FILTER (15M sep + slope) ===================
-            if (trendUp15 || trendDown15)
+            // =================== TREND STRENGTH FILTER (TREND TF sep + slope) ===================
+            if (trendUp || trendDown)
             {
                 decimal price = lastT.Close > 0 ? lastT.Close : 1m;
                 decimal sepTrend = Math.Abs(ema89T - ema200T) / price;
@@ -481,7 +463,7 @@ namespace FuturesBot.Services
                     return new TradeSignal
                     {
                         Type = SignalType.None,
-                        Reason = $"{coinInfo.Symbol}: NO TREND – Trend 15M yếu/chop (sep={sepTrend:P2}, slopeOk={slopeOkNow}).",
+                        Reason = $"{coinInfo.Symbol}: NO TREND – TrendTF yếu/chop (sep={sepTrend:P2}, slopeOk={slopeOkNow}).",
                         Symbol = coinInfo.Symbol
                     };
                 }
@@ -490,8 +472,7 @@ namespace FuturesBot.Services
                 {
                     rrTrend = GetDynamicTrendRR(
                         isMajor: isMajor,
-                        sep15: sepTrend,
-                        sepH1: sepTrend, // reuse (we removed H1)
+                        sepTrend: sepTrend,
                         slopeOk: slopeOkNow,
                         ratioVsMedian: ratioVsMedian,
                         volumeOkSoft: volumeOkSoft);
@@ -502,11 +483,11 @@ namespace FuturesBot.Services
                 }
             }
 
-            // =================== BUILD LONG / SHORT (ENTRY TF 3M) =========
+            // =================== BUILD LONG / SHORT (ENTRY TF) =========
 
             if (upTrend && !blockLongByStructure && !extremeUp)
             {
-                var longSignal = BuildLongV4Winrate_Entry3mWithTrend15m(
+                var longSignal = BuildLongV4Winrate_EntryWithTrend(
                     candlesEntry,
                     candlesTrend,
                     ema34_E,
@@ -534,7 +515,7 @@ namespace FuturesBot.Services
 
             if (downTrend && !blockShortByStructure && !extremeDump)
             {
-                var shortSignal = BuildShortV4Winrate_Entry3mWithTrend15m(
+                var shortSignal = BuildShortV4Winrate_EntryWithTrend(
                     candlesEntry,
                     candlesTrend,
                     ema34_E,
@@ -568,26 +549,26 @@ namespace FuturesBot.Services
         // =====================================================================
 
         private TradeSignal BuildBreakdownPullbackThenRejectShort(
-            IReadOnlyList<Candle> candles15m,
-            int i15,
+            IReadOnlyList<Candle> candlesTrend,
+            int iT,
             decimal rsiNow,
-            decimal volUsd15,
+            decimal volUsdTrend,
             decimal medianVolUsd,
             CoinInfo coinInfo)
         {
-            if (i15 < ContinuationLookback + 5) return new TradeSignal();
+            if (iT < ContinuationLookback + 5) return new TradeSignal();
             if (rsiNow < ContinuationMinRsiForShort) return new TradeSignal();
 
-            decimal ratio = medianVolUsd > 0 ? (volUsd15 / medianVolUsd) : 1m;
+            decimal ratio = medianVolUsd > 0 ? (volUsdTrend / medianVolUsd) : 1m;
             if (ratio < ContinuationMinVolVsMedian) return new TradeSignal();
 
-            var c = candles15m[i15];       // C (rejection)
-            var b = candles15m[i15 - 1];   // B (pullback)
+            var c = candlesTrend[iT];       // C (rejection)
+            var b = candlesTrend[iT - 1];   // B (pullback)
 
-            decimal level = FindLowestLow(candles15m, i15 - 2, ContinuationLookback);
+            decimal level = FindLowestLow(candlesTrend, iT - 2, ContinuationLookback);
             if (level <= 0) return new TradeSignal();
 
-            int breakdownIdx = FindRecentBreakdownIndex(candles15m, i15 - 1, level, ContinuationFindEventLookback);
+            int breakdownIdx = FindRecentBreakdownIndex(candlesTrend, iT - 1, level, ContinuationFindEventLookback);
             if (breakdownIdx < 0) return new TradeSignal();
 
             bool pullbackTouch =
@@ -602,7 +583,7 @@ namespace FuturesBot.Services
                 c.Close < level;
 
             if (!reject) return new TradeSignal();
-            if (IsClimaxCandle(candles15m, i15)) return new TradeSignal();
+            if (IsClimaxCandle(candlesTrend, iT)) return new TradeSignal();
 
             decimal entry = c.Close * (1m - MarketableLimitOffset);
 
@@ -625,26 +606,26 @@ namespace FuturesBot.Services
         }
 
         private TradeSignal BuildBreakoutPullbackThenRejectLong(
-            IReadOnlyList<Candle> candles15m,
-            int i15,
+            IReadOnlyList<Candle> candlesTrend,
+            int iT,
             decimal rsiNow,
-            decimal volUsd15,
+            decimal volUsdTrend,
             decimal medianVolUsd,
             CoinInfo coinInfo)
         {
-            if (i15 < ContinuationLookback + 5) return new TradeSignal();
+            if (iT < ContinuationLookback + 5) return new TradeSignal();
             if (rsiNow > ContinuationMaxRsiForLong) return new TradeSignal();
 
-            decimal ratio = medianVolUsd > 0 ? (volUsd15 / medianVolUsd) : 1m;
+            decimal ratio = medianVolUsd > 0 ? (volUsdTrend / medianVolUsd) : 1m;
             if (ratio < ContinuationMinVolVsMedian) return new TradeSignal();
 
-            var c = candles15m[i15];       // C (rejection)
-            var b = candles15m[i15 - 1];   // B (pullback)
+            var c = candlesTrend[iT];       // C (rejection)
+            var b = candlesTrend[iT - 1];   // B (pullback)
 
-            decimal level = FindHighestHigh(candles15m, i15 - 2, ContinuationLookback);
+            decimal level = FindHighestHigh(candlesTrend, iT - 2, ContinuationLookback);
             if (level <= 0) return new TradeSignal();
 
-            int breakoutIdx = FindRecentBreakoutIndex(candles15m, i15 - 1, level, ContinuationFindEventLookback);
+            int breakoutIdx = FindRecentBreakoutIndex(candlesTrend, iT - 1, level, ContinuationFindEventLookback);
             if (breakoutIdx < 0) return new TradeSignal();
 
             bool pullbackTouch =
@@ -659,7 +640,7 @@ namespace FuturesBot.Services
                 c.Close > level;
 
             if (!reject) return new TradeSignal();
-            if (IsClimaxCandle(candles15m, i15)) return new TradeSignal();
+            if (IsClimaxCandle(candlesTrend, iT)) return new TradeSignal();
 
             decimal entry = c.Close * (1m + MarketableLimitOffset);
 
@@ -708,9 +689,8 @@ namespace FuturesBot.Services
             int start = Math.Max(0, endIdx - lookback + 1);
             decimal min = decimal.MaxValue;
             for (int i = start; i <= endIdx; i++)
-            {
-                if (candles[i].Low < min) min = candles[i].Low;
-            }
+                min = Math.Min(min, candles[i].Low);
+
             return min == decimal.MaxValue ? 0m : min;
         }
 
@@ -719,19 +699,18 @@ namespace FuturesBot.Services
             int start = Math.Max(0, endIdx - lookback + 1);
             decimal max = 0m;
             for (int i = start; i <= endIdx; i++)
-            {
-                if (candles[i].High > max) max = candles[i].High;
-            }
+                max = Math.Max(max, candles[i].High);
+
             return max;
         }
 
         // =====================================================================
-        //                V4 WINRATE (ENTRY 3M) + TREND FILTER (15M)
+        //                V4 WINRATE (ENTRY) + TREND FILTER (TREND)
         // =====================================================================
 
-        private TradeSignal BuildLongV4Winrate_Entry3mWithTrend15m(
-            IReadOnlyList<Candle> candlesEntry3m,
-            IReadOnlyList<Candle> candlesTrend15m,
+        private TradeSignal BuildLongV4Winrate_EntryWithTrend(
+            IReadOnlyList<Candle> candlesEntry,
+            IReadOnlyList<Candle> candlesTrend,
             IReadOnlyList<decimal> ema34_E,
             IReadOnlyList<decimal> ema89_E,
             IReadOnlyList<decimal> rsiE,
@@ -742,20 +721,19 @@ namespace FuturesBot.Services
             decimal riskRewardTrend,
             bool volumeOkSoft)
         {
-            int iB = candlesEntry3m.Count - 2; // confirm candle (closed)
-            int iA = iB - 1;                   // retest candle (closed)
+            int iB = candlesEntry.Count - 2; // confirm candle (closed)
+            int iA = iB - 1;                 // retest candle (closed)
             if (iA <= 2) return new TradeSignal();
 
-            var A = candlesEntry3m[iA];
-            var B = candlesEntry3m[iB];
+            var A = candlesEntry[iA];
+            var B = candlesEntry[iB];
 
-            // RSI cap uses ENTRY RSI (timing)
             if (rsiE[iB] > TrendRetestRsiMaxForLong)
             {
                 return new TradeSignal
                 {
                     Type = SignalType.None,
-                    Reason = $"{coinInfo.Symbol}: NO LONG – RSI(3M) quá cao ({rsiE[iB]:F1}) cho trend retest.",
+                    Reason = $"{coinInfo.Symbol}: NO LONG – RSI(EntryTF) quá cao ({rsiE[iB]:F1}) cho trend retest.",
                     Symbol = coinInfo.Symbol
                 };
             }
@@ -763,7 +741,6 @@ namespace FuturesBot.Services
             decimal ema34 = ema34_E[iB];
             decimal ema89 = ema89_E[iB];
 
-            // Anchor supports ONLY EMA34/EMA89 (NO EMA200 on 3M)
             var supports = new List<decimal>();
             if (ema34 > 0 && ema34 < B.Close) supports.Add(ema34);
             if (ema89 > 0 && ema89 < B.Close) supports.Add(ema89);
@@ -773,7 +750,7 @@ namespace FuturesBot.Services
                 return new TradeSignal
                 {
                     Type = SignalType.None,
-                    Reason = $"{coinInfo.Symbol}: Uptrend nhưng không có EMA34/89 support dưới giá (3M).",
+                    Reason = $"{coinInfo.Symbol}: Uptrend nhưng không có EMA34/89 support dưới giá (EntryTF).",
                     Symbol = coinInfo.Symbol
                 };
             }
@@ -786,12 +763,12 @@ namespace FuturesBot.Services
                 A.Low <= anchor * (1 + EmaRetestBand) &&
                 A.Low >= anchor * (1 - EmaRetestBand);
 
-            if (EnableAntiDumpLong && touchA && IsBearishImpulseAtRetest(candlesEntry3m, iA, anchor))
+            if (EnableAntiDumpLong && touchA && IsBearishImpulseAtRetest(candlesEntry, iA, anchor))
             {
                 return new TradeSignal
                 {
                     Type = SignalType.None,
-                    Reason = $"{coinInfo.Symbol}: NO LONG – AntiDump at retest(A) near EMA({anchor:F6}) on 3M.",
+                    Reason = $"{coinInfo.Symbol}: NO LONG – AntiDump at retest(A) near EMA({anchor:F6}) on EntryTF.",
                     Symbol = coinInfo.Symbol
                 };
             }
@@ -821,18 +798,17 @@ namespace FuturesBot.Services
                 return new TradeSignal
                 {
                     Type = SignalType.None,
-                    Reason = $"{coinInfo.Symbol}: Long(3M) chưa đạt (touchA={touchA}, bullishB={bullishB}, closeBackAbove={closeBackAbove}, break={breakSmall}, rejectB={rejectB}, momHard={momentumHard}, volOk={volumeOkSoft}).",
+                    Reason = $"{coinInfo.Symbol}: Long(EntryTF) chưa đạt (touchA={touchA}, bullishB={bullishB}, closeBackAbove={closeBackAbove}, break={breakSmall}, rejectB={rejectB}, momHard={momentumHard}, volOk={volumeOkSoft}).",
                     Symbol = coinInfo.Symbol
                 };
             }
 
-            // SL dynamic (entry TF)
             decimal slByEma = anchor * (1m - AnchorSlBufferPercent);
 
             decimal sl = slByEma;
             if (UseSwingForTrendStop)
             {
-                decimal swingLow = PriceActionHelper.FindSwingLow(candlesEntry3m, iB, SwingLookback);
+                decimal swingLow = PriceActionHelper.FindSwingLow(candlesEntry, iB, SwingLookback);
                 if (swingLow > 0)
                 {
                     decimal slBySwing = swingLow * (1m - SwingStopExtraBufferPercent);
@@ -843,46 +819,44 @@ namespace FuturesBot.Services
             bool allowMode1 = (coinInfo.IsMajor && EnableMarketOnStrongRejectForMajor) ||
                               (!coinInfo.IsMajor && EnableMarketOnStrongRejectForAlt);
 
-            bool strongReject = allowMode1 && rejectB && IsStrongRejectionLong_OnEntryTf(candlesEntry3m, iB);
+            bool strongReject = allowMode1 && rejectB && IsStrongRejectionLong_OnEntryTf(candlesEntry, iB);
 
-            // =================== HUMAN-LIKE FILTER (use TREND TF 15M) ===================
             decimal proposedEntry = strongReject
                 ? B.Close * (1m + MarketableLimitOffset)
                 : anchor * (1m + EntryOffsetPercent);
 
             if (EnableHumanLikeFilter)
             {
-                int iT = candlesTrend15m.Count - 2;
+                int iT = candlesTrend.Count - 2;
                 if (iT > 5)
                 {
-                    // block near recent HIGH on 15m
                     decimal minDistHigh = coinInfo.IsMajor ? MinDistFromRecentHighMajor : MinDistFromRecentHighAlt;
-                    if (IsTooCloseToRecentHigh(candlesTrend15m, iT, proposedEntry, RecentExtremumLookback, minDistHigh))
+                    if (IsTooCloseToRecentHigh(candlesTrend, iT, proposedEntry, RecentExtremumLookback, minDistHigh))
                     {
                         return new TradeSignal
                         {
                             Type = SignalType.None,
-                            Reason = $"{coinInfo.Symbol}: HUMAN/V4 – Block LONG vì entry quá gần recent HIGH (15M).",
+                            Reason = $"{coinInfo.Symbol}: HUMAN/V4 – Block LONG vì entry quá gần recent HIGH (TrendTF).",
                             Symbol = coinInfo.Symbol
                         };
                     }
 
-                    if (Human_BlockLongNearExtremum(candlesTrend15m, rsiT, iT, proposedEntry, coinInfo.IsMajor))
+                    if (Human_BlockLongNearExtremum(candlesTrend, rsiT, iT, proposedEntry, coinInfo.IsMajor))
                     {
                         return new TradeSignal
                         {
                             Type = SignalType.None,
-                            Reason = $"{coinInfo.Symbol}: HUMAN FILTER – Block LONG (15M near HIGH / multi-touch / bearish divergence).",
+                            Reason = $"{coinInfo.Symbol}: HUMAN FILTER – Block LONG (TrendTF near HIGH / multi-touch / bearish divergence).",
                             Symbol = coinInfo.Symbol
                         };
                     }
 
-                    if (Human_ShouldWaitLongInDangerZone(candlesTrend15m, iT, proposedEntry))
+                    if (Human_ShouldWaitLongInDangerZone(candlesTrend, iT, proposedEntry))
                     {
                         return new TradeSignal
                         {
                             Type = SignalType.None,
-                            Reason = $"{coinInfo.Symbol}: HUMAN FILTER – WAIT (LONG near top of recent range on 15M).",
+                            Reason = $"{coinInfo.Symbol}: HUMAN FILTER – WAIT (LONG near top of recent range on TrendTF).",
                             Symbol = coinInfo.Symbol
                         };
                     }
@@ -891,7 +865,6 @@ namespace FuturesBot.Services
 
             decimal entry = proposedEntry;
 
-            // max distance to anchor
             decimal maxDist = coinInfo.IsMajor ? MaxEntryDistanceToAnchorMajor : MaxEntryDistanceToAnchorAlt;
             if (anchor > 0)
             {
@@ -921,7 +894,9 @@ namespace FuturesBot.Services
             if (AllowMomentumInsteadOfReject && momentumHard && !rejectB)
                 rr *= 0.92m;
 
-            rr = coinInfo.IsMajor ? Clamp(rr, TrendRR_MinMajor, TrendRR_MaxMajor) : Clamp(rr, TrendRR_MinAlt, TrendRR_MaxAlt);
+            rr = coinInfo.IsMajor
+                ? Clamp(rr, TrendRR_MinMajor, TrendRR_MaxMajor)
+                : Clamp(rr, TrendRR_MinAlt, TrendRR_MaxAlt);
 
             decimal risk = entry - sl;
             decimal tp = entry + risk * rr;
@@ -935,15 +910,15 @@ namespace FuturesBot.Services
                 EntryPrice = entry,
                 StopLoss = sl,
                 TakeProfit = tp,
-                Reason = $"{coinInfo.Symbol}: LONG (15M trend + 3M entry) – 2-step retest(A)+confirm(B) @EMA({anchor:F6}) + {(strongReject ? "StrongReject" : (momentumHard ? "MomHard" : "Reject"))}. Entry={modeTag}, RR={rr:F2}.",
+                Reason = $"{coinInfo.Symbol}: LONG (TrendTF + EntryTF) – 2-step retest(A)+confirm(B) @EMA({anchor:F6}) + {(strongReject ? "StrongReject" : (momentumHard ? "MomHard" : "Reject"))}. Entry={modeTag}, RR={rr:F2}.",
                 Symbol = coinInfo.Symbol,
                 Mode = mode
             };
         }
 
-        private TradeSignal BuildShortV4Winrate_Entry3mWithTrend15m(
-            IReadOnlyList<Candle> candlesEntry3m,
-            IReadOnlyList<Candle> candlesTrend15m,
+        private TradeSignal BuildShortV4Winrate_EntryWithTrend(
+            IReadOnlyList<Candle> candlesEntry,
+            IReadOnlyList<Candle> candlesTrend,
             IReadOnlyList<decimal> ema34_E,
             IReadOnlyList<decimal> ema89_E,
             IReadOnlyList<decimal> rsiE,
@@ -954,19 +929,19 @@ namespace FuturesBot.Services
             decimal riskRewardTrend,
             bool volumeOkSoft)
         {
-            int iB = candlesEntry3m.Count - 2;
+            int iB = candlesEntry.Count - 2;
             int iA = iB - 1;
             if (iA <= 2) return new TradeSignal();
 
-            var A = candlesEntry3m[iA];
-            var B = candlesEntry3m[iB];
+            var A = candlesEntry[iA];
+            var B = candlesEntry[iB];
 
             if (rsiE[iB] < TrendRetestRsiMinForShort)
             {
                 return new TradeSignal
                 {
                     Type = SignalType.None,
-                    Reason = $"{coinInfo.Symbol}: NO SHORT – RSI(3M) quá thấp ({rsiE[iB]:F1}) cho trend retest.",
+                    Reason = $"{coinInfo.Symbol}: NO SHORT – RSI(EntryTF) quá thấp ({rsiE[iB]:F1}) cho trend retest.",
                     Symbol = coinInfo.Symbol
                 };
             }
@@ -974,7 +949,6 @@ namespace FuturesBot.Services
             decimal ema34 = ema34_E[iB];
             decimal ema89 = ema89_E[iB];
 
-            // Anchor resistances ONLY EMA34/EMA89 (NO EMA200 on 3M)
             var resistances = new List<decimal>();
             if (ema34 > 0 && ema34 > B.Close) resistances.Add(ema34);
             if (ema89 > 0 && ema89 > B.Close) resistances.Add(ema89);
@@ -984,7 +958,7 @@ namespace FuturesBot.Services
                 return new TradeSignal
                 {
                     Type = SignalType.None,
-                    Reason = $"{coinInfo.Symbol}: Downtrend nhưng không có EMA34/89 resistance trên giá (3M).",
+                    Reason = $"{coinInfo.Symbol}: Downtrend nhưng không có EMA34/89 resistance trên giá (EntryTF).",
                     Symbol = coinInfo.Symbol
                 };
             }
@@ -997,12 +971,12 @@ namespace FuturesBot.Services
                 A.High >= anchor * (1 - EmaRetestBand) &&
                 A.High <= anchor * (1 + EmaRetestBand);
 
-            if (EnableAntiSqueezeShort && touchA && IsBullishImpulseAtRetest(candlesEntry3m, iA, anchor))
+            if (EnableAntiSqueezeShort && touchA && IsBullishImpulseAtRetest(candlesEntry, iA, anchor))
             {
                 return new TradeSignal
                 {
                     Type = SignalType.None,
-                    Reason = $"{coinInfo.Symbol}: NO SHORT – AntiSqueeze at retest(A) near EMA({anchor:F6}) on 3M.",
+                    Reason = $"{coinInfo.Symbol}: NO SHORT – AntiSqueeze at retest(A) near EMA({anchor:F6}) on EntryTF.",
                     Symbol = coinInfo.Symbol
                 };
             }
@@ -1032,7 +1006,7 @@ namespace FuturesBot.Services
                 return new TradeSignal
                 {
                     Type = SignalType.None,
-                    Reason = $"{coinInfo.Symbol}: Short(3M) chưa đạt (touchA={touchA}, bearishB={bearishB}, closeBackBelow={closeBackBelow}, break={breakSmall}, rejectB={rejectB}, momHard={momentumHard}, volOk={volumeOkSoft}).",
+                    Reason = $"{coinInfo.Symbol}: Short(EntryTF) chưa đạt (touchA={touchA}, bearishB={bearishB}, closeBackBelow={closeBackBelow}, break={breakSmall}, rejectB={rejectB}, momHard={momentumHard}, volOk={volumeOkSoft}).",
                     Symbol = coinInfo.Symbol
                 };
             }
@@ -1042,7 +1016,7 @@ namespace FuturesBot.Services
             decimal sl = slByEma;
             if (UseSwingForTrendStop)
             {
-                decimal swingHigh = PriceActionHelper.FindSwingHigh(candlesEntry3m, iB, SwingLookback);
+                decimal swingHigh = PriceActionHelper.FindSwingHigh(candlesEntry, iB, SwingLookback);
                 if (swingHigh > 0)
                 {
                     decimal slBySwing = swingHigh * (1m + SwingStopExtraBufferPercent);
@@ -1053,45 +1027,44 @@ namespace FuturesBot.Services
             bool allowMode1 = (coinInfo.IsMajor && EnableMarketOnStrongRejectForMajor) ||
                               (!coinInfo.IsMajor && EnableMarketOnStrongRejectForAlt);
 
-            bool strongReject = allowMode1 && rejectB && IsStrongRejectionShort_OnEntryTf(candlesEntry3m, iB);
+            bool strongReject = allowMode1 && rejectB && IsStrongRejectionShort_OnEntryTf(candlesEntry, iB);
 
-            // =================== HUMAN-LIKE FILTER (use TREND TF 15M) ===================
             decimal proposedEntry = strongReject
                 ? B.Close * (1m - MarketableLimitOffset)
                 : anchor * (1m - EntryOffsetPercent);
 
             if (EnableHumanLikeFilter)
             {
-                int iT = candlesTrend15m.Count - 2;
+                int iT = candlesTrend.Count - 2;
                 if (iT > 5)
                 {
                     decimal minDistLow = coinInfo.IsMajor ? MinDistFromRecentLowMajor : MinDistFromRecentLowAlt;
-                    if (IsTooCloseToRecentLow(candlesTrend15m, iT, proposedEntry, RecentExtremumLookback, minDistLow))
+                    if (IsTooCloseToRecentLow(candlesTrend, iT, proposedEntry, RecentExtremumLookback, minDistLow))
                     {
                         return new TradeSignal
                         {
                             Type = SignalType.None,
-                            Reason = $"{coinInfo.Symbol}: HUMAN/V4 – Block SHORT vì entry quá gần recent LOW (15M).",
+                            Reason = $"{coinInfo.Symbol}: HUMAN/V4 – Block SHORT vì entry quá gần recent LOW (TrendTF).",
                             Symbol = coinInfo.Symbol
                         };
                     }
 
-                    if (Human_BlockShortNearExtremum(candlesTrend15m, rsiT, iT, proposedEntry, coinInfo.IsMajor))
+                    if (Human_BlockShortNearExtremum(candlesTrend, rsiT, iT, proposedEntry, coinInfo.IsMajor))
                     {
                         return new TradeSignal
                         {
                             Type = SignalType.None,
-                            Reason = $"{coinInfo.Symbol}: HUMAN FILTER – Block SHORT (15M near LOW / multi-touch / bullish divergence).",
+                            Reason = $"{coinInfo.Symbol}: HUMAN FILTER – Block SHORT (TrendTF near LOW / multi-touch / bullish divergence).",
                             Symbol = coinInfo.Symbol
                         };
                     }
 
-                    if (Human_ShouldWaitShortInDangerZone(candlesTrend15m, iT, proposedEntry))
+                    if (Human_ShouldWaitShortInDangerZone(candlesTrend, iT, proposedEntry))
                     {
                         return new TradeSignal
                         {
                             Type = SignalType.None,
-                            Reason = $"{coinInfo.Symbol}: HUMAN FILTER – WAIT (SHORT near bottom of recent range on 15M).",
+                            Reason = $"{coinInfo.Symbol}: HUMAN FILTER – WAIT (SHORT near bottom of recent range on TrendTF).",
                             Symbol = coinInfo.Symbol
                         };
                     }
@@ -1129,7 +1102,9 @@ namespace FuturesBot.Services
             if (AllowMomentumInsteadOfReject && momentumHard && !rejectB)
                 rr *= 0.92m;
 
-            rr = coinInfo.IsMajor ? Clamp(rr, TrendRR_MinMajor, TrendRR_MaxMajor) : Clamp(rr, TrendRR_MinAlt, TrendRR_MaxAlt);
+            rr = coinInfo.IsMajor
+                ? Clamp(rr, TrendRR_MinMajor, TrendRR_MaxMajor)
+                : Clamp(rr, TrendRR_MinAlt, TrendRR_MaxAlt);
 
             decimal risk = sl - entry;
             decimal tp = entry - risk * rr;
@@ -1143,55 +1118,55 @@ namespace FuturesBot.Services
                 EntryPrice = entry,
                 StopLoss = sl,
                 TakeProfit = tp,
-                Reason = $"{coinInfo.Symbol}: SHORT (15M trend + 3M entry) – 2-step retest(A)+confirm(B) @EMA({anchor:F6}) + {(strongReject ? "StrongReject" : (momentumHard ? "MomHard" : "Reject"))}. Entry={modeTag}, RR={rr:F2}.",
+                Reason = $"{coinInfo.Symbol}: SHORT (TrendTF + EntryTF) – 2-step retest(A)+confirm(B) @EMA({anchor:F6}) + {(strongReject ? "StrongReject" : (momentumHard ? "MomHard" : "Reject"))}. Entry={modeTag}, RR={rr:F2}.",
                 Symbol = coinInfo.Symbol,
                 Mode = mode
             };
         }
 
-        // ========================= SIDEWAY SCALP (15M) =========================
+        // ========================= SIDEWAY SCALP (TREND TF) =========================
 
         private TradeSignal BuildSidewayScalp(
-            IReadOnlyList<Candle> candles15m,
-            IReadOnlyList<decimal> ema34_15,
-            IReadOnlyList<decimal> ema89_15,
-            IReadOnlyList<decimal> ema200_15,
-            IReadOnlyList<decimal> rsi15,
-            IReadOnlyList<decimal> macd15,
-            IReadOnlyList<decimal> sig15,
-            Candle last15,
+            IReadOnlyList<Candle> candlesTrend,
+            IReadOnlyList<decimal> ema34_T,
+            IReadOnlyList<decimal> ema89_T,
+            IReadOnlyList<decimal> ema200_T,
+            IReadOnlyList<decimal> rsiT,
+            IReadOnlyList<decimal> macdT,
+            IReadOnlyList<decimal> sigT,
+            Candle lastT,
             CoinInfo coinInfo,
-            bool h1BiasUp,
-            bool h1BiasDown,
+            bool trendBiasUp,
+            bool trendBiasDown,
             decimal riskRewardSideway)
         {
-            int i15 = candles15m.Count - 2;
-            if (i15 <= 0) return new TradeSignal();
+            int iT = candlesTrend.Count - 2;
+            if (iT <= 0) return new TradeSignal();
 
-            decimal ema34 = ema34_15[i15];
-            decimal ema89 = ema89_15[i15];
-            decimal ema200 = ema200_15[i15];
+            decimal ema34 = ema34_T[iT];
+            decimal ema89 = ema89_T[iT];
+            decimal ema200 = ema200_T[iT];
 
-            bool shortBias15 = ema34 <= ema89 && ema34 <= ema200;
-            bool longBias15 = ema34 >= ema89 && ema34 >= ema200;
+            bool shortBiasT = ema34 <= ema89 && ema34 <= ema200;
+            bool longBiasT = ema34 >= ema89 && ema34 >= ema200;
 
             bool shortBias;
             bool longBias;
 
-            if (h1BiasDown)
+            if (trendBiasDown)
             {
                 shortBias = true;
                 longBias = false;
             }
-            else if (h1BiasUp)
+            else if (trendBiasUp)
             {
                 longBias = true;
                 shortBias = false;
             }
             else
             {
-                shortBias = shortBias15;
-                longBias = longBias15;
+                shortBias = shortBiasT;
+                longBias = longBiasT;
             }
 
             if (!shortBias && !longBias)
@@ -1207,8 +1182,8 @@ namespace FuturesBot.Services
             if (shortBias)
             {
                 var resistances = new List<decimal>();
-                if (ema89 > last15.Close) resistances.Add(ema89);
-                if (ema200 > last15.Close) resistances.Add(ema200);
+                if (ema89 > lastT.Close) resistances.Add(ema89);
+                if (ema200 > lastT.Close) resistances.Add(ema200);
 
                 if (resistances.Count == 0)
                     return new TradeSignal();
@@ -1216,31 +1191,30 @@ namespace FuturesBot.Services
                 decimal nearestRes = resistances.Min();
 
                 bool touchRes =
-                    last15.High >= nearestRes * (1 - EmaRetestBand) &&
-                    last15.High <= nearestRes * (1 + EmaRetestBand);
+                    lastT.High >= nearestRes * (1 - EmaRetestBand) &&
+                    lastT.High <= nearestRes * (1 + EmaRetestBand);
 
-                bool bearBody = last15.Close <= last15.Open;
-                bool reject = last15.High > nearestRes && last15.Close < nearestRes && bearBody;
+                bool bearBody = lastT.Close <= lastT.Open;
+                bool reject = lastT.High > nearestRes && lastT.Close < nearestRes && bearBody;
 
-                bool rsiHigh = rsi15[i15] >= 55m;
-                bool rsiTurnDown = rsi15[i15] <= rsi15[i15 - 1];
-                bool macdDownOrFlatScalp = macd15[i15] <= macd15[i15 - 1];
+                bool rsiHigh = rsiT[iT] >= 55m;
+                bool rsiTurnDown = rsiT[iT] <= rsiT[iT - 1];
+                bool macdDownOrFlat = macdT[iT] <= macdT[iT - 1];
 
-                bool momentum = rsiHigh && (rsiTurnDown || macdDownOrFlatScalp);
+                bool momentum = rsiHigh && (rsiTurnDown || macdDownOrFlat);
 
                 if (!(touchRes && reject && momentum))
                     return new TradeSignal();
 
-                decimal rawEntry = last15.Close * (1 + EntryOffsetPercentForScal);
+                decimal rawEntry = lastT.Close * (1 + EntryOffsetPercentForScal);
 
-                decimal swingHigh = PriceActionHelper.FindSwingHigh(candles15m, i15, SwingLookback);
+                decimal swingHigh = PriceActionHelper.FindSwingHigh(candlesTrend, iT, SwingLookback);
 
                 decimal entry = rawEntry;
                 if (swingHigh > 0 && entry >= swingHigh)
-                    entry = (last15.Close + swingHigh) / 2;
+                    entry = (lastT.Close + swingHigh) / 2;
 
-                decimal sl = (swingHigh > 0 ? swingHigh : last15.High) + entry * StopBufferPercent;
-
+                decimal sl = (swingHigh > 0 ? swingHigh : lastT.High) + entry * StopBufferPercent;
                 if (sl <= entry)
                     return new TradeSignal();
 
@@ -1259,10 +1233,11 @@ namespace FuturesBot.Services
                 };
             }
 
+            // long sideway
             {
                 var supports = new List<decimal>();
-                if (ema89 < last15.Close) supports.Add(ema89);
-                if (ema200 < last15.Close) supports.Add(ema200);
+                if (ema89 < lastT.Close) supports.Add(ema89);
+                if (ema200 < lastT.Close) supports.Add(ema200);
 
                 if (supports.Count == 0)
                     return new TradeSignal();
@@ -1270,30 +1245,30 @@ namespace FuturesBot.Services
                 decimal nearestSup = supports.Max();
 
                 bool touchSup =
-                    last15.Low <= nearestSup * (1 + EmaRetestBand) &&
-                    last15.Low >= nearestSup * (1 - EmaRetestBand);
+                    lastT.Low <= nearestSup * (1 + EmaRetestBand) &&
+                    lastT.Low >= nearestSup * (1 - EmaRetestBand);
 
-                bool bullBody = last15.Close >= last15.Open;
-                bool reject = last15.Low < nearestSup && last15.Close > nearestSup && bullBody;
+                bool bullBody = lastT.Close >= lastT.Open;
+                bool reject = lastT.Low < nearestSup && lastT.Close > nearestSup && bullBody;
 
-                bool rsiHighEnough = rsi15[i15] >= 45m;
-                bool rsiTurnUp = rsi15[i15] >= rsi15[i15 - 1];
-                bool macdUpOrFlatScalp = macd15[i15] >= macd15[i15 - 1];
+                bool rsiOk = rsiT[iT] >= 45m;
+                bool rsiTurnUp = rsiT[iT] >= rsiT[iT - 1];
+                bool macdUpOrFlat = macdT[iT] >= macdT[iT - 1];
 
-                bool momentum = rsiHighEnough && (rsiTurnUp || macdUpOrFlatScalp);
+                bool momentum = rsiOk && (rsiTurnUp || macdUpOrFlat);
 
                 if (!(touchSup && reject && momentum))
                     return new TradeSignal();
 
-                decimal rawEntry = last15.Close * (1 - EntryOffsetPercentForScal);
+                decimal rawEntry = lastT.Close * (1 - EntryOffsetPercentForScal);
 
-                decimal swingLow = PriceActionHelper.FindSwingLow(candles15m, i15, SwingLookback);
+                decimal swingLow = PriceActionHelper.FindSwingLow(candlesTrend, iT, SwingLookback);
 
                 decimal entry = rawEntry;
                 if (swingLow > 0 && entry <= swingLow)
-                    entry = (last15.Close + swingLow) / 2;
+                    entry = (lastT.Close + swingLow) / 2;
 
-                decimal sl = (swingLow > 0 ? swingLow : last15.Low) - entry * StopBufferPercent;
+                decimal sl = (swingLow > 0 ? swingLow : lastT.Low) - entry * StopBufferPercent;
 
                 if (sl >= entry || sl <= 0)
                     return new TradeSignal();
@@ -1335,7 +1310,6 @@ namespace FuturesBot.Services
             decimal closePosFromHigh = (c.High - c.Close) / range;
             bool closeOk = closePosFromHigh <= StrongRejectCloseInRange;
 
-            // volume filter on entry tf -> soften: just wick+close is enough (avoid over-filter on 3m)
             return wickOk && closeOk;
         }
 
@@ -1363,12 +1337,12 @@ namespace FuturesBot.Services
         //                     PATCH HELPERS: ANTI-IMPULSE AT RETEST (ENTRY TF)
         // =====================================================================
 
-        private bool IsBullishImpulseAtRetest(IReadOnlyList<Candle> candles15m, int idxClosed, decimal anchorResistance)
+        private bool IsBullishImpulseAtRetest(IReadOnlyList<Candle> candles, int idxClosed, decimal anchorResistance)
         {
-            if (idxClosed <= 0 || idxClosed >= candles15m.Count) return false;
-
-            var c = candles15m[idxClosed];
+            if (idxClosed <= 0 || idxClosed >= candles.Count) return false;
             if (anchorResistance <= 0) return false;
+
+            var c = candles[idxClosed];
 
             decimal dist = Math.Abs(c.Close - anchorResistance) / anchorResistance;
             if (dist > AntiImpulseMaxDistToAnchor) return false;
@@ -1376,8 +1350,7 @@ namespace FuturesBot.Services
             decimal range = c.High - c.Low;
             if (range <= 0) return false;
 
-            bool bullish = c.Close > c.Open;
-            if (!bullish) return false;
+            if (c.Close <= c.Open) return false;
 
             decimal body = Math.Abs(c.Close - c.Open);
             decimal bodyToRange = body / range;
@@ -1386,16 +1359,15 @@ namespace FuturesBot.Services
             decimal closePosFromHigh = (c.High - c.Close) / range;
             if (closePosFromHigh > AntiImpulseCloseNearEdgeMax) return false;
 
-            // skip vol median check here (entry TF is noisy)
             return true;
         }
 
-        private bool IsBearishImpulseAtRetest(IReadOnlyList<Candle> candles15m, int idxClosed, decimal anchorSupport)
+        private bool IsBearishImpulseAtRetest(IReadOnlyList<Candle> candles, int idxClosed, decimal anchorSupport)
         {
-            if (idxClosed <= 0 || idxClosed >= candles15m.Count) return false;
-
-            var c = candles15m[idxClosed];
+            if (idxClosed <= 0 || idxClosed >= candles.Count) return false;
             if (anchorSupport <= 0) return false;
+
+            var c = candles[idxClosed];
 
             decimal dist = Math.Abs(c.Close - anchorSupport) / anchorSupport;
             if (dist > AntiImpulseMaxDistToAnchor) return false;
@@ -1403,8 +1375,7 @@ namespace FuturesBot.Services
             decimal range = c.High - c.Low;
             if (range <= 0) return false;
 
-            bool bearish = c.Close < c.Open;
-            if (!bearish) return false;
+            if (c.Close >= c.Open) return false;
 
             decimal body = Math.Abs(c.Close - c.Open);
             decimal bodyToRange = body / range;
@@ -1422,14 +1393,12 @@ namespace FuturesBot.Services
 
         private bool IsClimaxCandle(IReadOnlyList<Candle> candles, int index)
         {
-            if (index <= 0 || index >= candles.Count)
-                return false;
+            if (index <= 0 || index >= candles.Count) return false;
 
             int start = Math.Max(0, index - ClimaxLookback);
             int end = index;
             int count = end - start;
-            if (count <= 3)
-                return false;
+            if (count <= 3) return false;
 
             decimal sumBody = 0m;
             decimal sumVolume = 0m;
@@ -1456,24 +1425,17 @@ namespace FuturesBot.Services
 
         private decimal GetNearestEma(decimal price, decimal ema34, decimal ema89, decimal ema200)
         {
-            var list = new List<decimal>();
-            if (ema34 > 0) list.Add(ema34);
-            if (ema89 > 0) list.Add(ema89);
-            if (ema200 > 0) list.Add(ema200);
+            decimal nearest = 0m;
+            decimal minDist = decimal.MaxValue;
 
-            if (list.Count == 0)
-                return 0m;
-
-            decimal nearest = list[0];
-            decimal minDist = Math.Abs(price - nearest);
-
-            for (int i = 1; i < list.Count; i++)
+            foreach (var ema in new[] { ema34, ema89, ema200 })
             {
-                decimal d = Math.Abs(price - list[i]);
+                if (ema <= 0) continue;
+                decimal d = Math.Abs(price - ema);
                 if (d < minDist)
                 {
                     minDist = d;
-                    nearest = list[i];
+                    nearest = ema;
                 }
             }
 
@@ -1487,16 +1449,12 @@ namespace FuturesBot.Services
             decimal ema89,
             decimal ema200)
         {
-            if (index <= 0 || index >= candles.Count)
-                return false;
-
-            if (!IsClimaxCandle(candles, index))
-                return false;
+            if (index <= 0 || index >= candles.Count) return false;
+            if (!IsClimaxCandle(candles, index)) return false;
 
             var c = candles[index];
             decimal nearestEma = GetNearestEma(c.Close, ema34, ema89, ema200);
-            if (nearestEma <= 0)
-                return false;
+            if (nearestEma <= 0) return false;
 
             var distance = Math.Abs(c.Close - nearestEma) / nearestEma;
             return distance >= OverextendedFromEmaPercent;
@@ -1536,14 +1494,14 @@ namespace FuturesBot.Services
             return hits >= SidewayConfirmBars;
         }
 
-        private decimal GetMedianVolUsd(IReadOnlyList<Candle> candles15m, int endIdx, int lookback)
+        private decimal GetMedianVolUsd(IReadOnlyList<Candle> candlesTrend, int endIdx, int lookback)
         {
             int start = Math.Max(0, endIdx - lookback + 1);
             var list = new List<decimal>();
 
             for (int i = start; i <= endIdx; i++)
             {
-                var c = candles15m[i];
+                var c = candlesTrend[i];
                 if (c.Close > 0 && c.Volume > 0)
                     list.Add(c.Close * c.Volume);
             }
@@ -1617,10 +1575,10 @@ namespace FuturesBot.Services
         }
 
         private (bool lowerHigh, bool higherLow, decimal lastSwingHigh, decimal prevSwingHigh, decimal lastSwingLow, decimal prevSwingLow)
-            DetectMarketStructure(IReadOnlyList<Candle> candles15m, int i15, decimal tol)
+            DetectMarketStructure(IReadOnlyList<Candle> candlesTrend, int iT, decimal tol)
         {
-            var highs = GetRecentSwingHighs(candles15m, i15, StructureMaxLookbackBars, StructureSwingStrength);
-            var lows = GetRecentSwingLows(candles15m, i15, StructureMaxLookbackBars, StructureSwingStrength);
+            var highs = GetRecentSwingHighs(candlesTrend, iT, StructureMaxLookbackBars, StructureSwingStrength);
+            var lows = GetRecentSwingLows(candlesTrend, iT, StructureMaxLookbackBars, StructureSwingStrength);
 
             decimal lastH = 0m, prevH = 0m, lastL = 0m, prevL = 0m;
             bool lh = false, hl = false;
@@ -1668,7 +1626,7 @@ namespace FuturesBot.Services
         }
 
         // =====================================================================
-        //                      (NEW) ANTI-LATE ENTRY HELPERS (TREND TF)
+        //                      ANTI-LATE ENTRY HELPERS (TREND TF)
         // =====================================================================
 
         private bool IsTooCloseToRecentLow(IReadOnlyList<Candle> candles, int idxClosed, decimal entry, int lookback, decimal minDistRatio)
@@ -1707,23 +1665,19 @@ namespace FuturesBot.Services
         //                      DYNAMIC RR HELPERS
         // =====================================================================
 
-        private decimal GetDynamicTrendRR(bool isMajor, decimal sep15, decimal sepH1, bool slopeOk, decimal ratioVsMedian, bool volumeOkSoft)
+        private decimal GetDynamicTrendRR(bool isMajor, decimal sepTrend, bool slopeOk, decimal ratioVsMedian, bool volumeOkSoft)
         {
-            // sepH1 is unused now; keep signature for minimal disruption
             decimal minSep = isMajor ? MinEmaSeparationMajor : MinEmaSeparationAlt;
 
-            decimal sepScore = Normalize01(sep15, minSep, minSep * 2.2m);
-            decimal h1Score = Normalize01(sepH1, minSep * 0.75m, minSep * 1.8m);
-
+            decimal sepScore = Normalize01(sepTrend, minSep, minSep * 2.2m);
             decimal slopeScore = slopeOk ? 1m : 0m;
             decimal volScore = Normalize01(ratioVsMedian, 0.70m, 1.20m);
             decimal softScore = volumeOkSoft ? 1m : 0.7m;
 
             decimal score =
-                (sepScore * 0.45m) +
-                (h1Score * 0.20m) +
-                (slopeScore * 0.20m) +
-                (volScore * 0.15m);
+                (sepScore * 0.55m) +
+                (slopeScore * 0.25m) +
+                (volScore * 0.20m);
 
             score *= softScore;
             score = Clamp(score, 0m, 1m);
