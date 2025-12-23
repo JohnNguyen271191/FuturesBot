@@ -52,7 +52,7 @@ var nowVN = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, vnTimeZone);
 
 pnl.SetDailyBaseCapital();
 
-await notifier.SendAsync($"=== FuturesBot {config.Intervals[0].FrameTime.ToUpper()} - {nowVN:dd/MM/yyyy HH:mm:ss} started ===");
+await notifier.SendAsync($"=== FuturesBot {config.CoinInfos.FirstOrDefault()?.MainTimeFrame.ToUpper()} - {nowVN:dd/MM/yyyy HH:mm:ss} started ===");
 
 // ============================================================================
 // GLOBAL COOLDOWN WATCHER
@@ -168,7 +168,7 @@ static async Task RunSymbolWorkerAsync(
     var exchange = scope.ServiceProvider.GetRequiredService<IExchangeClientService>();
     var orderManager = scope.ServiceProvider.GetRequiredService<OrderManagerService>();
 
-    var mainTf = config.Intervals[0].FrameTime;
+    var mainTf = coinInfo.MainTimeFrame;
     var mainSpan = ParseFrameTime(mainTf);
 
     DateTime lastProcessedCandleOpenTimeUtc = DateTime.MinValue;
@@ -221,10 +221,10 @@ static async Task RunSymbolWorkerAsync(
 
             // 3) fetch candles (chỉ khi tới nhịp nến)
             var candles15m = await exchange.GetRecentCandlesAsync(
-                coinInfo.Symbol, config.Intervals[0].FrameTime, 220);
+                coinInfo.Symbol, coinInfo.MainTimeFrame, 220);
 
             var candles1h = await exchange.GetRecentCandlesAsync(
-                coinInfo.Symbol, config.Intervals[1].FrameTime, 220);
+                coinInfo.Symbol, coinInfo.TrendTimeFrame, 220);
 
             if (candles15m == null || candles15m.Count < 3 || candles1h == null || candles1h.Count < 3)
                 continue;

@@ -1,16 +1,5 @@
-// OrderManagerService.cs (PATCHED - ANTI KILL GOOD SETUPS + TIME-STOP smarter + MICRO PROFIT PROTECT by %RISK)
-// PATCH IMPROVE (Dec 2025):
-// - FIX: DangerConfirmBarsMajor/Alt đúng 2/1 nến đã đóng + count từ candle danger đầu tiên
-// - FIX: NO-KILL ZONE không bị MICRO TAKE (0.50R) giết kèo -> trong no-kill: chuyển sang LOCK SL, không close
-// - IMPROVE: micro risk USD clamp giữa riskUsd thật và plannedRiskUsd (tránh lệch sizing)
-// - IMPROVE: UpdateStopLossAsync chắc hơn: delay dài hơn + verify SL trên sàn + retry 1 lần
-
-using System;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.Linq;
 using System.Reflection;
-using System.Threading.Tasks;
 using FuturesBot.Config;
 using FuturesBot.IServices;
 using FuturesBot.Models;
@@ -32,16 +21,8 @@ namespace FuturesBot.Services
         private const int SlTpCheckEverySec = 30;
         private const int CandleFetchEverySec = 20;
 
-        private static readonly TimeSpan DefaultLimitTimeout = TimeSpan.FromMinutes(30);
-
         // Grace sau fill (sàn chưa sync kịp algoOrders)
         private const int SlTpGraceAfterFillSec = 8;
-
-        // =============== DEFAULT (fallback) ========================
-        private const decimal DefaultSafetyTpRR = 2.0m;
-
-        // =============== EMA default ===============================
-        private const decimal DefaultEmaBreakTolerance = 0.001m; // 0.1%
 
         // =============== Reversal detection (default) ==============
         private const decimal ImpulseBodyToRangeMin = 0.65m;    // nến mạnh
@@ -66,7 +47,6 @@ namespace FuturesBot.Services
 
         // =============== Fee model (NEW) ===========================
         private const decimal DefaultTakerFeeRate = 0.0004m;
-        private const decimal DefaultMakerFeeRate = 0.0002m;
 
         private const decimal FeeEwmaAlpha = 0.20m;
         private static readonly TimeSpan RealFeeLookback = TimeSpan.FromMinutes(30);
@@ -99,13 +79,6 @@ namespace FuturesBot.Services
 
         // Pending danger timeout (nếu candle fetch fail / treo state lâu)
         private static readonly TimeSpan DangerPendingMaxAge = TimeSpan.FromMinutes(10);
-
-        private sealed class FeeStats
-        {
-            public decimal EwmaRate { get; set; } = DefaultTakerFeeRate;
-            public int Samples { get; set; } = 0;
-            public DateTime LastUpdateUtc { get; set; } = DateTime.MinValue;
-        }
 
         private readonly ConcurrentDictionary<string, FeeStats> _feeStatsBySymbol = new(StringComparer.OrdinalIgnoreCase);
 
@@ -144,119 +117,10 @@ namespace FuturesBot.Services
         }
 
         // ============================================================
-        // MODE PROFILE
-        // ============================================================
-
-        private sealed class ModeProfile
-        {
-            public TradeMode Mode { get; init; }
-
-            public decimal ProtectAtRR { get; init; }
-            public decimal BreakEvenBufferR { get; init; }
-            public decimal QuickTakeMinRR { get; init; }
-            public decimal QuickTakeGoodRR { get; init; }
-            public decimal DangerCutIfRRBelow { get; init; }
-            public int TimeStopBars { get; init; }
-            public decimal TimeStopMinRR { get; init; }
-
-            public decimal MinProtectProfitUsd { get; init; }
-            public decimal MinQuickTakeProfitUsd { get; init; }
-            public decimal MinDangerCutAbsLossUsd { get; init; }
-
-            public int EarlyExitBars { get; init; }
-            public decimal EarlyExitMinRR { get; init; }
-            public decimal EarlyExitMinProfitUsd { get; init; }
-
-            public decimal SafetyTpRR { get; init; }
-            public decimal EmaBreakTolerance { get; init; }
-            public TimeSpan LimitTimeout { get; init; }
-
-            public string Tag => Mode.ToString();
-
-            public static ModeProfile For(TradeMode mode)
-            {
-                return mode switch
-                {
-                    TradeMode.Scalp => new ModeProfile
-                    {
-                        Mode = mode,
-                        ProtectAtRR = 0.22m,
-                        BreakEvenBufferR = 0.06m,
-                        QuickTakeMinRR = 0.35m,
-                        QuickTakeGoodRR = 0.60m,
-                        DangerCutIfRRBelow = -0.25m,
-                        TimeStopBars = 15,
-                        TimeStopMinRR = 0.3m,
-                        SafetyTpRR = 1.30m,
-                        EmaBreakTolerance = 0.0012m,
-                        LimitTimeout = TimeSpan.FromMinutes(20),
-
-                        MinProtectProfitUsd = 0.10m,
-                        MinQuickTakeProfitUsd = 0.15m,
-                        MinDangerCutAbsLossUsd = 0.12m,
-
-                        EarlyExitBars = 8,
-                        EarlyExitMinRR = 0.1m,
-                        EarlyExitMinProfitUsd = 0.12m,
-                    },
-
-                    TradeMode.Mode2_Continuation => new ModeProfile
-                    {
-                        Mode = mode,
-                        ProtectAtRR = 0.25m,
-                        BreakEvenBufferR = 0.05m,
-                        QuickTakeMinRR = 0.40m,
-                        QuickTakeGoodRR = 0.70m,
-                        DangerCutIfRRBelow = -0.30m,
-                        TimeStopBars = 15,
-                        TimeStopMinRR = 0.3m,
-                        SafetyTpRR = 1.60m,
-                        EmaBreakTolerance = 0.0010m,
-                        LimitTimeout = TimeSpan.FromMinutes(15),
-
-                        MinProtectProfitUsd = 0.15m,
-                        MinQuickTakeProfitUsd = 0.25m,
-                        MinDangerCutAbsLossUsd = 0.18m,
-
-                        EarlyExitBars = 8,
-                        EarlyExitMinRR = 0.13m,
-                        EarlyExitMinProfitUsd = 0.18m,
-                    },
-
-                    _ => new ModeProfile
-                    {
-                        Mode = TradeMode.Trend,
-                        ProtectAtRR = 0.30m,
-                        BreakEvenBufferR = 0.05m,
-                        QuickTakeMinRR = 0.45m,
-                        QuickTakeGoodRR = 0.75m,
-                        DangerCutIfRRBelow = -0.35m,
-                        TimeStopBars = 25,
-                        TimeStopMinRR = 0.4m,
-                        SafetyTpRR = DefaultSafetyTpRR,
-                        EmaBreakTolerance = DefaultEmaBreakTolerance,
-                        LimitTimeout = DefaultLimitTimeout,
-
-                        MinProtectProfitUsd = 0.25m,
-                        MinQuickTakeProfitUsd = 0.40m,
-                        MinDangerCutAbsLossUsd = 0.30m,
-
-                        EarlyExitBars = 15,
-                        EarlyExitMinRR = 0.2m,
-                        EarlyExitMinProfitUsd = 0.25m,
-                    }
-                };
-            }
-        }
-
-        // ============================================================
         // CONSTRUCTOR
         // ============================================================
 
-        public OrderManagerService(
-            IExchangeClientService exchange,
-            SlackNotifierService notify,
-            BotConfig config)
+        public OrderManagerService(IExchangeClientService exchange, SlackNotifierService notify, BotConfig config)
         {
             _exchange = exchange;
             _notify = notify;
@@ -318,7 +182,13 @@ namespace FuturesBot.Services
                         return;
                     }
 
-                    var candles = await _exchange.GetRecentCandlesAsync(symbol, _botConfig.Intervals[0].FrameTime, 80);
+                    var coinInfo = _botConfig.CoinInfos.FirstOrDefault(i => i.Symbol.Equals(symbol));
+                    if (coinInfo == null)
+                    {
+                        await _notify.SendAsync($"[{symbol}] không tìm thấy trong setting.");
+                        return;
+                    }
+                    var candles = await _exchange.GetRecentCandlesAsync(symbol, coinInfo.MainTimeFrame, 80);
                     if (candles == null || candles.Count < 3) continue;
 
                     var lastClosed = candles[^2];
@@ -400,7 +270,14 @@ namespace FuturesBot.Services
             decimal lastKnownMarkPrice = 0m;
             decimal lastKnownEntry = 0m;
 
-            int tfMinutes = ParseIntervalMinutesSafe(_botConfig?.Intervals?.FirstOrDefault()?.FrameTime);
+            var coinInfo = _botConfig.CoinInfos.FirstOrDefault(i => i.Symbol.Equals(symbol));
+            if (coinInfo == null)
+            {
+                await _notify.SendAsync($"[{symbol}] không tìm thấy trong setting.");
+                return;
+            }
+
+            int tfMinutes = ParseIntervalMinutesSafe(coinInfo.MainTimeFrame);
 
             await _notify.SendAsync($"[{symbol}] Monitor POSITION started... mode={profile.Tag} | FLEX EXIT + TIME-STOP {profile.TimeStopBars}x{tfMinutes}m");
 
@@ -479,7 +356,7 @@ namespace FuturesBot.Services
                     // =================== Fetch candles (throttle) ===================
                     if ((DateTime.UtcNow - lastCandleFetchUtc) >= TimeSpan.FromSeconds(CandleFetchEverySec))
                     {
-                        cachedCandles = await _exchange.GetRecentCandlesAsync(symbol, _botConfig.Intervals[0].FrameTime, 120);
+                        cachedCandles = await _exchange.GetRecentCandlesAsync(symbol, coinInfo.MainTimeFrame, 120);
                         lastCandleFetchUtc = DateTime.UtcNow;
                     }
 

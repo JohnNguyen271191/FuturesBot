@@ -1,6 +1,3 @@
-using System;
-using System.Collections.Generic;
-using System.Linq;
 using FuturesBot.Config;
 using FuturesBot.IServices;
 using FuturesBot.Models;
@@ -11,12 +8,10 @@ namespace FuturesBot.Services
 {
     /// <summary>
     /// TradingStrategy V4 WINRATE PATCH + MTF (TF-agnostic)
-    ///
     /// MAPPING (TF-agnostic, không fix cứng 15m/3m nữa):
     /// GenerateSignal(candlesTrend, candlesEntry, coinInfo)
     /// - candlesTrend: Trend TF (ví dụ 15m / 30m / 1h...)
     /// - candlesEntry: Entry TF (ví dụ 3m / 5m / 15m...)
-    ///
     /// NOTE: dùng NẾN ĐÃ ĐÓNG (Count - 2)
     /// </summary>
     public class TradingStrategy : IStrategyService
