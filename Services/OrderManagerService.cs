@@ -143,8 +143,8 @@ namespace FuturesBot.Services
         private const decimal NoAtrProtectScalpPlannedRR = 1.10m;    // scalp plannedRR >= 1.10 -> chỉ BE(+fee), cấm lock ATR sớm
 
         // ===== NEW: ANTI FAKE DUMP -> PUMP (Danger confirm) =====
-        private const int DangerConfirmBarsMajor = 2;            // MAJOR (BTC/ETH...) confirm 2 nến
-        private const int DangerConfirmBarsAlt = 1;              // ALT confirm 1 nến
+        private const int DangerConfirmBarsMajor = 4;            // MAJOR (BTC/ETH...) confirm 2 nến
+        private const int DangerConfirmBarsAlt = 2;              // ALT confirm 1 nến
         private const decimal DangerHardCutNetRr = -0.80m;       // lỗ sâu => cho phép cut ngay (tránh dump thật)
         private const decimal ReclaimAtrFrac = 0.15m;            // reclaim boundary tối thiểu 0.15 ATR -> coi là hồi thật
 
