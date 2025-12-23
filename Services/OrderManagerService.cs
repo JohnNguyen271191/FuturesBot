@@ -242,7 +242,7 @@ namespace FuturesBot.Services
                         QuickTakeMinRR = 0.35m,
                         QuickTakeGoodRR = 0.60m,
                         DangerCutIfRRBelow = -0.25m,
-                        TimeStopBars = 6,
+                        TimeStopBars = 15,
                         TimeStopMinRR = 0.3m,
                         SafetyTpRR = 1.30m,
                         EmaBreakTolerance = 0.0012m,
@@ -252,8 +252,8 @@ namespace FuturesBot.Services
                         MinQuickTakeProfitUsd = 0.15m,
                         MinDangerCutAbsLossUsd = 0.12m,
 
-                        EarlyExitBars = 3,
-                        EarlyExitMinRR = 0.06m,
+                        EarlyExitBars = 8,
+                        EarlyExitMinRR = 0.1m,
                         EarlyExitMinProfitUsd = 0.12m,
                     },
 
@@ -265,7 +265,7 @@ namespace FuturesBot.Services
                         QuickTakeMinRR = 0.40m,
                         QuickTakeGoodRR = 0.70m,
                         DangerCutIfRRBelow = -0.30m,
-                        TimeStopBars = 6,
+                        TimeStopBars = 15,
                         TimeStopMinRR = 0.3m,
                         SafetyTpRR = 1.60m,
                         EmaBreakTolerance = 0.0010m,
@@ -275,8 +275,8 @@ namespace FuturesBot.Services
                         MinQuickTakeProfitUsd = 0.25m,
                         MinDangerCutAbsLossUsd = 0.18m,
 
-                        EarlyExitBars = 3,
-                        EarlyExitMinRR = 0.08m,
+                        EarlyExitBars = 8,
+                        EarlyExitMinRR = 0.13m,
                         EarlyExitMinProfitUsd = 0.18m,
                     },
 
@@ -288,7 +288,7 @@ namespace FuturesBot.Services
                         QuickTakeMinRR = 0.45m,
                         QuickTakeGoodRR = 0.75m,
                         DangerCutIfRRBelow = -0.35m,
-                        TimeStopBars = 10,
+                        TimeStopBars = 25,
                         TimeStopMinRR = 0.4m,
                         SafetyTpRR = DefaultSafetyTpRR,
                         EmaBreakTolerance = DefaultEmaBreakTolerance,
@@ -298,8 +298,8 @@ namespace FuturesBot.Services
                         MinQuickTakeProfitUsd = 0.40m,
                         MinDangerCutAbsLossUsd = 0.30m,
 
-                        EarlyExitBars = 4,
-                        EarlyExitMinRR = 0.10m,
+                        EarlyExitBars = 15,
+                        EarlyExitMinRR = 0.2m,
                         EarlyExitMinProfitUsd = 0.25m,
                     }
                 };
