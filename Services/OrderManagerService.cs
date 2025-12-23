@@ -621,7 +621,7 @@ namespace FuturesBot.Services
                     // =================== FLEX EXIT + TIME-STOP ===================
                     if (!inGrace && cachedCandles != null && cachedCandles.Count >= 10 && hasEntry && canUseRR)
                     {
-                       var c0 = cachedCandles[^2]; // last closed
+                        var c0 = cachedCandles[^2]; // last closed
                         var c1 = cachedCandles[^3];
 
                         if (!timeStopAnchorUtc.HasValue)
@@ -2128,4 +2128,4 @@ namespace FuturesBot.Services
             return false;
         }
     }
-} 
+}
