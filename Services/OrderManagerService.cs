@@ -1,20 +1,9 @@
 // OrderManagerService.cs (PATCHED - ANTI KILL GOOD SETUPS + TIME-STOP smarter + MICRO PROFIT PROTECT by %RISK)
-// - NEW (per case ETH): "NO-KILL ZONE" + "NO-ATR-PROTECT for planned scalp"
-//    + Nếu plannedRR >= 1.20: không QuickTake / không EarlyExit / TimeStop chỉ cắt khi danger/boundary thật
-//    + Nếu mode=Scalp && plannedRR >= 1.10: cấm PROTECT ATR kiểu kéo SL vượt entry sớm
-//      -> chỉ BE(+fee buffer) + giữ TP, chờ kèo chạy
-// - KEEP: TIME-STOP smarter (stall/weak/nearBoundary/danger mới close)
-// - KEEP: Micro profit protect theo %RISK (0.25R lock, 0.50R close nhanh)
-// - KEEP: dùng nến đã đóng (Count-2) cho các logic còn lại
-// - KEEP: fee-safe gates + ATR trailing + cancel normal+algo best-effort
-//
-// PATCH NEW (ANTI FAKE DUMP -> PUMP):
-// - DANGER/BREAK không close ngay nữa, mà "confirm" N nến đã đóng.
-// - N = 2 cho MAJOR (isMajor trong BotConfig), N = 1 cho ALT.
-// - Vẫn có HARD CUT nếu lỗ sâu để tránh dump thật.
-//
-// NOTE: Nếu property name trong BotConfig khác (AccountBalance/CoinInfos/RiskPerTradePercent/IsMajor)
-//       thì helper GetPlannedRiskUsdFromConfig() + IsMajorSymbol() đã có reflection fallback.
+// PATCH IMPROVE (Dec 2025):
+// - FIX: DangerConfirmBarsMajor/Alt đúng 2/1 nến đã đóng + count từ candle danger đầu tiên
+// - FIX: NO-KILL ZONE không bị MICRO TAKE (0.50R) giết kèo -> trong no-kill: chuyển sang LOCK SL, không close
+// - IMPROVE: micro risk USD clamp giữa riskUsd thật và plannedRiskUsd (tránh lệch sizing)
+// - IMPROVE: UpdateStopLossAsync chắc hơn: delay dài hơn + verify SL trên sàn + retry 1 lần
 
 using System;
 using System.Collections.Concurrent;
@@ -31,42 +20,6 @@ namespace FuturesBot.Services
 {
     /// <summary>
     /// OrderManagerService - WINRATE + FLEX EXIT (giống trade tay) + MODE AWARE
-    /// FIX:
-    /// - RR theo USD PnL / USD Risk
-    /// - MinProfitUsd gate để tránh lock quá sớm (case lãi 0.03 mà lock)
-    /// - NEW: ATR-based trailing + anti kéo SL sát entry (chống quét ngu)
-    ///
-    /// PATCH (HƯỚNG 2):
-    /// - Anti "trail ngu" bị quét pullback:
-    ///   + Chỉ cho phép trailing sớm khi có "pullback -> resume" (cấu trúc continuation)
-    ///   + Throttle trailing: tối thiểu X giây / tối thiểu bước SL theo ATR để tránh update liên tục
-    ///
-    /// PATCH (NEW - theo case ETH 2h->3h):
-    /// - EARLY EXIT (fee-safe): nếu đã lời nhỏ nhưng market stall/weakening trong vài nến → đóng sớm để khỏi bleed fee
-    ///
-    /// PATCH (NEW - fee adaptive):
-    /// - Net PnL & Net RR trừ phí ước lượng (taker-safe) cho mọi quyết định
-    /// - Hậu kiểm commission thật từ userTrades để update feeRate theo EWMA
-    ///
-    /// PATCH (NEW - anti "cắn trailing"):
-    /// - Fee rate EWMA không được tụt dưới taker (floor)
-    /// - Nếu kéo SL về gần/qua entry thì cộng "fee breakeven buffer" theo USD fee/qty
-    /// - Không update SL nếu SL quá sát MarkPrice (< X ATR) để tránh quét pullback
-    ///
-    /// PATCH (NEW - MICRO PROFIT PROTECT by risk%):
-    /// - Dựa trên planned risk USD = accountBalance * riskPerTradePercent(symbol)
-    /// - 0.25R: lock (update SL tight) ; 0.50R: close ngay
-    ///
-    /// PATCH (FIX - TIME-STOP smarter):
-    /// - TIME-STOP chỉ close khi có stall/weakening/nearBoundary/danger
-    ///   (tránh case "chạy trễ" vừa rũ xong thì bot cắt)
-    ///
-    /// PATCH (NEW - ANTI KILL GOOD SETUPS):
-    /// - NO-KILL ZONE: plannedRR >= 1.20 → không QuickTake / không EarlyExit; TimeStop chỉ cắt khi danger/boundary thật
-    /// - SCALP plannedRR >= 1.10 → cấm PROTECT ATR kéo SL vượt entry sớm; chỉ BE(+fee) + giữ TP
-    ///
-    /// PATCH (NEW - ANTI FAKE DUMP -> PUMP):
-    /// - DANGER CUT / EXIT ON BOUNDARY: confirm 2 nến cho MAJOR (isMajor), 1 nến cho ALT
     /// </summary>
     public class OrderManagerService
     {
@@ -96,66 +49,64 @@ namespace FuturesBot.Services
 
         // =============== ATR trailing (NEW) ========================
         private const int AtrPeriod = 14;
-        private const decimal ScalpAtrMult = 0.8m;   // scalp: trailing chặt hơn nhưng vẫn ngoài noise
-        private const decimal TrendAtrMult = 1.2m;   // trend: trailing rộng hơn
-        private const decimal AtrToAllowProfitLock = 1.0m; // phải đi >= 1 ATR mới cho phép SL vượt entry (lock lời)
+        private const decimal ScalpAtrMult = 0.8m;
+        private const decimal TrendAtrMult = 1.2m;
+        private const decimal AtrToAllowProfitLock = 1.0m;
 
         // =============== PATCH: anti pullback trailing (HƯỚNG 2) ===
-        private const decimal RequireMoveBeforeTrailAtrFrac = 0.60m;    // giá phải đi >= 0.6 ATR từ entry
-        private const decimal PullbackMustNotBreakEntryAtrFrac = 0.20m; // pullback không được xuyên entry quá sâu (theo ATR)
-        private const int TrailingMinUpdateIntervalSec = 45;            // tối thiểu 45s mới update SL 1 lần
-        private const decimal TrailingMinStepAtrFrac = 0.15m;           // SL phải "tốt hơn" tối thiểu 0.15 ATR mới update
+        private const decimal RequireMoveBeforeTrailAtrFrac = 0.60m;
+        private const decimal PullbackMustNotBreakEntryAtrFrac = 0.20m;
+        private const int TrailingMinUpdateIntervalSec = 45;
+        private const decimal TrailingMinStepAtrFrac = 0.15m;
 
         // =============== PATCH: EARLY EXIT (fee-safe) ==============
-        private const decimal StallRangeAtrFrac = 0.45m;          // range (maxHigh-minLow) <= 0.45 ATR coi như stall
-        private const decimal NearBoundaryAtrFrac = 0.20m;        // coi như "đè biên EMA" nếu cách boundary <= 0.2 ATR
-        private const decimal StallSmallBodyToRangeMax = 0.45m;   // nhiều nến thân nhỏ => thiếu momentum
+        private const decimal StallRangeAtrFrac = 0.45m;
+        private const decimal NearBoundaryAtrFrac = 0.20m;
+        private const decimal StallSmallBodyToRangeMax = 0.45m;
 
         // =============== Fee model (NEW) ===========================
-        // Safe default (USDT-M): taker 0.04% / maker 0.02%
         private const decimal DefaultTakerFeeRate = 0.0004m;
         private const decimal DefaultMakerFeeRate = 0.0002m;
 
-        // EWMA update rate
         private const decimal FeeEwmaAlpha = 0.20m;
-
-        // Khi position đóng, lookback để lấy userTrades fee thật
         private static readonly TimeSpan RealFeeLookback = TimeSpan.FromMinutes(30);
 
-        // ===== NEW: Fee-safe multipliers (tránh net âm do phí) =====
         private const decimal ProtectMinNetProfitVsFeeMult = 2.0m;
         private const decimal QuickMinNetProfitVsFeeMult = 2.0m;
         private const decimal EarlyExitMinNetProfitVsFeeMult = 1.2m;
         private const decimal BoundaryExitMinNetProfitVsFeeMult = 1.8m;
 
-        // ===== NEW: Anti "SL too close" + fee BE buffer =====
-        private const decimal MinSlDistanceAtrFrac = 0.35m;     // SL phải cách MarkPrice >= 0.35 ATR
-        private const decimal FeeBreakevenBufferMult = 1.25m;   // cover fee + slip
+        private const decimal MinSlDistanceAtrFrac = 0.35m;
+        private const decimal FeeBreakevenBufferMult = 1.25m;
 
-        // ===== NEW: MICRO PROFIT PROTECT by planned risk (R-based) =====
-        private const decimal MicroLockAtR = 0.25m;       // đạt 0.25R -> lock
-        private const decimal MicroTakeAtR = 0.50m;       // đạt 0.50R -> close nhanh
-        private const decimal MicroMinNetRrToAct = 0.05m; // tránh nhiễu fee
-        private const decimal MicroTrailAtrMult = 0.45m;  // trailing cực chặt khi lock
+        // ===== MICRO PROFIT PROTECT by planned risk (R-based) =====
+        private const decimal MicroLockAtR = 0.25m;
+        private const decimal MicroTakeAtR = 0.50m;
+        private const decimal MicroMinNetRrToAct = 0.05m;
+        private const decimal MicroTrailAtrMult = 0.45m;
 
-        // ===== NEW: ANTI KILL GOOD SETUPS =====
-        private const decimal NoKillZonePlannedRR = 1.20m;           // plannedRR >= 1.20 -> ưu tiên giữ kèo
-        private const decimal NoAtrProtectScalpPlannedRR = 1.10m;    // scalp plannedRR >= 1.10 -> chỉ BE(+fee), cấm lock ATR sớm
+        // ===== ANTI KILL GOOD SETUPS =====
+        private const decimal NoKillZonePlannedRR = 1.20m;
+        private const decimal NoAtrProtectScalpPlannedRR = 1.10m;
 
-        // ===== NEW: ANTI FAKE DUMP -> PUMP (Danger confirm) =====
-        private const int DangerConfirmBarsMajor = 4;            // MAJOR (BTC/ETH...) confirm 2 nến
-        private const int DangerConfirmBarsAlt = 2;              // ALT confirm 1 nến
-        private const decimal DangerHardCutNetRr = -0.80m;       // lỗ sâu => cho phép cut ngay (tránh dump thật)
-        private const decimal ReclaimAtrFrac = 0.15m;            // reclaim boundary tối thiểu 0.15 ATR -> coi là hồi thật
+        // ===== ANTI FAKE DUMP -> PUMP (Danger confirm) =====
+        // FIX: đúng 2 nến cho MAJOR, 1 nến cho ALT (count từ candle danger đầu tiên)
+        private const int DangerConfirmBarsMajor = 2;
+        private const int DangerConfirmBarsAlt = 1;
+
+        private const decimal DangerHardCutNetRr = -0.80m;
+        private const decimal ReclaimAtrFrac = 0.15m;
+
+        // Pending danger timeout (nếu candle fetch fail / treo state lâu)
+        private static readonly TimeSpan DangerPendingMaxAge = TimeSpan.FromMinutes(10);
 
         private sealed class FeeStats
         {
-            public decimal EwmaRate { get; set; } = DefaultTakerFeeRate; // bắt đầu safe
+            public decimal EwmaRate { get; set; } = DefaultTakerFeeRate;
             public int Samples { get; set; } = 0;
             public DateTime LastUpdateUtc { get; set; } = DateTime.MinValue;
         }
 
-        // per symbol
         private readonly ConcurrentDictionary<string, FeeStats> _feeStatsBySymbol = new(StringComparer.OrdinalIgnoreCase);
 
         // =============== Debug throttle ===========================
@@ -165,7 +116,7 @@ namespace FuturesBot.Services
         private readonly ConcurrentDictionary<string, DateTime> _lastTrailingUpdateUtc = new();
         private readonly ConcurrentDictionary<string, decimal> _lastTrailingSl = new();
 
-        // ===== NEW: pending danger confirm (anti fake dump->pump) =====
+        // ===== pending danger confirm =====
         private readonly ConcurrentDictionary<string, DateTime> _pendingDangerSinceUtc = new(StringComparer.OrdinalIgnoreCase);
         private readonly ConcurrentDictionary<string, int> _pendingDangerBars = new(StringComparer.OrdinalIgnoreCase);
         private readonly ConcurrentDictionary<string, DateTime> _pendingDangerLastClosedOpenTime = new(StringComparer.OrdinalIgnoreCase);
@@ -200,7 +151,6 @@ namespace FuturesBot.Services
         {
             public TradeMode Mode { get; init; }
 
-            // Protect / Quick Take / Danger / TimeStop
             public decimal ProtectAtRR { get; init; }
             public decimal BreakEvenBufferR { get; init; }
             public decimal QuickTakeMinRR { get; init; }
@@ -209,23 +159,16 @@ namespace FuturesBot.Services
             public int TimeStopBars { get; init; }
             public decimal TimeStopMinRR { get; init; }
 
-            // --- Anti “0.03$ lock” gate ---
             public decimal MinProtectProfitUsd { get; init; }
             public decimal MinQuickTakeProfitUsd { get; init; }
             public decimal MinDangerCutAbsLossUsd { get; init; }
 
-            // --- NEW: Early exit (fee-safe) ---
             public int EarlyExitBars { get; init; }
             public decimal EarlyExitMinRR { get; init; }
             public decimal EarlyExitMinProfitUsd { get; init; }
 
-            // Safety TP
             public decimal SafetyTpRR { get; init; }
-
-            // EMA / boundary
             public decimal EmaBreakTolerance { get; init; }
-
-            // Limit monitoring timeout
             public TimeSpan LimitTimeout { get; init; }
 
             public string Tag => Mode.ToString();
@@ -378,7 +321,7 @@ namespace FuturesBot.Services
                     var candles = await _exchange.GetRecentCandlesAsync(symbol, _botConfig.Intervals[0].FrameTime, 80);
                     if (candles == null || candles.Count < 3) continue;
 
-                    var lastClosed = candles[^2]; // dùng nến đã đóng
+                    var lastClosed = candles[^2];
 
                     decimal ema34 = ComputeEmaLast(candles, 34);
                     decimal ema89 = ComputeEmaLast(candles, 89);
@@ -453,7 +396,6 @@ namespace FuturesBot.Services
             bool timeStopTriggered = false;
             DateTime? timeStopAnchorUtc = null;
 
-            // For adaptive fee update on close
             decimal lastKnownAbsQty = 0m;
             decimal lastKnownMarkPrice = 0m;
             decimal lastKnownEntry = 0m;
@@ -489,7 +431,6 @@ namespace FuturesBot.Services
                     lastKnownAbsQty = absQty;
                     lastKnownMarkPrice = price;
 
-                    // sync entry theo sàn nếu lệch
                     if (pos.EntryPrice > 0m)
                     {
                         if (entry <= 0m || Math.Abs(entry - pos.EntryPrice) / pos.EntryPrice > 0.0005m)
@@ -569,7 +510,6 @@ namespace FuturesBot.Services
                         }
                     }
 
-                    // Fee estimate (safe): assume taker both sides
                     if (hasEntry && absQty > 0m && entry > 0m && price > 0m)
                     {
                         decimal feeRate = GetEffectiveFeeRate(symbol);
@@ -593,7 +533,7 @@ namespace FuturesBot.Services
                         netRr = netPnlUsd / riskUsd;
                     }
 
-                    // ===== plannedRR (từ Strategy) để OMS không “đuổi” vượt kế hoạch RR =====
+                    // ===== plannedRR =====
                     decimal plannedRR = 0m;
                     if (hasEntry && hasSL && hasTP && riskPrice > 0m && IsValidTakeProfit(tp, isLongPosition, entry))
                     {
@@ -602,12 +542,11 @@ namespace FuturesBot.Services
                             plannedRR = rewardPrice / riskPrice;
                     }
 
-                    // ===== ANTI KILL GOOD SETUPS FLAGS =====
                     bool isScalp = signal.Mode == TradeMode.Scalp;
                     bool inNoKillZone = plannedRR >= NoKillZonePlannedRR;
                     bool noAtrProtectForScalp = isScalp && plannedRR >= NoAtrProtectScalpPlannedRR;
 
-                    // ===== cap thresholds theo plannedRR (RR dynamic) =====
+                    // ===== thresholds dynamic theo plannedRR =====
                     decimal effProtectAtRR = profile.ProtectAtRR;
                     decimal effQuickMinRR = profile.QuickTakeMinRR;
                     decimal effQuickGoodRR = profile.QuickTakeGoodRR;
@@ -636,7 +575,7 @@ namespace FuturesBot.Services
                         minBoundaryNetProfitUsd = Math.Max(minBoundaryNetProfitUsd, estFeeUsd * 2.2m);
                     }
 
-                    // =================== SAFETY TP (nếu thiếu TP) - MODE AWARE ===================
+                    // =================== SAFETY TP (nếu thiếu TP) ===================
                     if (hasEntry && hasSL && !hasTP && !autoTpPlaced)
                     {
                         if (riskPrice > 0m)
@@ -658,7 +597,7 @@ namespace FuturesBot.Services
                         }
                     }
 
-                    // =================== SL hit (chỉ khi hợp lệ + không grace) ===================
+                    // =================== SL hit ===================
                     if (!inGrace && hasEntry && hasSL && IsValidStopLoss(sl, isLongPosition, entry))
                     {
                         if ((isLongPosition && price <= sl) || (!isLongPosition && price >= sl))
@@ -679,10 +618,10 @@ namespace FuturesBot.Services
                         }
                     }
 
-                    // =================== FLEX EXIT LOGIC + TIME-STOP (MODE AWARE) ===================
+                    // =================== FLEX EXIT + TIME-STOP ===================
                     if (!inGrace && cachedCandles != null && cachedCandles.Count >= 10 && hasEntry && canUseRR)
                     {
-                        var c0 = cachedCandles[^2]; // last closed (Count-2)
+                       var c0 = cachedCandles[^2]; // last closed
                         var c1 = cachedCandles[^3];
 
                         if (!timeStopAnchorUtc.HasValue)
@@ -702,12 +641,11 @@ namespace FuturesBot.Services
                         bool stall = atr > 0m && IsStallByAtrRange(cachedCandles, atr, profile.EarlyExitBars, StallRangeAtrFrac);
                         bool nearBoundary = atr > 0m && boundary > 0m && Math.Abs(c0.Close - boundary) <= atr * NearBoundaryAtrFrac;
 
-                        // ===================== DANGER CONFIRM (anti fake dump->pump) =====================
+                        // ===================== DANGER CONFIRM =====================
                         bool dangerCandidate =
                             IsDangerImpulseReverse(c0, c1, isLongPosition)
                             || (boundary > 0 && IsBoundaryBroken(c0.Close, boundary, isLongPosition, profile.EmaBreakTolerance));
 
-                        // reclaim check: nếu đã reclaim lại boundary đủ mạnh -> cancel pending
                         bool reclaimed = false;
                         if (atr > 0m && boundary > 0m)
                         {
@@ -719,8 +657,6 @@ namespace FuturesBot.Services
 
                         bool dangerHard = netRr <= DangerHardCutNetRr;
 
-                        // dangerConfirmed: chỉ true khi đã confirm đủ số nến theo major/alt,
-                        // hoặc dangerHard + loss đủ lớn (để tránh dump thật)
                         bool dangerConfirmed = await ApplyDangerConfirmAsync(
                             symbol: symbol,
                             profile: profile,
@@ -732,30 +668,54 @@ namespace FuturesBot.Services
                             netPnlUsd: netPnlUsd);
 
                         // ======================================================================
-                        // MICRO PROFIT PROTECT (R-based)
+                        // MICRO PROFIT PROTECT (R-based) - IMPROVE
+                        // - baseRiskUsd ưu tiên riskUsd thật; nếu có plannedRiskUsd thì clamp (0.5x..2.0x)
+                        // - NO-KILL ZONE: cấm MICRO TAKE close (0.50R) -> chuyển thành LOCK (giữ kèo)
                         // ======================================================================
                         if (hasEntry && canUseRR)
                         {
                             decimal plannedRiskUsd = GetPlannedRiskUsdFromConfig(symbol);
-                            decimal baseRiskUsd = plannedRiskUsd > 0m ? plannedRiskUsd : riskUsd;
+
+                            decimal baseRiskUsd;
+                            if (riskUsd > 0m && plannedRiskUsd > 0m)
+                            {
+                                baseRiskUsd = Clamp(riskUsd, plannedRiskUsd * 0.50m, plannedRiskUsd * 2.00m);
+                            }
+                            else
+                            {
+                                baseRiskUsd = riskUsd > 0m ? riskUsd : plannedRiskUsd;
+                            }
 
                             if (baseRiskUsd > 0m)
                             {
                                 decimal microLockUsd = baseRiskUsd * MicroLockAtR;
                                 decimal microTakeUsd = baseRiskUsd * MicroTakeAtR;
 
+                                // MICRO TAKE
                                 if (netPnlUsd >= microTakeUsd && netRr >= MicroMinNetRrToAct)
                                 {
-                                    await _notify.SendAsync(
-                                        $"[{symbol}] MICRO TAKE (R): net={netPnlUsd:F4} >= {microTakeUsd:F4} ({MicroTakeAtR:F2}R of risk={baseRiskUsd:F4}) → close NOW | mode={profile.Tag}");
-                                    await _exchange.ClosePositionAsync(symbol, qty);
-                                    await SafeCancelLeftoverProtectiveAsync(symbol);
-                                    ClearDangerPending(symbol);
-                                    return;
+                                    if (!inNoKillZone)
+                                    {
+                                        await _notify.SendAsync(
+                                            $"[{symbol}] MICRO TAKE (R): net={netPnlUsd:F4} >= {microTakeUsd:F4} ({MicroTakeAtR:F2}R of baseRisk={baseRiskUsd:F4}) → close NOW | mode={profile.Tag}");
+                                        await _exchange.ClosePositionAsync(symbol, qty);
+                                        await SafeCancelLeftoverProtectiveAsync(symbol);
+                                        ClearDangerPending(symbol);
+                                        return;
+                                    }
+                                    else
+                                    {
+                                        // NO-KILL: không close, chuyển sang lock SL (giữ TP)
+                                        await _notify.SendAsync(
+                                            $"[{symbol}] MICRO TAKE blocked by NO-KILL (plannedRR={plannedRR:F2}) → convert to LOCK (keep TP) | net={netPnlUsd:F4} baseRisk={baseRiskUsd:F4} | mode={profile.Tag}");
+                                    }
                                 }
 
-                                if (hasSL && IsValidStopLoss(sl, isLongPosition, entry)
-                                    && netPnlUsd >= microLockUsd && netRr >= MicroMinNetRrToAct)
+                                // MICRO LOCK (hoặc NO-KILL fallback từ MICRO TAKE)
+                                bool shouldMicroLock = (netPnlUsd >= microLockUsd && netRr >= MicroMinNetRrToAct)
+                                    || (inNoKillZone && netPnlUsd >= microTakeUsd && netRr >= MicroMinNetRrToAct);
+
+                                if (hasSL && IsValidStopLoss(sl, isLongPosition, entry) && shouldMicroLock)
                                 {
                                     decimal targetSL;
 
@@ -794,31 +754,32 @@ namespace FuturesBot.Services
                                                 lastSlTpCheckUtc);
 
                                             await _notify.SendAsync(
-                                                $"[{symbol}] MICRO LOCK (R): net={netPnlUsd:F4} >= {microLockUsd:F4} ({MicroLockAtR:F2}R) → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
+                                                $"[{symbol}] MICRO LOCK (R): net={netPnlUsd:F4} lockAt={(netPnlUsd >= microTakeUsd ? "0.50R(no-kill)" : "0.25R")} baseRisk={baseRiskUsd:F4} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
                                         }
                                     }
                                 }
                             }
                         }
 
-                        // ===== TIME-STOP (NET RR) - smarter + NO-KILL ZONE =====
+                        // ===== TIME-STOP (smarter + NO-KILL ZONE) =====
                         if (!timeStopTriggered && timeStopAnchorUtc.HasValue)
                         {
                             int barsPassed = CountClosedBarsSince(timeStopAnchorUtc.Value, c0.OpenTime, tfMinutes);
 
                             bool timeStopConfirmBad = weakening || stall || nearBoundary || dangerConfirmed;
 
-                            // NO-KILL ZONE: plannedRR lớn -> chỉ time-stop nếu danger/boundary thật (hoặc stall+nearBoundary rất rõ)
                             bool allowTimeStop = !inNoKillZone
                                 || dangerConfirmed
-                                || (nearBoundary && stall); // nếu bị đè biên + stall thật thì cho cắt
+                                || (nearBoundary && stall);
 
                             if (allowTimeStop && barsPassed >= profile.TimeStopBars && netRr < effTimeStopMinRR && timeStopConfirmBad)
                             {
                                 timeStopTriggered = true;
 
                                 await _notify.SendAsync(
-                                    $"[{symbol}] TIME-STOP: {barsPassed} bars({tfMinutes}m) netRr={netRr:F2} < {effTimeStopMinRR:F2}R + confirmBad={timeStopConfirmBad} (stall={(stall ? "Y" : "N")} weak={(weakening ? "Y" : "N")} nearB={(nearBoundary ? "Y" : "N")} danger={(dangerConfirmed ? "Y" : "N")}) → close | pnl={pnlUsd:F4} fee~{estFeeUsd:F4} net={netPnlUsd:F4} risk={riskUsd:F4} plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} | mode={profile.Tag}");
+                                    $"[{symbol}] TIME-STOP: {barsPassed} bars({tfMinutes}m) netRr={netRr:F2} < {effTimeStopMinRR:F2}R + confirmBad={timeStopConfirmBad} " +
+                                    $"(stall={(stall ? "Y" : "N")} weak={(weakening ? "Y" : "N")} nearB={(nearBoundary ? "Y" : "N")} danger={(dangerConfirmed ? "Y" : "N")}) → close | " +
+                                    $"pnl={pnlUsd:F4} fee~{estFeeUsd:F4} net={netPnlUsd:F4} risk={riskUsd:F4} plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} | mode={profile.Tag}");
 
                                 await _exchange.ClosePositionAsync(symbol, qty);
                                 await SafeCancelLeftoverProtectiveAsync(symbol);
@@ -838,7 +799,8 @@ namespace FuturesBot.Services
                             if (barsPassed >= profile.EarlyExitBars && (weakening || stall || (nearBoundary && !dangerConfirmed)))
                             {
                                 await _notify.SendAsync(
-                                    $"[{symbol}] EARLY EXIT (NET+FEE): bars={barsPassed} netRr={netRr:F2} net={netPnlUsd:F4} (pnl={pnlUsd:F4} fee~{estFeeUsd:F4} minNet={minEarlyNetProfitUsd:F4}) atr={(atr > 0 ? atr.ToString("F4") : "0")} stall={(stall ? "Y" : "N")} weak={(weakening ? "Y" : "N")} nearBoundary={(nearBoundary ? "Y" : "N")} plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} → close | mode={profile.Tag}");
+                                    $"[{symbol}] EARLY EXIT (NET+FEE): bars={barsPassed} netRr={netRr:F2} net={netPnlUsd:F4} (pnl={pnlUsd:F4} fee~{estFeeUsd:F4} minNet={minEarlyNetProfitUsd:F4}) " +
+                                    $"atr={(atr > 0 ? atr.ToString("F4") : "0")} stall={(stall ? "Y" : "N")} weak={(weakening ? "Y" : "N")} nearB={(nearBoundary ? "Y" : "N")} plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} → close | mode={profile.Tag}");
 
                                 await _exchange.ClosePositionAsync(symbol, qty);
                                 await SafeCancelLeftoverProtectiveAsync(symbol);
@@ -847,19 +809,18 @@ namespace FuturesBot.Services
                             }
                         }
 
-                        // ===== Profit protect (ATR-based) (NET + fee gate) =====
+                        // ===== Profit protect (ATR-based) =====
                         if (netRr >= effProtectAtRR
                             && netPnlUsd >= minProtectNetProfitUsd
                             && hasSL
                             && IsValidStopLoss(sl, isLongPosition, entry))
                         {
-                            // --- PATCH: Scalp plannedRR >= 1.10 => chỉ BE(+fee) + giữ TP, cấm kéo SL vượt entry sớm ---
+                            // Scalp plannedRR >= 1.10 => chỉ BE(+fee) + giữ TP
                             if (noAtrProtectForScalp)
                             {
                                 decimal feeBeBuffer = GetFeeBreakevenBufferPrice(estFeeUsd, absQty);
                                 decimal targetSL = isLongPosition ? (entry + feeBeBuffer) : (entry - feeBeBuffer);
 
-                                // đảm bảo không "tệ" hơn SL hiện tại và không quá sát giá
                                 if (!IsSlTooCloseToPrice(price, targetSL, atr))
                                 {
                                     if (IsBetterStopLoss(targetSL, sl, isLongPosition)
@@ -877,14 +838,13 @@ namespace FuturesBot.Services
                                             lastSlTpCheckUtc);
 
                                         await _notify.SendAsync(
-                                            $"[{symbol}] PROTECT BE(+FEE) (ANTI-KILL): plannedRR={plannedRR:F2} scalp => forbid ATR lock. netRr={netRr:F2} net={netPnlUsd:F4} fee~{estFeeUsd:F4} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
+                                            $"[{symbol}] PROTECT BE(+FEE) (ANTI-KILL): plannedRR={plannedRR:F2} scalp forbid ATR lock. netRr={netRr:F2} net={netPnlUsd:F4} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
                                     }
                                 }
 
                                 goto AFTER_PROTECT_BLOCK;
                             }
 
-                            // --- default ATR protect (trend/continuation/scalp nhỏ RR) ---
                             if (atr > 0m)
                             {
                                 decimal atrMult = isScalp ? ScalpAtrMult : TrendAtrMult;
@@ -894,7 +854,6 @@ namespace FuturesBot.Services
                                         ? price >= entry + atr * AtrToAllowProfitLock
                                         : price <= entry - atr * AtrToAllowProfitLock;
 
-                                // Scalp: ngay cả khi movedEnough, vẫn cần "continuation" (pullback->resume) để tránh lock ngu
                                 if (isScalp)
                                 {
                                     bool movedMin = isLongPosition
@@ -905,7 +864,6 @@ namespace FuturesBot.Services
 
                                     if (!pullbackResumeOk)
                                     {
-                                        // scalp không có continuation -> chỉ BE guard nhẹ, không lock quá sớm
                                         decimal feeBeBuffer = GetFeeBreakevenBufferPrice(estFeeUsd, absQty);
                                         decimal beSl = isLongPosition ? (entry + feeBeBuffer) : (entry - feeBeBuffer);
 
@@ -917,7 +875,7 @@ namespace FuturesBot.Services
                                             lastSlTpCheckUtc = await UpdateStopLossAsync(symbol, beSl, isLongPosition, hasTP, tp, pos, lastSlTpCheckUtc);
 
                                             await _notify.SendAsync(
-                                                $"[{symbol}] PROTECT BE(+FEE) (SCALP wait continuation): netRr={netRr:F2} net={netPnlUsd:F4} fee~{estFeeUsd:F4} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
+                                                $"[{symbol}] PROTECT BE(+FEE) (SCALP wait continuation): netRr={netRr:F2} net={netPnlUsd:F4} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
                                         }
 
                                         goto AFTER_PROTECT_BLOCK;
@@ -944,7 +902,6 @@ namespace FuturesBot.Services
                                         : (price + atr * atrMult);
                                 }
 
-                                // Fee BE buffer + anti "SL too close to price"
                                 decimal feeBe = GetFeeBreakevenBufferPrice(estFeeUsd, absQty);
                                 if (feeBe > 0m)
                                 {
@@ -974,7 +931,7 @@ namespace FuturesBot.Services
                                         lastSlTpCheckUtc);
 
                                     await _notify.SendAsync(
-                                        $"[{symbol}] PROTECT ATR (NET+FEE): netRr={netRr:F2} net={netPnlUsd:F4} fee~{estFeeUsd:F4} minNet={minProtectNetProfitUsd:F4} risk={riskUsd:F4} atr={atr:F4} moved={(movedEnoughForProfitLock ? "Y" : "N")} plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
+                                        $"[{symbol}] PROTECT ATR (NET+FEE): netRr={netRr:F2} net={netPnlUsd:F4} fee~{estFeeUsd:F4} minNet={minProtectNetProfitUsd:F4} atr={atr:F4} moved={(movedEnoughForProfitLock ? "Y" : "N")} plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
                                 }
                             }
                             else
@@ -1009,14 +966,14 @@ namespace FuturesBot.Services
                                         pos,
                                         lastSlTpCheckUtc);
 
-                                    await _notify.SendAsync($"[{symbol}] PROTECT (fallback NET+FEE): netRr={netRr:F2} net={netPnlUsd:F4} fee~{estFeeUsd:F4} minNet={minProtectNetProfitUsd:F4} plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
+                                    await _notify.SendAsync($"[{symbol}] PROTECT (fallback NET+FEE): netRr={netRr:F2} net={netPnlUsd:F4} plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
                                 }
                             }
                         }
 
                     AFTER_PROTECT_BLOCK:
 
-                        // ===== Quick take (NET + fee gate) - NO-KILL ZONE: skip (trừ danger) =====
+                        // ===== Quick take - NO-KILL: skip trừ danger =====
                         bool allowQuickTake = !inNoKillZone || dangerConfirmed;
 
                         if (allowQuickTake && netRr >= effQuickMinRR && netPnlUsd >= minQuickNetProfitUsd && weakening)
@@ -1031,7 +988,7 @@ namespace FuturesBot.Services
                             }
                         }
 
-                        // ===== Danger cut (LOSS include fee estimate) - CONFIRMED =====
+                        // ===== Danger cut - CONFIRMED =====
                         if (netRr <= profile.DangerCutIfRRBelow && dangerConfirmed)
                         {
                             var absLossUsd = Math.Max(0m, -netPnlUsd);
@@ -1045,7 +1002,7 @@ namespace FuturesBot.Services
                             }
                         }
 
-                        // ===== Exit on boundary break nếu đã dương chút (NET + fee gate) - CONFIRMED =====
+                        // ===== Exit on boundary break nếu đã dương chút - CONFIRMED =====
                         if (dangerConfirmed && netRr >= 0.10m && netPnlUsd >= minBoundaryNetProfitUsd)
                         {
                             await _notify.SendAsync($"[{symbol}] EXIT ON BOUNDARY BREAK (CONFIRMED): netRr={netRr:F2} net={netPnlUsd:F4} (fee~{estFeeUsd:F4} minNet={minBoundaryNetProfitUsd:F4}) plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} → close | mode={profile.Tag}");
@@ -1057,8 +1014,13 @@ namespace FuturesBot.Services
                     }
                     else
                     {
-                        // không có đủ dữ liệu candle => clear pending để tránh treo state lâu
-                        ClearDangerPending(symbol);
+                        // IMPROVE: không clear pending ngay khi candle thiếu (tránh reset confirm do fetch fail)
+                        // chỉ clear nếu pending quá lâu
+                        if (_pendingDangerSinceUtc.TryGetValue(symbol, out var sinceUtc))
+                        {
+                            if ((DateTime.UtcNow - sinceUtc) > DangerPendingMaxAge)
+                                ClearDangerPending(symbol);
+                        }
                     }
 
                     // =================== TP hit (nếu có) ===================
@@ -1344,7 +1306,7 @@ namespace FuturesBot.Services
         }
 
         // ============================================================
-        //                       ATR HELPER (NEW)
+        //                       ATR HELPER
         // ============================================================
 
         private static decimal ComputeAtr(IReadOnlyList<Candle> candles, int period = 14)
@@ -1517,10 +1479,6 @@ namespace FuturesBot.Services
             return (int)Math.Floor(mins / timeframeMinutes);
         }
 
-        // ============================================================
-        // NEW: stall detector (ATR-range)
-        // ============================================================
-
         private static bool IsStallByAtrRange(IReadOnlyList<Candle> candles, decimal atr, int lookbackBars, decimal rangeAtrFrac)
         {
             if (candles == null || candles.Count < lookbackBars + 3) return false;
@@ -1559,10 +1517,6 @@ namespace FuturesBot.Services
 
             return tightRange && manySmallBodies;
         }
-
-        // ============================================================
-        // PATCH HELPERS: pullback->resume + throttle trailing
-        // ============================================================
 
         private static bool HasPullbackThenResume(Candle lastClosed, Candle prevClosed, bool isLong, decimal entry, decimal atr)
         {
@@ -1620,7 +1574,7 @@ namespace FuturesBot.Services
         }
 
         // ============================================================
-        //                     UPDATE STOPLOSS
+        //                     UPDATE STOPLOSS (IMPROVED)
         // ============================================================
 
         private async Task<DateTime> UpdateStopLossAsync(
@@ -1636,7 +1590,8 @@ namespace FuturesBot.Services
 
             await SafeCancelStopLossBothAsync(symbol);
 
-            await Task.Delay(150);
+            // IMPROVE: delay dài hơn để exchange sync (giảm case “mất SL”)
+            await Task.Delay(400);
 
             if (currentPos == null)
                 currentPos = await _exchange.GetPositionAsync(symbol);
@@ -1659,26 +1614,41 @@ namespace FuturesBot.Services
             }
 
             string side = isLong ? "SELL" : "BUY";
+
+            // Place SL
             await _exchange.PlaceStopOnlyAsync(symbol, side, posSide, qty, newSL);
 
+            // IMPROVE: verify SL tồn tại trên sàn, retry 1 lần nếu missing
+            await Task.Delay(250);
+            var check1 = await DetectManualSlTpAsync(symbol, isLong, currentPos.EntryPrice, currentPos);
+            if (!check1.Sl.HasValue)
+            {
+                await _notify.SendAsync($"[{symbol}] WARN: SL not detected after place → retry place SL once.");
+                await _exchange.PlaceStopOnlyAsync(symbol, side, posSide, qty, newSL);
+
+                await Task.Delay(250);
+                var check2 = await DetectManualSlTpAsync(symbol, isLong, currentPos.EntryPrice, currentPos);
+                if (!check2.Sl.HasValue)
+                    await _notify.SendAsync($"[{symbol}] WARN: SL still missing after retry. (exchange lag/format?)");
+            }
+
+            // Keep TP if needed
             if (hasTp && expectedTp.HasValue)
             {
-                if ((DateTime.UtcNow - lastSlTpCheckUtc) >= TimeSpan.FromSeconds(SlTpCheckEverySec))
+                // force check TP quickly
+                var det = await DetectManualSlTpAsync(symbol, isLong, currentPos.EntryPrice, currentPos);
+                lastSlTpCheckUtc = DateTime.UtcNow;
+
+                if (!det.Tp.HasValue)
                 {
-                    var det = await DetectManualSlTpAsync(symbol, isLong, currentPos.EntryPrice, currentPos);
-                    lastSlTpCheckUtc = DateTime.UtcNow;
+                    decimal tpVal = expectedTp.Value;
+                    decimal tpDisplay = Math.Round(tpVal, 6);
 
-                    if (!det.Tp.HasValue)
-                    {
-                        decimal tpVal = expectedTp.Value;
-                        decimal tpDisplay = Math.Round(tpVal, 6);
+                    await _notify.SendAsync($"[{symbol}] Giữ TP → đặt lại TP {tpDisplay}");
 
-                        await _notify.SendAsync($"[{symbol}] Giữ TP → đặt lại TP {tpDisplay}");
-
-                        var ok = await _exchange.PlaceTakeProfitAsync(symbol, posSide, qty, tpVal);
-                        if (!ok)
-                            await _notify.SendAsync($"[{symbol}] Giữ TP FAILED → tp={tpDisplay}");
-                    }
+                    var ok = await _exchange.PlaceTakeProfitAsync(symbol, posSide, qty, tpVal);
+                    if (!ok)
+                        await _notify.SendAsync($"[{symbol}] Giữ TP FAILED → tp={tpDisplay}");
                 }
             }
 
@@ -1800,10 +1770,6 @@ namespace FuturesBot.Services
             return null;
         }
 
-        // ============================================================
-        //  fee BE buffer + anti "SL too close"
-        // ============================================================
-
         private static decimal GetFeeBreakevenBufferPrice(decimal estFeeUsd, decimal absQty)
         {
             if (estFeeUsd <= 0m || absQty <= 0m) return 0m;
@@ -1822,10 +1788,6 @@ namespace FuturesBot.Services
             if (v > max) return max;
             return v;
         }
-
-        // ============================================================
-        //  timeframe parse (3m/5m/15m/1h...)
-        // ============================================================
 
         private static int ParseIntervalMinutesSafe(string? frameTime)
         {
@@ -1967,11 +1929,9 @@ namespace FuturesBot.Services
             {
                 if (_botConfig == null) return 0m;
 
-                // Try direct
                 decimal balance = 0m;
                 try { balance = _botConfig.AccountBalance; } catch { }
 
-                // Reflection fallback
                 if (balance <= 0m)
                 {
                     var pBal = _botConfig.GetType().GetProperty("AccountBalance", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
@@ -2018,7 +1978,7 @@ namespace FuturesBot.Services
         }
 
         // ============================================================
-        // NEW: MAJOR detection + Danger confirm bars
+        // MAJOR detection + Danger confirm bars
         // ============================================================
 
         private int GetDangerConfirmBars(string symbol)
@@ -2037,16 +1997,13 @@ namespace FuturesBot.Services
 
                 if (coin == null) return false;
 
-                // direct property
                 try
                 {
-                    // nếu class có IsMajor bool
                     var v = coin.GetType().GetProperty("IsMajor", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(coin);
                     if (v is bool b) return b;
                 }
                 catch { }
 
-                // fallback: Major / IsMain / Tier / Category etc.
                 try
                 {
                     var p = coin.GetType().GetProperty("Major", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
@@ -2056,7 +2013,6 @@ namespace FuturesBot.Services
                 }
                 catch { }
 
-                // cuối cùng: hard fallback theo symbol phổ biến
                 if (symbol.Equals("BTCUSDT", StringComparison.OrdinalIgnoreCase)) return true;
                 if (symbol.Equals("ETHUSDT", StringComparison.OrdinalIgnoreCase)) return true;
 
@@ -2075,6 +2031,11 @@ namespace FuturesBot.Services
             _pendingDangerLastClosedOpenTime.TryRemove(symbol, out _);
         }
 
+        // ============================================================
+        // DANGER CONFIRM (FIXED)
+        // - Count từ candle danger đầu tiên (bars=1 ngay khi init)
+        // - Confirm khi đủ needBars nến đã đóng liên tiếp dangerCandidate
+        // ============================================================
         private async Task<bool> ApplyDangerConfirmAsync(
             string symbol,
             ModeProfile profile,
@@ -2085,7 +2046,6 @@ namespace FuturesBot.Services
             decimal netRr,
             decimal netPnlUsd)
         {
-            // không danger / đã reclaim -> clear pending
             if (!dangerCandidate || reclaimed)
             {
                 if (_pendingDangerSinceUtc.ContainsKey(symbol))
@@ -2098,7 +2058,7 @@ namespace FuturesBot.Services
                 return false;
             }
 
-            // HARD CUT: nếu lỗ sâu + absLoss đủ lớn => coi như confirmed ngay
+            // HARD CUT: lỗ sâu thì cho cut ngay (tránh dump thật)
             if (dangerHard)
             {
                 var absLossUsd = Math.Max(0m, -netPnlUsd);
@@ -2112,15 +2072,33 @@ namespace FuturesBot.Services
 
             int needBars = GetDangerConfirmBars(symbol);
 
-            // init pending
+            // init pending: bars=1 ngay tại candle danger đầu tiên
             if (!_pendingDangerSinceUtc.ContainsKey(symbol))
             {
                 _pendingDangerSinceUtc[symbol] = DateTime.UtcNow;
-                _pendingDangerBars[symbol] = 0;
+                _pendingDangerBars[symbol] = 1;
                 _pendingDangerLastClosedOpenTime[symbol] = lastClosed.OpenTime;
 
-                await _notify.SendAsync($"[{symbol}] DANGER CANDIDATE → wait confirm {needBars} bar(s) (major={(IsMajorSymbol(symbol) ? "Y" : "N")}) | netRr={netRr:F2} | mode={profile.Tag}");
+                if (needBars <= 1)
+                {
+                    await _notify.SendAsync($"[{symbol}] DANGER CONFIRMED immediately (needBars=1) | netRr={netRr:F2} | mode={profile.Tag}");
+                    ClearDangerPending(symbol);
+                    return true;
+                }
+
+                await _notify.SendAsync($"[{symbol}] DANGER CANDIDATE → wait confirm {needBars} closed bar(s) (major={(IsMajorSymbol(symbol) ? "Y" : "N")}) | netRr={netRr:F2} | mode={profile.Tag}");
                 return false;
+            }
+
+            // timeout pending (safety)
+            if (_pendingDangerSinceUtc.TryGetValue(symbol, out var sinceUtc))
+            {
+                if ((DateTime.UtcNow - sinceUtc) > DangerPendingMaxAge)
+                {
+                    ClearDangerPending(symbol);
+                    await _notify.SendAsync($"[{symbol}] DANGER pending timeout → reset | mode={profile.Tag}");
+                    return false;
+                }
             }
 
             // chỉ tăng bar khi sang nến đã đóng mới
@@ -2150,4 +2128,4 @@ namespace FuturesBot.Services
             return false;
         }
     }
-}
+} 
