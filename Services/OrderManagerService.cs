@@ -13,10 +13,8 @@ namespace FuturesBot.Services
 {
     /// <summary>
     /// OrderManagerService - WINRATE + FLEX EXIT (giống trade tay) + MODE AWARE
-    /// PATCH: ALL THRESHOLDS DYNAMIC BY % (R-based + optional ROE-based)
-    /// - Remove hardcode USD gates (scale with position size / account balance changes)
-    /// - Keep fee-safe gates (min net profit vs fee)
-    /// - Add ROE (leveraged %) gates for trailing start (optional)
+    /// ROI-based gates (NEW):
+    /// - Tất cả gate profit/loss theo % margin (có leverage), tránh hardcode USD
     /// </summary>
     public class OrderManagerService
     {
@@ -73,20 +71,6 @@ namespace FuturesBot.Services
         private const decimal MicroMinNetRrToAct = 0.05m;
         private const decimal MicroTrailAtrMult = 0.45m;
 
-        // ===== ALL THRESHOLDS BY % (R-based net profit gates) =====
-        // These gates define "net profit must be at least X * baseRiskUsd"
-        // so it scales when you increase capital / position size.
-        private const decimal ProtectMinNetAtR = 0.30m;
-        private const decimal QuickMinNetAtR = 0.40m;
-        private const decimal EarlyExitMinNetAtR = 0.15m;
-        private const decimal BoundaryExitMinNetAtR = 0.20m;
-
-        // ===== Optional ROE-based gates (leveraged % on margin) =====
-        // If leverage is known -> ROE reflects "tính cả đòn bẩy".
-        private const decimal RoeTrailStart = 0.30m;       // +30% ROE => allow trailing/protect even if R gate is slow
-        private const decimal RoeTrailAggressive = 0.50m;  // +50% ROE => stronger trailing allowed
-        private const decimal RoeQuickTakeGate = 0.25m;    // +25% ROE => allow quicktake when weakening
-
         // ===== ANTI KILL GOOD SETUPS =====
         private const decimal NoKillZonePlannedRR = 1.20m;
         private const decimal NoAtrProtectScalpPlannedRR = 1.10m;
@@ -99,13 +83,6 @@ namespace FuturesBot.Services
         private const decimal ReclaimAtrFrac = 0.15m;
 
         private static readonly TimeSpan DangerPendingMaxAge = TimeSpan.FromMinutes(10);
-
-        private sealed class FeeStats
-        {
-            public decimal EwmaRate { get; set; } = DefaultTakerFeeRate;
-            public int Samples { get; set; } = 0;
-            public DateTime LastUpdateUtc { get; set; } = DateTime.MinValue;
-        }
 
         private readonly ConcurrentDictionary<string, FeeStats> _feeStatsBySymbol = new(StringComparer.OrdinalIgnoreCase);
 
@@ -430,6 +407,27 @@ namespace FuturesBot.Services
                         netRr = netPnlUsd / riskUsd;
                     }
 
+                    // =================== ROI (margin-based, includes leverage) ===================
+                    // ROI = netPnlUsd / initialMarginUsd
+                    decimal leverage = GetLeverageFromConfig(symbol, coinInfo);
+                    decimal initialMarginUsd = 0m;
+                    decimal roi = 0m;          // +0.30 => +30%
+                    decimal absLossRoi = 0m;   // 0.15 => -15% (abs)
+
+                    if (hasEntry && absQty > 0m && leverage > 0m)
+                    {
+                        decimal notional = entry * absQty;
+                        if (notional > 0m)
+                        {
+                            initialMarginUsd = notional / leverage;
+                            if (initialMarginUsd > 0m)
+                            {
+                                roi = netPnlUsd / initialMarginUsd;
+                                absLossRoi = Math.Max(0m, -netPnlUsd) / initialMarginUsd;
+                            }
+                        }
+                    }
+
                     // ===== plannedRR =====
                     decimal plannedRR = 0m;
                     if (hasEntry && hasSL && hasTP && riskPrice > 0m && IsValidTakeProfit(tp, isLongPosition, entry))
@@ -443,7 +441,7 @@ namespace FuturesBot.Services
                     bool inNoKillZone = plannedRR >= NoKillZonePlannedRR;
                     bool noAtrProtectForScalp = isScalp && plannedRR >= NoAtrProtectScalpPlannedRR;
 
-                    // ===== thresholds dynamic theo plannedRR (RR thresholds) =====
+                    // ===== thresholds dynamic theo plannedRR (giữ) =====
                     decimal effProtectAtRR = profile.ProtectAtRR;
                     decimal effQuickMinRR = profile.QuickTakeMinRR;
                     decimal effQuickGoodRR = profile.QuickTakeGoodRR;
@@ -459,58 +457,17 @@ namespace FuturesBot.Services
                         effTimeStopMinRR = Clamp(Math.Min(profile.TimeStopMinRR, plannedRR * 0.30m), 0.20m, profile.TimeStopMinRR);
                     }
 
-                    // ======================================================================
-                    // ALL MIN PROFIT GATES: DYNAMIC BY % (baseRiskUsd) + fee-safe
-                    // ======================================================================
-                    decimal plannedRiskUsd = GetPlannedRiskUsdFromConfig(symbol);
-                    decimal baseRiskUsd = ComputeBaseRiskUsd(riskUsd, plannedRiskUsd);
-
-                    // fallback to legacy profile USD gates if baseRiskUsd unknown
-                    decimal legacyProtectUsd = profile.MinProtectProfitUsd;
-                    decimal legacyQuickUsd = profile.MinQuickTakeProfitUsd;
-                    decimal legacyEarlyUsd = profile.EarlyExitMinProfitUsd;
-
-                    decimal minProtectNetProfitUsd =
-                        baseRiskUsd > 0m ? (baseRiskUsd * ProtectMinNetAtR) : legacyProtectUsd;
-
-                    decimal minQuickNetProfitUsd =
-                        baseRiskUsd > 0m ? (baseRiskUsd * QuickMinNetAtR) : legacyQuickUsd;
-
-                    decimal minEarlyNetProfitUsd =
-                        baseRiskUsd > 0m ? (baseRiskUsd * EarlyExitMinNetAtR) : legacyEarlyUsd;
-
-                    decimal minBoundaryNetProfitUsd =
-                        baseRiskUsd > 0m ? (baseRiskUsd * BoundaryExitMinNetAtR) : legacyProtectUsd;
-
-                    // fee-safe overrides
-                    minProtectNetProfitUsd = Math.Max(minProtectNetProfitUsd, estFeeUsd * ProtectMinNetProfitVsFeeMult);
-                    minQuickNetProfitUsd = Math.Max(minQuickNetProfitUsd, estFeeUsd * QuickMinNetProfitVsFeeMult);
-                    minEarlyNetProfitUsd = Math.Max(minEarlyNetProfitUsd, estFeeUsd * EarlyExitMinNetProfitVsFeeMult);
-                    minBoundaryNetProfitUsd = Math.Max(minBoundaryNetProfitUsd, estFeeUsd * BoundaryExitMinNetProfitVsFeeMult);
+                    // ===== fee-safe min net profit gates (USD) - giữ để chống lock sớm =====
+                    decimal minProtectNetProfitUsd = estFeeUsd * ProtectMinNetProfitVsFeeMult;
+                    decimal minQuickNetProfitUsd = estFeeUsd * QuickMinNetProfitVsFeeMult;
+                    decimal minEarlyNetProfitUsd = estFeeUsd * EarlyExitMinNetProfitVsFeeMult;
+                    decimal minBoundaryNetProfitUsd = estFeeUsd * BoundaryExitMinNetProfitVsFeeMult;
 
                     if (isScalp)
                     {
                         minProtectNetProfitUsd = Math.Max(minProtectNetProfitUsd, estFeeUsd * 2.5m);
                         minQuickNetProfitUsd = Math.Max(minQuickNetProfitUsd, estFeeUsd * 2.5m);
                         minBoundaryNetProfitUsd = Math.Max(minBoundaryNetProfitUsd, estFeeUsd * 2.2m);
-                    }
-
-                    // ======================================================================
-                    // ROE (leveraged %) - optional gates
-                    // ROE = netPnl / margin ; margin = notional / leverage
-                    // If leverage unknown -> fallback leverage=1 (ROE==PnL% notional-ish, weaker)
-                    // ======================================================================
-                    decimal roe = 0m;
-                    decimal marginUsd = 0m;
-                    if (hasEntry && entry > 0m && absQty > 0m)
-                    {
-                        decimal notional = entry * absQty;
-                        decimal lev = GetLeverageSafe(symbol, coinInfo, pos);
-                        if (lev <= 0m) lev = 1m;
-
-                        marginUsd = notional / lev;
-                        if (marginUsd > 0m)
-                            roe = netPnlUsd / marginUsd;
                     }
 
                     // =================== SAFETY TP (nếu thiếu TP) ===================
@@ -605,87 +562,97 @@ namespace FuturesBot.Services
                             netPnlUsd: netPnlUsd);
 
                         // ======================================================================
-                        // MICRO PROFIT PROTECT (R-based) - IMPROVE
+                        // MICRO PROFIT PROTECT (R-based) - giữ nguyên (scale theo planned risk)
                         // ======================================================================
-                        if (baseRiskUsd > 0m)
+                        if (hasEntry && canUseRR)
                         {
-                            decimal microLockUsd = baseRiskUsd * MicroLockAtR;
-                            decimal microTakeUsd = baseRiskUsd * MicroTakeAtR;
+                            decimal plannedRiskUsd = GetPlannedRiskUsdFromConfig(symbol);
 
-                            // MICRO TAKE
-                            if (netPnlUsd >= microTakeUsd && netRr >= MicroMinNetRrToAct)
+                            decimal baseRiskUsd;
+                            if (riskUsd > 0m && plannedRiskUsd > 0m)
+                                baseRiskUsd = Clamp(riskUsd, plannedRiskUsd * 0.50m, plannedRiskUsd * 2.00m);
+                            else
+                                baseRiskUsd = riskUsd > 0m ? riskUsd : plannedRiskUsd;
+
+                            if (baseRiskUsd > 0m)
                             {
-                                if (!inNoKillZone)
-                                {
-                                    await _notify.SendAsync(
-                                        $"[{symbol}] MICRO TAKE (R): net={netPnlUsd:F4} >= {microTakeUsd:F4} ({MicroTakeAtR:F2}R of baseRisk={baseRiskUsd:F4}) → close NOW | mode={profile.Tag}");
-                                    await _exchange.ClosePositionAsync(symbol, qty);
-                                    await SafeCancelLeftoverProtectiveAsync(symbol);
-                                    ClearDangerPending(symbol);
-                                    return;
-                                }
-                                else
-                                {
-                                    await _notify.SendAsync(
-                                        $"[{symbol}] MICRO TAKE blocked by NO-KILL (plannedRR={plannedRR:F2}) → convert to LOCK (keep TP) | net={netPnlUsd:F4} baseRisk={baseRiskUsd:F4} | mode={profile.Tag}");
-                                }
-                            }
+                                decimal microLockUsd = baseRiskUsd * MicroLockAtR;
+                                decimal microTakeUsd = baseRiskUsd * MicroTakeAtR;
 
-                            // MICRO LOCK
-                            bool shouldMicroLock = (netPnlUsd >= microLockUsd && netRr >= MicroMinNetRrToAct)
-                                || (inNoKillZone && netPnlUsd >= microTakeUsd && netRr >= MicroMinNetRrToAct);
-
-                            if (hasSL && IsValidStopLoss(sl, isLongPosition, entry) && shouldMicroLock)
-                            {
-                                decimal targetSL;
-
-                                if (atr > 0m)
+                                // MICRO TAKE
+                                if (netPnlUsd >= microTakeUsd && netRr >= MicroMinNetRrToAct)
                                 {
-                                    targetSL = isLongPosition
-                                        ? (price - atr * MicroTrailAtrMult)
-                                        : (price + atr * MicroTrailAtrMult);
-                                }
-                                else
-                                {
-                                    targetSL = entry;
-                                }
-
-                                decimal feeBeBuffer = GetFeeBreakevenBufferPrice(estFeeUsd, absQty);
-                                if (feeBeBuffer > 0m)
-                                {
-                                    if (isLongPosition) targetSL = Math.Max(targetSL, entry + feeBeBuffer);
-                                    else targetSL = Math.Min(targetSL, entry - feeBeBuffer);
-                                }
-
-                                if (!IsSlTooCloseToPrice(price, targetSL, atr))
-                                {
-                                    if (IsBetterStopLoss(targetSL, sl, isLongPosition)
-                                        && CanUpdateTrailing(symbol, sl, targetSL, isLongPosition, atr))
+                                    if (!inNoKillZone)
                                     {
-                                        var oldSl = sl;
-                                        sl = targetSL;
+                                        await _notify.SendAsync(
+                                            $"[{symbol}] MICRO TAKE (R): net={netPnlUsd:F4} >= {microTakeUsd:F4} ({MicroTakeAtR:F2}R of baseRisk={baseRiskUsd:F4}) → close NOW | mode={profile.Tag}");
+                                        await _exchange.ClosePositionAsync(symbol, qty);
+                                        await SafeCancelLeftoverProtectiveAsync(symbol);
+                                        ClearDangerPending(symbol);
+                                        return;
+                                    }
+                                    else
+                                    {
+                                        await _notify.SendAsync(
+                                            $"[{symbol}] MICRO TAKE blocked by NO-KILL (plannedRR={plannedRR:F2}) → convert to LOCK (keep TP) | net={netPnlUsd:F4} baseRisk={baseRiskUsd:F4} | mode={profile.Tag}");
+                                    }
+                                }
 
-                                        var (newLastCheck, slDetected) = await UpdateStopLossAsync(
-                                            symbol,
-                                            targetSL,
-                                            isLongPosition,
-                                            hasTP,
-                                            tp,
-                                            pos,
-                                            lastSlTpCheckUtc);
+                                // MICRO LOCK
+                                bool shouldMicroLock = (netPnlUsd >= microLockUsd && netRr >= MicroMinNetRrToAct)
+                                    || (inNoKillZone && netPnlUsd >= microTakeUsd && netRr >= MicroMinNetRrToAct);
 
-                                        lastSlTpCheckUtc = newLastCheck;
+                                if (hasSL && IsValidStopLoss(sl, isLongPosition, entry) && shouldMicroLock)
+                                {
+                                    decimal targetSL;
 
-                                        // PATCH #1: chỉ commit throttle khi SL thật sự tồn tại trên sàn
-                                        if (slDetected)
+                                    if (atr > 0m)
+                                    {
+                                        targetSL = isLongPosition
+                                            ? (price - atr * MicroTrailAtrMult)
+                                            : (price + atr * MicroTrailAtrMult);
+                                    }
+                                    else
+                                    {
+                                        targetSL = entry;
+                                    }
+
+                                    decimal feeBeBuffer = GetFeeBreakevenBufferPrice(estFeeUsd, absQty);
+                                    if (feeBeBuffer > 0m)
+                                    {
+                                        if (isLongPosition) targetSL = Math.Max(targetSL, entry + feeBeBuffer);
+                                        else targetSL = Math.Min(targetSL, entry - feeBeBuffer);
+                                    }
+
+                                    if (!IsSlTooCloseToPrice(price, targetSL, atr))
+                                    {
+                                        if (IsBetterStopLoss(targetSL, sl, isLongPosition)
+                                            && CanUpdateTrailing(symbol, sl, targetSL, isLongPosition, atr))
                                         {
-                                            CommitTrailing(symbol, targetSL);
-                                            await _notify.SendAsync(
-                                                $"[{symbol}] MICRO LOCK (R): net={netPnlUsd:F4} lockAt={(netPnlUsd >= microTakeUsd ? "0.50R(no-kill)" : "0.25R")} baseRisk={baseRiskUsd:F4} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
-                                        }
-                                        else
-                                        {
-                                            sl = oldSl;
+                                            var oldSl = sl;
+                                            sl = targetSL;
+
+                                            var (newLastCheck, slDetected) = await UpdateStopLossAsync(
+                                                symbol,
+                                                targetSL,
+                                                isLongPosition,
+                                                hasTP,
+                                                tp,
+                                                pos,
+                                                lastSlTpCheckUtc);
+
+                                            lastSlTpCheckUtc = newLastCheck;
+
+                                            if (slDetected)
+                                            {
+                                                CommitTrailing(symbol, targetSL);
+                                                await _notify.SendAsync(
+                                                    $"[{symbol}] MICRO LOCK (R): net={netPnlUsd:F4} lockAt={(netPnlUsd >= microTakeUsd ? "0.50R(no-kill)" : "0.25R")} baseRisk={baseRiskUsd:F4} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
+                                            }
+                                            else
+                                            {
+                                                sl = oldSl;
+                                            }
                                         }
                                     }
                                 }
@@ -710,7 +677,7 @@ namespace FuturesBot.Services
                                 await _notify.SendAsync(
                                     $"[{symbol}] TIME-STOP: {barsPassed} bars({tfMinutes}m) netRr={netRr:F2} < {effTimeStopMinRR:F2}R + confirmBad={timeStopConfirmBad} " +
                                     $"(stall={(stall ? "Y" : "N")} weak={(weakening ? "Y" : "N")} nearB={(nearBoundary ? "Y" : "N")} danger={(dangerConfirmed ? "Y" : "N")}) → close | " +
-                                    $"pnl={pnlUsd:F4} fee~{estFeeUsd:F4} net={netPnlUsd:F4} risk={riskUsd:F4} baseRisk={baseRiskUsd:F4} roe={(marginUsd > 0 ? roe.ToString("P1") : "NA")} plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} | mode={profile.Tag}");
+                                    $"pnl={pnlUsd:F4} fee~{estFeeUsd:F4} net={netPnlUsd:F4} risk={riskUsd:F4} roi={(initialMarginUsd > 0 ? (roi * 100m).ToString("F1") + "%" : "NA")} plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} | mode={profile.Tag}");
 
                                 await _exchange.ClosePositionAsync(symbol, qty);
                                 await SafeCancelLeftoverProtectiveAsync(symbol);
@@ -719,18 +686,20 @@ namespace FuturesBot.Services
                             }
                         }
 
-                        // ===== EARLY EXIT (fee-safe) - NO-KILL ZONE: skip =====
+                        // ===== EARLY EXIT (ROI + fee-safe) - NO-KILL ZONE: skip =====
                         if (!inNoKillZone
                             && timeStopAnchorUtc.HasValue
                             && netPnlUsd >= minEarlyNetProfitUsd
-                            && netRr >= profile.EarlyExitMinRR)
+                            && netRr >= profile.EarlyExitMinRR
+                            && (initialMarginUsd > 0m ? roi >= profile.EarlyExitMinRoi : true))
                         {
                             int barsPassed = CountClosedBarsSince(timeStopAnchorUtc.Value, c0.OpenTime, tfMinutes);
 
                             if (barsPassed >= profile.EarlyExitBars && (weakening || stall || (nearBoundary && !dangerConfirmed)))
                             {
                                 await _notify.SendAsync(
-                                    $"[{symbol}] EARLY EXIT (NET+FEE): bars={barsPassed} netRr={netRr:F2} net={netPnlUsd:F4} (pnl={pnlUsd:F4} fee~{estFeeUsd:F4} minNet={minEarlyNetProfitUsd:F4} baseRisk={baseRiskUsd:F4} roe={(marginUsd > 0 ? roe.ToString("P1") : "NA")}) " +
+                                    $"[{symbol}] EARLY EXIT (ROI+FEE): bars={barsPassed} netRr={netRr:F2} roi={(initialMarginUsd > 0 ? (roi * 100m).ToString("F1") + "%" : "NA")} " +
+                                    $"net={netPnlUsd:F4} (fee~{estFeeUsd:F4} minNet={minEarlyNetProfitUsd:F4}) " +
                                     $"atr={(atr > 0 ? atr.ToString("F4") : "0")} stall={(stall ? "Y" : "N")} weak={(weakening ? "Y" : "N")} nearB={(nearBoundary ? "Y" : "N")} plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} → close | mode={profile.Tag}");
 
                                 await _exchange.ClosePositionAsync(symbol, qty);
@@ -740,15 +709,10 @@ namespace FuturesBot.Services
                             }
                         }
 
-                        // ===== Profit protect (ATR-based) =====
-                        // Allow protect when:
-                        // - netRr >= effProtectAtRR AND netPnlUsd >= minProtectNetProfitUsd
-                        // OR
-                        // - ROE gate reached (leveraged %) AND fee-safe
-                        bool allowProtectByR = (netRr >= effProtectAtRR && netPnlUsd >= minProtectNetProfitUsd);
-                        bool allowProtectByRoe = (marginUsd > 0m && roe >= RoeTrailStart && netPnlUsd >= (estFeeUsd * ProtectMinNetProfitVsFeeMult));
-
-                        if ((allowProtectByR || allowProtectByRoe)
+                        // ===== Profit protect (ATR-based) - ROI gate =====
+                        if (netRr >= effProtectAtRR
+                            && netPnlUsd >= minProtectNetProfitUsd
+                            && (initialMarginUsd > 0m ? roi >= profile.MinProtectRoi : true)
                             && hasSL
                             && IsValidStopLoss(sl, isLongPosition, entry))
                         {
@@ -781,7 +745,7 @@ namespace FuturesBot.Services
                                         {
                                             CommitTrailing(symbol, targetSL);
                                             await _notify.SendAsync(
-                                                $"[{symbol}] PROTECT BE(+FEE) (ANTI-KILL): plannedRR={plannedRR:F2} scalp forbid ATR lock. netRr={netRr:F2} net={netPnlUsd:F4} roe={(marginUsd > 0 ? roe.ToString("P1") : "NA")} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
+                                                $"[{symbol}] PROTECT BE(+FEE) (ANTI-KILL): plannedRR={plannedRR:F2} scalp forbid ATR lock. netRr={netRr:F2} roi={(initialMarginUsd > 0 ? (roi * 100m).ToString("F1") + "%" : "NA")} net={netPnlUsd:F4} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
                                         }
                                         else
                                         {
@@ -795,10 +759,7 @@ namespace FuturesBot.Services
 
                             if (atr > 0m)
                             {
-                                // If ROE is very high, allow slightly tighter trailing (more aggressive)
                                 decimal atrMult = isScalp ? ScalpAtrMult : TrendAtrMult;
-                                if (marginUsd > 0m && roe >= RoeTrailAggressive)
-                                    atrMult = Math.Max(0.65m, atrMult * 0.85m);
 
                                 bool movedEnoughForProfitLock =
                                     isLongPosition
@@ -840,7 +801,7 @@ namespace FuturesBot.Services
                                             {
                                                 CommitTrailing(symbol, beSl);
                                                 await _notify.SendAsync(
-                                                    $"[{symbol}] PROTECT BE(+FEE) (SCALP wait continuation): netRr={netRr:F2} net={netPnlUsd:F4} roe={(marginUsd > 0 ? roe.ToString("P1") : "NA")} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
+                                                    $"[{symbol}] PROTECT BE(+FEE) (SCALP wait continuation): netRr={netRr:F2} roi={(initialMarginUsd > 0 ? (roi * 100m).ToString("F1") + "%" : "NA")} net={netPnlUsd:F4} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
                                             }
                                             else
                                             {
@@ -908,7 +869,9 @@ namespace FuturesBot.Services
                                     {
                                         CommitTrailing(symbol, targetSL);
                                         await _notify.SendAsync(
-                                            $"[{symbol}] PROTECT ATR (DYNAMIC): netRr={netRr:F2} net={netPnlUsd:F4} fee~{estFeeUsd:F4} minNet={minProtectNetProfitUsd:F4} baseRisk={baseRiskUsd:F4} roe={(marginUsd > 0 ? roe.ToString("P1") : "NA")} atr={atr:F4} moved={(movedEnoughForProfitLock ? "Y" : "N")} plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
+                                            $"[{symbol}] PROTECT ATR (ROI+FEE): netRr={netRr:F2} roi={(initialMarginUsd > 0 ? (roi * 100m).ToString("F1") + "%" : "NA")} " +
+                                            $"net={netPnlUsd:F4} fee~{estFeeUsd:F4} minNet={minProtectNetProfitUsd:F4} atr={atr:F4} moved={(movedEnoughForProfitLock ? "Y" : "N")} " +
+                                            $"plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
                                     }
                                     else
                                     {
@@ -956,7 +919,8 @@ namespace FuturesBot.Services
                                     {
                                         CommitTrailing(symbol, targetSL);
                                         await _notify.SendAsync(
-                                            $"[{symbol}] PROTECT (fallback DYNAMIC): netRr={netRr:F2} net={netPnlUsd:F4} baseRisk={baseRiskUsd:F4} roe={(marginUsd > 0 ? roe.ToString("P1") : "NA")} plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
+                                            $"[{symbol}] PROTECT (fallback ROI+FEE): netRr={netRr:F2} roi={(initialMarginUsd > 0 ? (roi * 100m).ToString("F1") + "%" : "NA")} net={netPnlUsd:F4} " +
+                                            $"plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
                                     }
                                     else
                                     {
@@ -971,15 +935,17 @@ namespace FuturesBot.Services
                         // ===== Quick take - NO-KILL: skip trừ danger =====
                         bool allowQuickTake = !inNoKillZone || dangerConfirmed;
 
-                        bool allowQuickByR = (netRr >= effQuickMinRR && netPnlUsd >= minQuickNetProfitUsd && weakening);
-                        bool allowQuickByRoe = (marginUsd > 0m && roe >= RoeQuickTakeGate && netPnlUsd >= minQuickNetProfitUsd && weakening);
-
-                        if (allowQuickTake && (allowQuickByR || allowQuickByRoe))
+                        if (allowQuickTake
+                            && netRr >= effQuickMinRR
+                            && netPnlUsd >= minQuickNetProfitUsd
+                            && (initialMarginUsd > 0m ? roi >= profile.MinQuickTakeRoi : true)
+                            && weakening)
                         {
                             if (netRr >= effQuickGoodRR || dangerConfirmed || IsOppositeStrongCandle(c0, isLongPosition))
                             {
                                 await _notify.SendAsync(
-                                    $"[{symbol}] QUICK TAKE (DYNAMIC): netRr={netRr:F2} net={netPnlUsd:F4} (fee~{estFeeUsd:F4} minNet={minQuickNetProfitUsd:F4} baseRisk={baseRiskUsd:F4} roe={(marginUsd > 0 ? roe.ToString("P1") : "NA")}) plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} → close | mode={profile.Tag}");
+                                    $"[{symbol}] QUICK TAKE (ROI+FEE): netRr={netRr:F2} roi={(initialMarginUsd > 0 ? (roi * 100m).ToString("F1") + "%" : "NA")} " +
+                                    $"net={netPnlUsd:F4} (fee~{estFeeUsd:F4} minNet={minQuickNetProfitUsd:F4}) plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} → close | mode={profile.Tag}");
                                 await _exchange.ClosePositionAsync(symbol, qty);
                                 await SafeCancelLeftoverProtectiveAsync(symbol);
                                 ClearDangerPending(symbol);
@@ -987,13 +953,14 @@ namespace FuturesBot.Services
                             }
                         }
 
-                        // ===== Danger cut - CONFIRMED =====
+                        // ===== Danger cut - CONFIRMED (ROI loss gate) =====
                         if (netRr <= profile.DangerCutIfRRBelow && dangerConfirmed)
                         {
-                            var absLossUsd = Math.Max(0m, -netPnlUsd);
-                            if (absLossUsd >= profile.MinDangerCutAbsLossUsd)
+                            // loss gate theo ROI, không theo USD
+                            if (initialMarginUsd <= 0m || absLossRoi >= profile.MinDangerCutAbsLossRoi)
                             {
-                                await _notify.SendAsync($"[{symbol}] DANGER CUT (CONFIRMED): netRr={netRr:F2} loss={absLossUsd:F4} + dangerConfirmed → close | mode={profile.Tag}");
+                                await _notify.SendAsync(
+                                    $"[{symbol}] DANGER CUT (CONFIRMED): netRr={netRr:F2} lossRoi={(initialMarginUsd > 0 ? (absLossRoi * 100m).ToString("F1") + "%" : "NA")} + dangerConfirmed → close | mode={profile.Tag}");
                                 await _exchange.ClosePositionAsync(symbol, qty);
                                 await SafeCancelLeftoverProtectiveAsync(symbol);
                                 ClearDangerPending(symbol);
@@ -1001,11 +968,15 @@ namespace FuturesBot.Services
                             }
                         }
 
-                        // ===== Exit on boundary break nếu đã dương chút - CONFIRMED =====
-                        if (dangerConfirmed && netRr >= 0.10m && netPnlUsd >= minBoundaryNetProfitUsd)
+                        // ===== Exit on boundary break nếu đã dương chút - CONFIRMED (ROI gate) =====
+                        if (dangerConfirmed
+                            && netRr >= 0.10m
+                            && netPnlUsd >= minBoundaryNetProfitUsd
+                            && (initialMarginUsd > 0m ? roi >= profile.MinBoundaryExitRoi : true))
                         {
                             await _notify.SendAsync(
-                                $"[{symbol}] EXIT ON BOUNDARY BREAK (CONFIRMED): netRr={netRr:F2} net={netPnlUsd:F4} (fee~{estFeeUsd:F4} minNet={minBoundaryNetProfitUsd:F4} baseRisk={baseRiskUsd:F4} roe={(marginUsd > 0 ? roe.ToString("P1") : "NA")}) plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} → close | mode={profile.Tag}");
+                                $"[{symbol}] EXIT ON BOUNDARY BREAK (ROI+FEE): netRr={netRr:F2} roi={(initialMarginUsd > 0 ? (roi * 100m).ToString("F1") + "%" : "NA")} " +
+                                $"net={netPnlUsd:F4} (fee~{estFeeUsd:F4} minNet={minBoundaryNetProfitUsd:F4}) plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} → close | mode={profile.Tag}");
                             await _exchange.ClosePositionAsync(symbol, qty);
                             await SafeCancelLeftoverProtectiveAsync(symbol);
                             ClearDangerPending(symbol);
@@ -1604,7 +1575,6 @@ namespace FuturesBot.Services
 
             await SafeCancelStopLossBothAsync(symbol);
 
-            // IMPROVE: delay dài hơn để exchange sync (giảm case “mất SL”)
             await Task.Delay(400);
 
             if (currentPos == null)
@@ -1632,7 +1602,7 @@ namespace FuturesBot.Services
             // Place SL
             await _exchange.PlaceStopOnlyAsync(symbol, side, posSide, qty, newSL);
 
-            // IMPROVE: verify SL tồn tại trên sàn, retry 1 lần nếu missing
+            // verify SL tồn tại trên sàn, retry 1 lần nếu missing
             bool slDetected = false;
 
             await Task.Delay(250);
@@ -1655,7 +1625,6 @@ namespace FuturesBot.Services
             // Keep TP if needed
             if (hasTp && expectedTp.HasValue)
             {
-                // force check TP quickly
                 var det = await DetectManualSlTpAsync(symbol, isLong, currentPos.EntryPrice, currentPos);
                 lastSlTpCheckUtc = DateTime.UtcNow;
 
@@ -1998,6 +1967,37 @@ namespace FuturesBot.Services
         }
 
         // ============================================================
+        // Leverage from config (CoinInfo.Leverage) - NEW helper
+        // ============================================================
+
+        private decimal GetLeverageFromConfig(string symbol, CoinInfo? coinInfoFromCaller)
+        {
+            try
+            {
+                int lev = 0;
+
+                if (coinInfoFromCaller != null)
+                    lev = coinInfoFromCaller.Leverage;
+
+                if (lev <= 0 && _botConfig?.CoinInfos != null)
+                {
+                    var c = _botConfig.CoinInfos.FirstOrDefault(x =>
+                        string.Equals(x.Symbol, symbol, StringComparison.OrdinalIgnoreCase));
+                    if (c != null) lev = c.Leverage;
+                }
+
+                if (lev <= 0) lev = 1;
+                if (lev > 125) lev = 125;
+
+                return lev;
+            }
+            catch
+            {
+                return 1m;
+            }
+        }
+
+        // ============================================================
         // MAJOR detection + Danger confirm bars
         // ============================================================
 
@@ -2021,15 +2021,6 @@ namespace FuturesBot.Services
                 {
                     var v = coin.GetType().GetProperty("IsMajor", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(coin);
                     if (v is bool b) return b;
-                }
-                catch { }
-
-                try
-                {
-                    var p = coin.GetType().GetProperty("Major", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
-                         ?? coin.GetType().GetProperty("IsMain", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-                    var v2 = p?.GetValue(coin);
-                    if (v2 is bool b2) return b2;
                 }
                 catch { }
 
@@ -2080,13 +2071,9 @@ namespace FuturesBot.Services
             // HARD CUT
             if (dangerHard)
             {
-                var absLossUsd = Math.Max(0m, -netPnlUsd);
-                if (absLossUsd >= profile.MinDangerCutAbsLossUsd)
-                {
-                    await _notify.SendAsync($"[{symbol}] DANGER HARD (NET): netRr={netRr:F2} loss={absLossUsd:F4} → allow immediate cut | mode={profile.Tag}");
-                    ClearDangerPending(symbol);
-                    return true;
-                }
+                await _notify.SendAsync($"[{symbol}] DANGER HARD (NET): netRr={netRr:F2} net={netPnlUsd:F4} → allow immediate cut | mode={profile.Tag}");
+                ClearDangerPending(symbol);
+                return true;
             }
 
             int needBars = GetDangerConfirmBars(symbol);
@@ -2146,55 +2133,12 @@ namespace FuturesBot.Services
 
             return false;
         }
+    }
 
-        // ============================================================
-        // DYNAMIC BASE RISK: clamp riskUsd around plannedRiskUsd
-        // ============================================================
-
-        private static decimal ComputeBaseRiskUsd(decimal riskUsd, decimal plannedRiskUsd)
-        {
-            if (riskUsd > 0m && plannedRiskUsd > 0m)
-                return Clamp(riskUsd, plannedRiskUsd * 0.50m, plannedRiskUsd * 2.00m);
-
-            if (riskUsd > 0m) return riskUsd;
-            if (plannedRiskUsd > 0m) return plannedRiskUsd;
-            return 0m;
-        }
-
-        // ============================================================
-        // Leverage helper (reflection-friendly)
-        // ============================================================
-
-        private static decimal GetLeverageSafe(string symbol, CoinInfo coinInfo, PositionInfo pos)
-        {
-            try
-            {
-                // 1) PositionInfo.Leverage
-                if (pos != null)
-                {
-                    var pLev = pos.GetType().GetProperty("Leverage", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-                    var v = pLev?.GetValue(pos);
-                    if (v is decimal d && d > 0m) return d;
-                    if (v is int i && i > 0) return i;
-                    if (v is long l && l > 0) return l;
-                    if (v is double dd && dd > 0) return (decimal)dd;
-                }
-
-                // 2) CoinInfo.Leverage / DefaultLeverage
-                if (coinInfo != null)
-                {
-                    var p1 = coinInfo.GetType().GetProperty("Leverage", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
-                          ?? coinInfo.GetType().GetProperty("DefaultLeverage", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-                    var v = p1?.GetValue(coinInfo);
-                    if (v is decimal d && d > 0m) return d;
-                    if (v is int i && i > 0) return i;
-                    if (v is long l && l > 0) return l;
-                    if (v is double dd && dd > 0) return (decimal)dd;
-                }
-            }
-            catch { }
-
-            return 1m;
-        }
+    internal sealed class FeeStats
+    {
+        public decimal EwmaRate { get; set; }
+        public int Samples { get; set; }
+        public DateTime LastUpdateUtc { get; set; }
     }
 }
