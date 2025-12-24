@@ -65,7 +65,7 @@ namespace FuturesBot.Models
 
                     SafetyTpRR = 1.30m,
                     EmaBreakTolerance = 0.0012m,
-                    LimitTimeout = TimeSpan.FromMinutes(20),
+                    LimitTimeout = TimeSpan.FromMinutes(15),
                 },
 
                 TradeMode.Mode2_Continuation => new ModeProfile
@@ -93,7 +93,7 @@ namespace FuturesBot.Models
 
                     SafetyTpRR = 1.60m,
                     EmaBreakTolerance = 0.0010m,
-                    LimitTimeout = TimeSpan.FromMinutes(15),
+                    LimitTimeout = TimeSpan.FromMinutes(10),
                 },
 
                 _ => new ModeProfile
@@ -121,7 +121,7 @@ namespace FuturesBot.Models
 
                     SafetyTpRR = 2.0m,
                     EmaBreakTolerance = 0.001m,
-                    LimitTimeout = TimeSpan.FromMinutes(30),
+                    LimitTimeout = TimeSpan.FromMinutes(20),
                 }
             };
         }
