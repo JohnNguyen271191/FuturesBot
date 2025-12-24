@@ -1,5 +1,9 @@
+using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
+using System.Threading.Tasks;
 using FuturesBot.Config;
 using FuturesBot.IServices;
 using FuturesBot.Models;
@@ -70,14 +74,12 @@ namespace FuturesBot.Services
         private const decimal NoAtrProtectScalpPlannedRR = 1.10m;
 
         // ===== ANTI FAKE DUMP -> PUMP (Danger confirm) =====
-        // FIX: đúng 2 nến cho MAJOR, 1 nến cho ALT (count từ candle danger đầu tiên)
         private const int DangerConfirmBarsMajor = 2;
         private const int DangerConfirmBarsAlt = 1;
 
         private const decimal DangerHardCutNetRr = -0.80m;
         private const decimal ReclaimAtrFrac = 0.15m;
 
-        // Pending danger timeout (nếu candle fetch fail / treo state lâu)
         private static readonly TimeSpan DangerPendingMaxAge = TimeSpan.FromMinutes(10);
 
         private readonly ConcurrentDictionary<string, FeeStats> _feeStatsBySymbol = new(StringComparer.OrdinalIgnoreCase);
@@ -188,7 +190,6 @@ namespace FuturesBot.Services
                         return;
                     }
 
-                    
                     var candles = await _exchange.GetRecentCandlesAsync(symbol, coinInfo.MainTimeFrame, 80);
                     if (candles == null || candles.Count < 3) continue;
 
@@ -520,10 +521,9 @@ namespace FuturesBot.Services
                         bool reclaimed = false;
                         if (atr > 0m && boundary > 0m)
                         {
-                            if (isLongPosition)
-                                reclaimed = c0.Close >= boundary + atr * ReclaimAtrFrac;
-                            else
-                                reclaimed = c0.Close <= boundary - atr * ReclaimAtrFrac;
+                            reclaimed = isLongPosition
+                                ? c0.Close >= boundary + atr * ReclaimAtrFrac
+                                : c0.Close <= boundary - atr * ReclaimAtrFrac;
                         }
 
                         bool dangerHard = netRr <= DangerHardCutNetRr;
@@ -540,8 +540,6 @@ namespace FuturesBot.Services
 
                         // ======================================================================
                         // MICRO PROFIT PROTECT (R-based) - IMPROVE
-                        // - baseRiskUsd ưu tiên riskUsd thật; nếu có plannedRiskUsd thì clamp (0.5x..2.0x)
-                        // - NO-KILL ZONE: cấm MICRO TAKE close (0.50R) -> chuyển thành LOCK (giữ kèo)
                         // ======================================================================
                         if (hasEntry && canUseRR)
                         {
@@ -549,13 +547,9 @@ namespace FuturesBot.Services
 
                             decimal baseRiskUsd;
                             if (riskUsd > 0m && plannedRiskUsd > 0m)
-                            {
                                 baseRiskUsd = Clamp(riskUsd, plannedRiskUsd * 0.50m, plannedRiskUsd * 2.00m);
-                            }
                             else
-                            {
                                 baseRiskUsd = riskUsd > 0m ? riskUsd : plannedRiskUsd;
-                            }
 
                             if (baseRiskUsd > 0m)
                             {
@@ -576,13 +570,12 @@ namespace FuturesBot.Services
                                     }
                                     else
                                     {
-                                        // NO-KILL: không close, chuyển sang lock SL (giữ TP)
                                         await _notify.SendAsync(
                                             $"[{symbol}] MICRO TAKE blocked by NO-KILL (plannedRR={plannedRR:F2}) → convert to LOCK (keep TP) | net={netPnlUsd:F4} baseRisk={baseRiskUsd:F4} | mode={profile.Tag}");
                                     }
                                 }
 
-                                // MICRO LOCK (hoặc NO-KILL fallback từ MICRO TAKE)
+                                // MICRO LOCK
                                 bool shouldMicroLock = (netPnlUsd >= microLockUsd && netRr >= MicroMinNetRrToAct)
                                     || (inNoKillZone && netPnlUsd >= microTakeUsd && netRr >= MicroMinNetRrToAct);
 
@@ -613,9 +606,10 @@ namespace FuturesBot.Services
                                         if (IsBetterStopLoss(targetSL, sl, isLongPosition)
                                             && CanUpdateTrailing(symbol, sl, targetSL, isLongPosition, atr))
                                         {
+                                            var oldSl = sl;
                                             sl = targetSL;
 
-                                            lastSlTpCheckUtc = await UpdateStopLossAsync(
+                                            var (newLastCheck, slDetected) = await UpdateStopLossAsync(
                                                 symbol,
                                                 targetSL,
                                                 isLongPosition,
@@ -624,8 +618,20 @@ namespace FuturesBot.Services
                                                 pos,
                                                 lastSlTpCheckUtc);
 
-                                            await _notify.SendAsync(
-                                                $"[{symbol}] MICRO LOCK (R): net={netPnlUsd:F4} lockAt={(netPnlUsd >= microTakeUsd ? "0.50R(no-kill)" : "0.25R")} baseRisk={baseRiskUsd:F4} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
+                                            lastSlTpCheckUtc = newLastCheck;
+
+                                            // PATCH #1: chỉ commit throttle khi SL thật sự tồn tại trên sàn
+                                            if (slDetected)
+                                            {
+                                                CommitTrailing(symbol, targetSL);
+                                                await _notify.SendAsync(
+                                                    $"[{symbol}] MICRO LOCK (R): net={netPnlUsd:F4} lockAt={(netPnlUsd >= microTakeUsd ? "0.50R(no-kill)" : "0.25R")} baseRisk={baseRiskUsd:F4} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
+                                            }
+                                            else
+                                            {
+                                                // revert local SL để không “kẹp” throttle + state sai
+                                                sl = oldSl;
+                                            }
                                         }
                                     }
                                 }
@@ -697,9 +703,10 @@ namespace FuturesBot.Services
                                     if (IsBetterStopLoss(targetSL, sl, isLongPosition)
                                         && CanUpdateTrailing(symbol, sl, targetSL, isLongPosition, atr))
                                     {
+                                        var oldSl = sl;
                                         sl = targetSL;
 
-                                        lastSlTpCheckUtc = await UpdateStopLossAsync(
+                                        var (newLastCheck, slDetected) = await UpdateStopLossAsync(
                                             symbol,
                                             targetSL,
                                             isLongPosition,
@@ -708,8 +715,18 @@ namespace FuturesBot.Services
                                             pos,
                                             lastSlTpCheckUtc);
 
-                                        await _notify.SendAsync(
-                                            $"[{symbol}] PROTECT BE(+FEE) (ANTI-KILL): plannedRR={plannedRR:F2} scalp forbid ATR lock. netRr={netRr:F2} net={netPnlUsd:F4} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
+                                        lastSlTpCheckUtc = newLastCheck;
+
+                                        if (slDetected)
+                                        {
+                                            CommitTrailing(symbol, targetSL);
+                                            await _notify.SendAsync(
+                                                $"[{symbol}] PROTECT BE(+FEE) (ANTI-KILL): plannedRR={plannedRR:F2} scalp forbid ATR lock. netRr={netRr:F2} net={netPnlUsd:F4} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
+                                        }
+                                        else
+                                        {
+                                            sl = oldSl;
+                                        }
                                     }
                                 }
 
@@ -742,11 +759,30 @@ namespace FuturesBot.Services
                                             && IsBetterStopLoss(beSl, sl, isLongPosition)
                                             && CanUpdateTrailing(symbol, sl, beSl, isLongPosition, atr))
                                         {
+                                            var oldSl = sl;
                                             sl = beSl;
-                                            lastSlTpCheckUtc = await UpdateStopLossAsync(symbol, beSl, isLongPosition, hasTP, tp, pos, lastSlTpCheckUtc);
 
-                                            await _notify.SendAsync(
-                                                $"[{symbol}] PROTECT BE(+FEE) (SCALP wait continuation): netRr={netRr:F2} net={netPnlUsd:F4} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
+                                            var (newLastCheck, slDetected) = await UpdateStopLossAsync(
+                                                symbol,
+                                                beSl,
+                                                isLongPosition,
+                                                hasTP,
+                                                tp,
+                                                pos,
+                                                lastSlTpCheckUtc);
+
+                                            lastSlTpCheckUtc = newLastCheck;
+
+                                            if (slDetected)
+                                            {
+                                                CommitTrailing(symbol, beSl);
+                                                await _notify.SendAsync(
+                                                    $"[{symbol}] PROTECT BE(+FEE) (SCALP wait continuation): netRr={netRr:F2} net={netPnlUsd:F4} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
+                                            }
+                                            else
+                                            {
+                                                sl = oldSl;
+                                            }
                                         }
 
                                         goto AFTER_PROTECT_BLOCK;
@@ -791,8 +827,10 @@ namespace FuturesBot.Services
 
                                 if (IsBetterStopLoss(targetSL, sl, isLongPosition) && CanUpdateTrailing(symbol, sl, targetSL, isLongPosition, atr))
                                 {
+                                    var oldSl = sl;
                                     sl = targetSL;
-                                    lastSlTpCheckUtc = await UpdateStopLossAsync(
+
+                                    var (newLastCheck, slDetected) = await UpdateStopLossAsync(
                                         symbol,
                                         targetSL,
                                         isLongPosition,
@@ -801,8 +839,18 @@ namespace FuturesBot.Services
                                         pos,
                                         lastSlTpCheckUtc);
 
-                                    await _notify.SendAsync(
-                                        $"[{symbol}] PROTECT ATR (NET+FEE): netRr={netRr:F2} net={netPnlUsd:F4} fee~{estFeeUsd:F4} minNet={minProtectNetProfitUsd:F4} atr={atr:F4} moved={(movedEnoughForProfitLock ? "Y" : "N")} plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
+                                    lastSlTpCheckUtc = newLastCheck;
+
+                                    if (slDetected)
+                                    {
+                                        CommitTrailing(symbol, targetSL);
+                                        await _notify.SendAsync(
+                                            $"[{symbol}] PROTECT ATR (NET+FEE): netRr={netRr:F2} net={netPnlUsd:F4} fee~{estFeeUsd:F4} minNet={minProtectNetProfitUsd:F4} atr={atr:F4} moved={(movedEnoughForProfitLock ? "Y" : "N")} plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
+                                    }
+                                    else
+                                    {
+                                        sl = oldSl;
+                                    }
                                 }
                             }
                             else
@@ -827,8 +875,10 @@ namespace FuturesBot.Services
 
                                 if (IsBetterStopLoss(targetSL, sl, isLongPosition) && CanUpdateTrailing(symbol, sl, targetSL, isLongPosition, 0m))
                                 {
+                                    var oldSl = sl;
                                     sl = targetSL;
-                                    lastSlTpCheckUtc = await UpdateStopLossAsync(
+
+                                    var (newLastCheck, slDetected) = await UpdateStopLossAsync(
                                         symbol,
                                         targetSL,
                                         isLongPosition,
@@ -837,7 +887,17 @@ namespace FuturesBot.Services
                                         pos,
                                         lastSlTpCheckUtc);
 
-                                    await _notify.SendAsync($"[{symbol}] PROTECT (fallback NET+FEE): netRr={netRr:F2} net={netPnlUsd:F4} plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
+                                    lastSlTpCheckUtc = newLastCheck;
+
+                                    if (slDetected)
+                                    {
+                                        CommitTrailing(symbol, targetSL);
+                                        await _notify.SendAsync($"[{symbol}] PROTECT (fallback NET+FEE): netRr={netRr:F2} net={netPnlUsd:F4} plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
+                                    }
+                                    else
+                                    {
+                                        sl = oldSl;
+                                    }
                                 }
                             }
                         }
@@ -885,8 +945,6 @@ namespace FuturesBot.Services
                     }
                     else
                     {
-                        // IMPROVE: không clear pending ngay khi candle thiếu (tránh reset confirm do fetch fail)
-                        // chỉ clear nếu pending quá lâu
                         if (_pendingDangerSinceUtc.TryGetValue(symbol, out var sinceUtc))
                         {
                             if ((DateTime.UtcNow - sinceUtc) > DangerPendingMaxAge)
@@ -1417,15 +1475,21 @@ namespace FuturesBot.Services
                 }
             }
 
-            if (isLong)
-                return lastClosed.Close > prevClosed.Close;
-            else
-                return lastClosed.Close < prevClosed.Close;
+            return isLong
+                ? lastClosed.Close > prevClosed.Close
+                : lastClosed.Close < prevClosed.Close;
         }
+
+        // ============================================================
+        // PATCH #1: trailing throttle chỉ COMMIT sau khi update SL thành công
+        // - CanUpdateTrailing: chỉ CHECK, không ghi state
+        // - CommitTrailing: ghi state sau khi Detect SL OK
+        // ============================================================
 
         private bool CanUpdateTrailing(string symbol, decimal currentSl, decimal targetSl, bool isLong, decimal atr)
         {
             var now = DateTime.UtcNow;
+
             if (_lastTrailingUpdateUtc.TryGetValue(symbol, out var lastUtc))
             {
                 if ((now - lastUtc) < TimeSpan.FromSeconds(TrailingMinUpdateIntervalSec))
@@ -1446,16 +1510,21 @@ namespace FuturesBot.Services
                     return false;
             }
 
+            return true;
+        }
+
+        private void CommitTrailing(string symbol, decimal targetSl)
+        {
+            var now = DateTime.UtcNow;
             _lastTrailingUpdateUtc[symbol] = now;
             _lastTrailingSl[symbol] = targetSl;
-            return true;
         }
 
         // ============================================================
         //                     UPDATE STOPLOSS (IMPROVED)
         // ============================================================
 
-        private async Task<DateTime> UpdateStopLossAsync(
+        private async Task<(DateTime lastSlTpCheckUtc, bool slDetected)> UpdateStopLossAsync(
             string symbol,
             decimal newSL,
             bool isLong,
@@ -1485,7 +1554,7 @@ namespace FuturesBot.Services
                 {
                     await _notify.SendAsync($"[{symbol}] Không tìm thấy position khi update SL.");
                     ClearMonitoringPosition(symbol);
-                    return lastSlTpCheckUtc;
+                    return (lastSlTpCheckUtc, false);
                 }
 
                 currentPos = pos;
@@ -1497,16 +1566,22 @@ namespace FuturesBot.Services
             await _exchange.PlaceStopOnlyAsync(symbol, side, posSide, qty, newSL);
 
             // IMPROVE: verify SL tồn tại trên sàn, retry 1 lần nếu missing
+            bool slDetected = false;
+
             await Task.Delay(250);
             var check1 = await DetectManualSlTpAsync(symbol, isLong, currentPos.EntryPrice, currentPos);
-            if (!check1.Sl.HasValue)
+            if (check1.Sl.HasValue) slDetected = true;
+
+            if (!slDetected)
             {
                 await _notify.SendAsync($"[{symbol}] WARN: SL not detected after place → retry place SL once.");
                 await _exchange.PlaceStopOnlyAsync(symbol, side, posSide, qty, newSL);
 
                 await Task.Delay(250);
                 var check2 = await DetectManualSlTpAsync(symbol, isLong, currentPos.EntryPrice, currentPos);
-                if (!check2.Sl.HasValue)
+                if (check2.Sl.HasValue) slDetected = true;
+
+                if (!slDetected)
                     await _notify.SendAsync($"[{symbol}] WARN: SL still missing after retry. (exchange lag/format?)");
             }
 
@@ -1530,7 +1605,7 @@ namespace FuturesBot.Services
                 }
             }
 
-            return lastSlTpCheckUtc;
+            return (lastSlTpCheckUtc, slDetected);
         }
 
         // ============================================================
@@ -1911,9 +1986,8 @@ namespace FuturesBot.Services
 
         // ============================================================
         // DANGER CONFIRM (FIXED)
-        // - Count từ candle danger đầu tiên (bars=1 ngay khi init)
-        // - Confirm khi đủ needBars nến đã đóng liên tiếp dangerCandidate
         // ============================================================
+
         private async Task<bool> ApplyDangerConfirmAsync(
             string symbol,
             ModeProfile profile,
@@ -1936,7 +2010,7 @@ namespace FuturesBot.Services
                 return false;
             }
 
-            // HARD CUT: lỗ sâu thì cho cut ngay (tránh dump thật)
+            // HARD CUT
             if (dangerHard)
             {
                 var absLossUsd = Math.Max(0m, -netPnlUsd);
@@ -1968,7 +2042,7 @@ namespace FuturesBot.Services
                 return false;
             }
 
-            // timeout pending (safety)
+            // timeout pending
             if (_pendingDangerSinceUtc.TryGetValue(symbol, out var sinceUtc))
             {
                 if ((DateTime.UtcNow - sinceUtc) > DangerPendingMaxAge)
