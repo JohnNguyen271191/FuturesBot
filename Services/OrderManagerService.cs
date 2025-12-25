@@ -13,14 +13,15 @@ namespace FuturesBot.Services
 {
     /// <summary>
     /// OrderManagerService - WINRATE + FLEX EXIT (giống trade tay) + MODE AWARE
+    /// ROI-based gates (NEW):
+    /// - Tất cả gate profit/loss theo % margin (có leverage), tránh hardcode USD
     ///
-    /// PATCH "ĐÚNG BẢN CHẤT TREND":
-    /// - Trend TF dùng coinInfo.TrendTimeFrame để:
-    ///     + weakening / stall / nearBoundary
-    ///     + danger candidate + danger confirm
-    ///     + time-stop anchor/bars
-    /// - Main TF (coinInfo.MainTimeFrame) vẫn dùng để:
-    ///     + bảo vệ nhanh kiểu dump/pump mạnh (emergency), polling nhanh
+    /// PATCH "ĐÚNG BẢN CHẤT TREND" (theo yêu cầu):
+    /// - Trend TF lấy từ coinInfo.TrendTimeFrame (mày define riêng từng coin)
+    /// - DANGER confirm chỉ "đúng nghĩa" khi TREND TF bị phá (confirm theo Trend TF)
+    /// - 5m (MainTimeFrame) chỉ dùng để:
+    ///   + time-stop / stall / weakening (nhưng sẽ KHÔNG đóng uổng nếu trend TF còn valid)
+    ///   + safety phản ứng nhanh khi có dump/pump mạnh (impulse) -> vẫn được phép danger hard
     /// </summary>
     public class OrderManagerService
     {
@@ -99,7 +100,7 @@ namespace FuturesBot.Services
         private readonly ConcurrentDictionary<string, DateTime> _lastTrailingUpdateUtc = new();
         private readonly ConcurrentDictionary<string, decimal> _lastTrailingSl = new();
 
-        // ===== pending danger confirm =====
+        // ===== pending danger confirm (THEO TREND TF) =====
         private readonly ConcurrentDictionary<string, DateTime> _pendingDangerSinceUtc = new(StringComparer.OrdinalIgnoreCase);
         private readonly ConcurrentDictionary<string, int> _pendingDangerBars = new(StringComparer.OrdinalIgnoreCase);
         private readonly ConcurrentDictionary<string, DateTime> _pendingDangerLastClosedOpenTime = new(StringComparer.OrdinalIgnoreCase);
@@ -268,12 +269,14 @@ namespace FuturesBot.Services
             bool autoTpPlaced = false;
 
             DateTime lastSlTpCheckUtc = DateTime.MinValue;
+            DateTime lastCandleFetchUtc = DateTime.MinValue;
+            IReadOnlyList<Candle>? cachedCandles = null;
 
-            DateTime lastCandleFetchMainUtc = DateTime.MinValue;
-            DateTime lastCandleFetchTrendUtc = DateTime.MinValue;
-
-            IReadOnlyList<Candle>? cachedCandlesMain = null;
-            IReadOnlyList<Candle>? cachedCandlesTrend = null;
+            // === TREND TF CACHE ===
+            DateTime lastTrendFetchUtc = DateTime.MinValue;
+            IReadOnlyList<Candle>? trendCandles = null;
+            int trendTfMinutes = ParseIntervalMinutesSafe(coinInfo.TrendTimeFrame);
+            if (trendTfMinutes <= 0) trendTfMinutes = 30;
 
             var positionMonitorStartedUtc = DateTime.UtcNow;
 
@@ -284,18 +287,9 @@ namespace FuturesBot.Services
             decimal lastKnownMarkPrice = 0m;
             decimal lastKnownEntry = 0m;
 
-            string mainTf = coinInfo.MainTimeFrame;
-            string trendTf = string.IsNullOrWhiteSpace(coinInfo.TrendTimeFrame) ? coinInfo.MainTimeFrame : coinInfo.TrendTimeFrame;
+            int tfMinutes = ParseIntervalMinutesSafe(coinInfo.MainTimeFrame);
 
-            // "ĐÚNG TREND": Trend mode dùng trendTf cho core-exit (danger/time-stop/weak/stall)
-            bool useTrendTfForCore =
-                signal.Mode == TradeMode.Trend; // Mode2_Continuation / Scalp giữ main TF như cũ
-
-            int mainTfMinutes = ParseIntervalMinutesSafe(mainTf);
-            int trendTfMinutes = ParseIntervalMinutesSafe(trendTf);
-
-            await _notify.SendAsync(
-                $"[{symbol}] Monitor POSITION started... mode={profile.Tag} | mainTF={mainTf} trendTF={trendTf} | FLEX EXIT + TIME-STOP {profile.TimeStopBars}x{(useTrendTfForCore ? trendTfMinutes : mainTfMinutes)}m");
+            await _notify.SendAsync($"[{symbol}] Monitor POSITION started... mode={profile.Tag} | FLEX EXIT + TIME-STOP {profile.TimeStopBars}x{tfMinutes}m | trendTF={coinInfo.TrendTimeFrame}");
 
             try
             {
@@ -369,21 +363,19 @@ namespace FuturesBot.Services
                         }
                     }
 
-                    // =================== Fetch candles MAIN (throttle) ===================
-                    if ((DateTime.UtcNow - lastCandleFetchMainUtc) >= TimeSpan.FromSeconds(CandleFetchEverySec))
+                    // =================== Fetch MAIN candles (throttle) ===================
+                    if ((DateTime.UtcNow - lastCandleFetchUtc) >= TimeSpan.FromSeconds(CandleFetchEverySec))
                     {
-                        cachedCandlesMain = await _exchange.GetRecentCandlesAsync(symbol, mainTf, 180);
-                        lastCandleFetchMainUtc = DateTime.UtcNow;
+                        cachedCandles = await _exchange.GetRecentCandlesAsync(symbol, coinInfo.MainTimeFrame, 120);
+                        lastCandleFetchUtc = DateTime.UtcNow;
                     }
 
-                    // =================== Fetch candles TREND (throttle) ===================
-                    if (useTrendTfForCore)
+                    // =================== Fetch TREND candles (throttle) ===================
+                    if ((DateTime.UtcNow - lastTrendFetchUtc) >= TimeSpan.FromSeconds(CandleFetchEverySec))
                     {
-                        if ((DateTime.UtcNow - lastCandleFetchTrendUtc) >= TimeSpan.FromSeconds(CandleFetchEverySec))
-                        {
-                            cachedCandlesTrend = await _exchange.GetRecentCandlesAsync(symbol, trendTf, 180);
-                            lastCandleFetchTrendUtc = DateTime.UtcNow;
-                        }
+                        if (!string.IsNullOrWhiteSpace(coinInfo.TrendTimeFrame))
+                            trendCandles = await _exchange.GetRecentCandlesAsync(symbol, coinInfo.TrendTimeFrame, 160);
+                        lastTrendFetchUtc = DateTime.UtcNow;
                     }
 
                     // =================== Compute RR / risk (USD-based) + NET fee ===================
@@ -436,6 +428,26 @@ namespace FuturesBot.Services
                         netRr = netPnlUsd / riskUsd;
                     }
 
+                    // =================== ROI (margin-based, includes leverage) ===================
+                    decimal leverage = GetLeverageFromConfig(symbol, coinInfo);
+                    decimal initialMarginUsd = 0m;
+                    decimal roi = 0m;          // +0.30 => +30%
+                    decimal absLossRoi = 0m;   // 0.15 => -15% (abs)
+
+                    if (hasEntry && absQty > 0m && leverage > 0m)
+                    {
+                        decimal notional = entry * absQty;
+                        if (notional > 0m)
+                        {
+                            initialMarginUsd = notional / leverage;
+                            if (initialMarginUsd > 0m)
+                            {
+                                roi = netPnlUsd / initialMarginUsd;
+                                absLossRoi = Math.Max(0m, -netPnlUsd) / initialMarginUsd;
+                            }
+                        }
+                    }
+
                     // ===== plannedRR =====
                     decimal plannedRR = 0m;
                     if (hasEntry && hasSL && hasTP && riskPrice > 0m && IsValidTakeProfit(tp, isLongPosition, entry))
@@ -449,7 +461,7 @@ namespace FuturesBot.Services
                     bool inNoKillZone = plannedRR >= NoKillZonePlannedRR;
                     bool noAtrProtectForScalp = isScalp && plannedRR >= NoAtrProtectScalpPlannedRR;
 
-                    // ===== thresholds dynamic theo plannedRR =====
+                    // ===== thresholds dynamic theo plannedRR (giữ) =====
                     decimal effProtectAtRR = profile.ProtectAtRR;
                     decimal effQuickMinRR = profile.QuickTakeMinRR;
                     decimal effQuickGoodRR = profile.QuickTakeGoodRR;
@@ -465,11 +477,11 @@ namespace FuturesBot.Services
                         effTimeStopMinRR = Clamp(Math.Min(profile.TimeStopMinRR, plannedRR * 0.30m), 0.20m, profile.TimeStopMinRR);
                     }
 
-                    // ===== fee-safe min net profit gates =====
-                    decimal minProtectNetProfitUsd = Math.Max(profile.MinProtectProfitUsd, estFeeUsd * ProtectMinNetProfitVsFeeMult);
-                    decimal minQuickNetProfitUsd = Math.Max(profile.MinQuickTakeProfitUsd, estFeeUsd * QuickMinNetProfitVsFeeMult);
-                    decimal minEarlyNetProfitUsd = Math.Max(profile.EarlyExitMinProfitUsd, estFeeUsd * EarlyExitMinNetProfitVsFeeMult);
-                    decimal minBoundaryNetProfitUsd = Math.Max(profile.MinProtectProfitUsd, estFeeUsd * BoundaryExitMinNetProfitVsFeeMult);
+                    // ===== fee-safe min net profit gates (USD) - giữ để chống lock sớm =====
+                    decimal minProtectNetProfitUsd = estFeeUsd * ProtectMinNetProfitVsFeeMult;
+                    decimal minQuickNetProfitUsd = estFeeUsd * QuickMinNetProfitVsFeeMult;
+                    decimal minEarlyNetProfitUsd = estFeeUsd * EarlyExitMinNetProfitVsFeeMult;
+                    decimal minBoundaryNetProfitUsd = estFeeUsd * BoundaryExitMinNetProfitVsFeeMult;
 
                     if (isScalp)
                     {
@@ -522,58 +534,67 @@ namespace FuturesBot.Services
                     }
 
                     // =================== FLEX EXIT + TIME-STOP ===================
-                    // Core candles: Trend mode dùng TREND TF, các mode khác dùng MAIN TF
-                    var coreCandles = useTrendTfForCore ? cachedCandlesTrend : cachedCandlesMain;
-                    int coreTfMinutes = useTrendTfForCore ? trendTfMinutes : mainTfMinutes;
-
-                    // Emergency candles (dump/pump): luôn lấy MAIN TF để bảo vệ nhanh
-                    var emergencyCandles = cachedCandlesMain;
-
-                    if (!inGrace && coreCandles != null && coreCandles.Count >= 10 && hasEntry && canUseRR)
+                    if (!inGrace && cachedCandles != null && cachedCandles.Count >= 10 && hasEntry && canUseRR)
                     {
-                        var c0 = coreCandles[^2]; // last closed (CORE TF)
-                        var c1 = coreCandles[^3];
+                        var c0 = cachedCandles[^2]; // last closed MAIN TF
+                        var c1 = cachedCandles[^3];
 
                         if (!timeStopAnchorUtc.HasValue)
                             timeStopAnchorUtc = c0.OpenTime;
 
-                        decimal ema34 = ComputeEmaLast(coreCandles, 34);
-                        decimal ema89 = ComputeEmaLast(coreCandles, 89);
-                        decimal ema200 = ComputeEmaLast(coreCandles, 200);
+                        decimal ema34 = ComputeEmaLast(cachedCandles, 34);
+                        decimal ema89 = ComputeEmaLast(cachedCandles, 89);
+                        decimal ema200 = ComputeEmaLast(cachedCandles, 200);
 
                         decimal boundary = isLongPosition
                             ? GetDynamicBoundaryForLong(entry, ema34, ema89, ema200)
                             : GetDynamicBoundaryForShort(entry, ema34, ema89, ema200);
 
-                        bool weakening = IsWeakeningAfterMove(coreCandles, isLongPosition);
-                        decimal atr = ComputeAtr(coreCandles, AtrPeriod);
+                        bool weakening = IsWeakeningAfterMove(cachedCandles, isLongPosition);
+                        decimal atr = ComputeAtr(cachedCandles, AtrPeriod);
 
-                        bool stall = atr > 0m && IsStallByAtrRange(coreCandles, atr, profile.EarlyExitBars, StallRangeAtrFrac);
+                        bool stall = atr > 0m && IsStallByAtrRange(cachedCandles, atr, profile.EarlyExitBars, StallRangeAtrFrac);
                         bool nearBoundary = atr > 0m && boundary > 0m && Math.Abs(c0.Close - boundary) <= atr * NearBoundaryAtrFrac;
 
-                        // ===================== EMERGENCY (MAIN TF) =====================
-                        // Nếu có dump/pump mạnh trên MAIN TF thì vẫn kích hoạt dangerCandidate (để bảo vệ nhanh),
-                        // nhưng DANGER CONFIRM vẫn confirm trên CORE TF (Trend TF) như bản chất trend.
-                        bool emergencyCandidate = false;
-                        if (emergencyCandles != null && emergencyCandles.Count >= 4)
+                        // ===================== TREND TF STATE (NEW) =====================
+                        // Trend còn valid trên TrendTimeFrame => KHÔNG đóng uổng vì 5m đi ngang.
+                        bool trendValid = true;
+                        Candle? t0 = null;
+                        Candle? t1 = null;
+                        decimal trendBoundary = 0m;
+
+                        if (trendCandles != null && trendCandles.Count >= 30)
                         {
-                            var m0 = emergencyCandles[^2];
-                            var m1 = emergencyCandles[^3];
-                            emergencyCandidate = IsDangerImpulseReverse(m0, m1, isLongPosition);
+                            t0 = trendCandles[^2];
+                            t1 = trendCandles[^3];
+
+                            var tEma34 = ComputeEmaLast(trendCandles, 34);
+                            var tEma89 = ComputeEmaLast(trendCandles, 89);
+                            var tEma200 = ComputeEmaLast(trendCandles, 200);
+
+                            trendBoundary = isLongPosition
+                                ? GetDynamicBoundaryForLong(entry, tEma34, tEma89, tEma200)
+                                : GetDynamicBoundaryForShort(entry, tEma34, tEma89, tEma200);
+
+                            trendValid = IsTrendStillValid(trendCandles, isLongPosition, tEma89);
                         }
 
-                        // ===================== DANGER CONFIRM (CORE TF) =====================
-                        bool dangerCandidate =
-                            IsDangerImpulseReverse(c0, c1, isLongPosition)                 // impulse đảo chiều trên CORE TF
-                            || (boundary > 0 && IsBoundaryBroken(c0.Close, boundary, isLongPosition, profile.EmaBreakTolerance)) // break boundary CORE TF
-                            || emergencyCandidate;                                          // emergency MAIN TF
+                        // ===================== DANGER CONFIRM (TREND-BASED) =====================
+                        // Danger candidate:
+                        // - Impulse reverse trên MAIN TF (phản ứng nhanh)
+                        // - OR Trend TF boundary bị phá (đúng bản chất trend)
+                        bool dangerCandidateMainImpulse = IsDangerImpulseReverse(c0, c1, isLongPosition);
+                        bool dangerCandidateTrendBreak =
+                            (t0 != null && trendBoundary > 0m && IsBoundaryBroken(t0.Close, trendBoundary, isLongPosition, profile.EmaBreakTolerance));
+
+                        bool dangerCandidate = dangerCandidateMainImpulse || dangerCandidateTrendBreak;
 
                         bool reclaimed = false;
-                        if (atr > 0m && boundary > 0m)
+                        if (atr > 0m && trendBoundary > 0m && t0 != null)
                         {
                             reclaimed = isLongPosition
-                                ? c0.Close >= boundary + atr * ReclaimAtrFrac
-                                : c0.Close <= boundary - atr * ReclaimAtrFrac;
+                                ? t0.Close >= trendBoundary + atr * ReclaimAtrFrac
+                                : t0.Close <= trendBoundary - atr * ReclaimAtrFrac;
                         }
 
                         bool dangerHard = netRr <= DangerHardCutNetRr;
@@ -581,7 +602,7 @@ namespace FuturesBot.Services
                         bool dangerConfirmed = await ApplyDangerConfirmAsync(
                             symbol: symbol,
                             profile: profile,
-                            lastClosed: c0,                // IMPORTANT: dùng CORE TF candle để đếm bars confirm
+                            trendLastClosedOpenTime: t0?.OpenTime ?? c0.OpenTime, // IMPORTANT: confirm bars theo TREND TF
                             dangerCandidate: dangerCandidate,
                             reclaimed: reclaimed,
                             dangerHard: dangerHard,
@@ -589,7 +610,7 @@ namespace FuturesBot.Services
                             netPnlUsd: netPnlUsd);
 
                         // ======================================================================
-                        // MICRO PROFIT PROTECT (R-based) - IMPROVE
+                        // MICRO PROFIT PROTECT (R-based) - giữ nguyên (scale theo planned risk)
                         // ======================================================================
                         if (hasEntry && canUseRR)
                         {
@@ -687,24 +708,25 @@ namespace FuturesBot.Services
                         }
 
                         // ===== TIME-STOP (smarter + NO-KILL ZONE) =====
+                        // PATCH TREND: nếu trendValid=Y và dangerConfirmed=N => KHÔNG time-stop vì 5m sideway
                         if (!timeStopTriggered && timeStopAnchorUtc.HasValue)
                         {
-                            int barsPassed = CountClosedBarsSince(timeStopAnchorUtc.Value, c0.OpenTime, coreTfMinutes);
+                            int barsPassed = CountClosedBarsSince(timeStopAnchorUtc.Value, c0.OpenTime, tfMinutes);
 
                             bool timeStopConfirmBad = weakening || stall || nearBoundary || dangerConfirmed;
 
-                            bool allowTimeStop = !inNoKillZone
-                                || dangerConfirmed
-                                || (nearBoundary && stall);
+                            bool allowTimeStop = (!trendValid) || dangerConfirmed; // <-- PATCH
+
+                            allowTimeStop = allowTimeStop && (!inNoKillZone || dangerConfirmed || (nearBoundary && stall));
 
                             if (allowTimeStop && barsPassed >= profile.TimeStopBars && netRr < effTimeStopMinRR && timeStopConfirmBad)
                             {
                                 timeStopTriggered = true;
 
                                 await _notify.SendAsync(
-                                    $"[{symbol}] TIME-STOP({(useTrendTfForCore ? "TREND-TF" : "MAIN-TF")}): {barsPassed} bars({coreTfMinutes}m) netRr={netRr:F2} < {effTimeStopMinRR:F2}R + confirmBad={timeStopConfirmBad} " +
-                                    $"(stall={(stall ? "Y" : "N")} weak={(weakening ? "Y" : "N")} nearB={(nearBoundary ? "Y" : "N")} danger={(dangerConfirmed ? "Y" : "N")}) → close | " +
-                                    $"pnl={pnlUsd:F4} fee~{estFeeUsd:F4} net={netPnlUsd:F4} risk={riskUsd:F4} plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} | mode={profile.Tag}");
+                                    $"[{symbol}] TIME-STOP: {barsPassed} bars({tfMinutes}m) netRr={netRr:F2} < {effTimeStopMinRR:F2}R + confirmBad={timeStopConfirmBad} " +
+                                    $"(stall={(stall ? "Y" : "N")} weak={(weakening ? "Y" : "N")} nearB={(nearBoundary ? "Y" : "N")} danger={(dangerConfirmed ? "Y" : "N")} trendValid={(trendValid ? "Y" : "N")}) → close | " +
+                                    $"pnl={pnlUsd:F4} fee~{estFeeUsd:F4} net={netPnlUsd:F4} risk={riskUsd:F4} roi={(initialMarginUsd > 0 ? (roi * 100m).ToString("F1") + "%" : "NA")} plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} | mode={profile.Tag}");
 
                                 await _exchange.ClosePositionAsync(symbol, qty);
                                 await SafeCancelLeftoverProtectiveAsync(symbol);
@@ -713,19 +735,23 @@ namespace FuturesBot.Services
                             }
                         }
 
-                        // ===== EARLY EXIT (fee-safe) - NO-KILL ZONE: skip =====
+                        // ===== EARLY EXIT (ROI + fee-safe) - NO-KILL ZONE: skip =====
+                        // PATCH TREND: nếu trendValid=Y và dangerConfirmed=N => KHÔNG early-exit vì 5m giằng co
                         if (!inNoKillZone
                             && timeStopAnchorUtc.HasValue
                             && netPnlUsd >= minEarlyNetProfitUsd
-                            && netRr >= profile.EarlyExitMinRR)
+                            && netRr >= profile.EarlyExitMinRR
+                            && (initialMarginUsd > 0m ? roi >= profile.EarlyExitMinRoi : true)
+                            && (!trendValid || dangerConfirmed)) // <-- PATCH
                         {
-                            int barsPassed = CountClosedBarsSince(timeStopAnchorUtc.Value, c0.OpenTime, coreTfMinutes);
+                            int barsPassed = CountClosedBarsSince(timeStopAnchorUtc.Value, c0.OpenTime, tfMinutes);
 
                             if (barsPassed >= profile.EarlyExitBars && (weakening || stall || (nearBoundary && !dangerConfirmed)))
                             {
                                 await _notify.SendAsync(
-                                    $"[{symbol}] EARLY EXIT (NET+FEE, {(useTrendTfForCore ? "TREND-TF" : "MAIN-TF")}): bars={barsPassed} netRr={netRr:F2} net={netPnlUsd:F4} (pnl={pnlUsd:F4} fee~{estFeeUsd:F4} minNet={minEarlyNetProfitUsd:F4}) " +
-                                    $"atr={(atr > 0 ? atr.ToString("F4") : "0")} stall={(stall ? "Y" : "N")} weak={(weakening ? "Y" : "N")} nearB={(nearBoundary ? "Y" : "N")} plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} → close | mode={profile.Tag}");
+                                    $"[{symbol}] EARLY EXIT (ROI+FEE): bars={barsPassed} netRr={netRr:F2} roi={(initialMarginUsd > 0 ? (roi * 100m).ToString("F1") + "%" : "NA")} " +
+                                    $"net={netPnlUsd:F4} (fee~{estFeeUsd:F4} minNet={minEarlyNetProfitUsd:F4}) " +
+                                    $"atr={(atr > 0 ? atr.ToString("F4") : "0")} stall={(stall ? "Y" : "N")} weak={(weakening ? "Y" : "N")} nearB={(nearBoundary ? "Y" : "N")} trendValid={(trendValid ? "Y" : "N")} plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} → close | mode={profile.Tag}");
 
                                 await _exchange.ClosePositionAsync(symbol, qty);
                                 await SafeCancelLeftoverProtectiveAsync(symbol);
@@ -734,9 +760,10 @@ namespace FuturesBot.Services
                             }
                         }
 
-                        // ===== Profit protect (ATR-based) =====
+                        // ===== Profit protect (ATR-based) - ROI gate =====
                         if (netRr >= effProtectAtRR
                             && netPnlUsd >= minProtectNetProfitUsd
+                            && (initialMarginUsd > 0m ? roi >= profile.MinProtectRoi : true)
                             && hasSL
                             && IsValidStopLoss(sl, isLongPosition, entry))
                         {
@@ -769,7 +796,7 @@ namespace FuturesBot.Services
                                         {
                                             CommitTrailing(symbol, targetSL);
                                             await _notify.SendAsync(
-                                                $"[{symbol}] PROTECT BE(+FEE) (ANTI-KILL): plannedRR={plannedRR:F2} scalp forbid ATR lock. netRr={netRr:F2} net={netPnlUsd:F4} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
+                                                $"[{symbol}] PROTECT BE(+FEE) (ANTI-KILL): plannedRR={plannedRR:F2} scalp forbid ATR lock. netRr={netRr:F2} roi={(initialMarginUsd > 0 ? (roi * 100m).ToString("F1") + "%" : "NA")} net={netPnlUsd:F4} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
                                         }
                                         else
                                         {
@@ -825,7 +852,7 @@ namespace FuturesBot.Services
                                             {
                                                 CommitTrailing(symbol, beSl);
                                                 await _notify.SendAsync(
-                                                    $"[{symbol}] PROTECT BE(+FEE) (SCALP wait continuation): netRr={netRr:F2} net={netPnlUsd:F4} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
+                                                    $"[{symbol}] PROTECT BE(+FEE) (SCALP wait continuation): netRr={netRr:F2} roi={(initialMarginUsd > 0 ? (roi * 100m).ToString("F1") + "%" : "NA")} net={netPnlUsd:F4} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
                                             }
                                             else
                                             {
@@ -893,7 +920,9 @@ namespace FuturesBot.Services
                                     {
                                         CommitTrailing(symbol, targetSL);
                                         await _notify.SendAsync(
-                                            $"[{symbol}] PROTECT ATR (NET+FEE, {(useTrendTfForCore ? "TREND-TF" : "MAIN-TF")}): netRr={netRr:F2} net={netPnlUsd:F4} fee~{estFeeUsd:F4} minNet={minProtectNetProfitUsd:F4} atr={atr:F4} moved={(movedEnoughForProfitLock ? "Y" : "N")} plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
+                                            $"[{symbol}] PROTECT ATR (ROI+FEE): netRr={netRr:F2} roi={(initialMarginUsd > 0 ? (roi * 100m).ToString("F1") + "%" : "NA")} " +
+                                            $"net={netPnlUsd:F4} fee~{estFeeUsd:F4} minNet={minProtectNetProfitUsd:F4} atr={atr:F4} moved={(movedEnoughForProfitLock ? "Y" : "N")} " +
+                                            $"plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
                                     }
                                     else
                                     {
@@ -940,7 +969,9 @@ namespace FuturesBot.Services
                                     if (slDetected)
                                     {
                                         CommitTrailing(symbol, targetSL);
-                                        await _notify.SendAsync($"[{symbol}] PROTECT (fallback NET+FEE): netRr={netRr:F2} net={netPnlUsd:F4} plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
+                                        await _notify.SendAsync(
+                                            $"[{symbol}] PROTECT (fallback ROI+FEE): netRr={netRr:F2} roi={(initialMarginUsd > 0 ? (roi * 100m).ToString("F1") + "%" : "NA")} net={netPnlUsd:F4} " +
+                                            $"plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
                                     }
                                     else
                                     {
@@ -955,11 +986,17 @@ namespace FuturesBot.Services
                         // ===== Quick take - NO-KILL: skip trừ danger =====
                         bool allowQuickTake = !inNoKillZone || dangerConfirmed;
 
-                        if (allowQuickTake && netRr >= effQuickMinRR && netPnlUsd >= minQuickNetProfitUsd && weakening)
+                        if (allowQuickTake
+                            && netRr >= effQuickMinRR
+                            && netPnlUsd >= minQuickNetProfitUsd
+                            && (initialMarginUsd > 0m ? roi >= profile.MinQuickTakeRoi : true)
+                            && weakening)
                         {
                             if (netRr >= effQuickGoodRR || dangerConfirmed || IsOppositeStrongCandle(c0, isLongPosition))
                             {
-                                await _notify.SendAsync($"[{symbol}] QUICK TAKE (NET+FEE, {(useTrendTfForCore ? "TREND-TF" : "MAIN-TF")}): netRr={netRr:F2} net={netPnlUsd:F4} (fee~{estFeeUsd:F4} minNet={minQuickNetProfitUsd:F4}) plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} → close | mode={profile.Tag}");
+                                await _notify.SendAsync(
+                                    $"[{symbol}] QUICK TAKE (ROI+FEE): netRr={netRr:F2} roi={(initialMarginUsd > 0 ? (roi * 100m).ToString("F1") + "%" : "NA")} " +
+                                    $"net={netPnlUsd:F4} (fee~{estFeeUsd:F4} minNet={minQuickNetProfitUsd:F4}) plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} → close | mode={profile.Tag}");
                                 await _exchange.ClosePositionAsync(symbol, qty);
                                 await SafeCancelLeftoverProtectiveAsync(symbol);
                                 ClearDangerPending(symbol);
@@ -967,13 +1004,13 @@ namespace FuturesBot.Services
                             }
                         }
 
-                        // ===== Danger cut - CONFIRMED =====
+                        // ===== Danger cut - CONFIRMED (ROI loss gate) =====
                         if (netRr <= profile.DangerCutIfRRBelow && dangerConfirmed)
                         {
-                            var absLossUsd = Math.Max(0m, -netPnlUsd);
-                            if (absLossUsd >= profile.MinDangerCutAbsLossUsd)
+                            if (initialMarginUsd <= 0m || absLossRoi >= profile.MinDangerCutAbsLossRoi)
                             {
-                                await _notify.SendAsync($"[{symbol}] DANGER CUT (CONFIRMED, {(useTrendTfForCore ? "TREND-TF" : "MAIN-TF")}): netRr={netRr:F2} loss={absLossUsd:F4} + dangerConfirmed → close | mode={profile.Tag}");
+                                await _notify.SendAsync(
+                                    $"[{symbol}] DANGER CUT (CONFIRMED): netRr={netRr:F2} lossRoi={(initialMarginUsd > 0 ? (absLossRoi * 100m).ToString("F1") + "%" : "NA")} + dangerConfirmed → close | mode={profile.Tag}");
                                 await _exchange.ClosePositionAsync(symbol, qty);
                                 await SafeCancelLeftoverProtectiveAsync(symbol);
                                 ClearDangerPending(symbol);
@@ -981,10 +1018,15 @@ namespace FuturesBot.Services
                             }
                         }
 
-                        // ===== Exit on boundary break nếu đã dương chút - CONFIRMED =====
-                        if (dangerConfirmed && netRr >= 0.10m && netPnlUsd >= minBoundaryNetProfitUsd)
+                        // ===== Exit on boundary break nếu đã dương chút - CONFIRMED (ROI gate) =====
+                        if (dangerConfirmed
+                            && netRr >= 0.10m
+                            && netPnlUsd >= minBoundaryNetProfitUsd
+                            && (initialMarginUsd > 0m ? roi >= profile.MinBoundaryExitRoi : true))
                         {
-                            await _notify.SendAsync($"[{symbol}] EXIT ON BOUNDARY BREAK (CONFIRMED, {(useTrendTfForCore ? "TREND-TF" : "MAIN-TF")}): netRr={netRr:F2} net={netPnlUsd:F4} (fee~{estFeeUsd:F4} minNet={minBoundaryNetProfitUsd:F4}) plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} → close | mode={profile.Tag}");
+                            await _notify.SendAsync(
+                                $"[{symbol}] EXIT ON BOUNDARY BREAK (ROI+FEE): netRr={netRr:F2} roi={(initialMarginUsd > 0 ? (roi * 100m).ToString("F1") + "%" : "NA")} " +
+                                $"net={netPnlUsd:F4} (fee~{estFeeUsd:F4} minNet={minBoundaryNetProfitUsd:F4}) plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} → close | mode={profile.Tag}");
                             await _exchange.ClosePositionAsync(symbol, qty);
                             await SafeCancelLeftoverProtectiveAsync(symbol);
                             ClearDangerPending(symbol);
@@ -1340,6 +1382,28 @@ namespace FuturesBot.Services
         }
 
         // ============================================================
+        // TREND VALID (NEW): xác định trend còn sống trên Trend TF
+        // ============================================================
+
+        private static bool IsTrendStillValid(IReadOnlyList<Candle> trendCandles, bool isLong, decimal ema89)
+        {
+            if (trendCandles == null || trendCandles.Count < 5) return true;
+            if (ema89 <= 0m) return true;
+
+            var lastClosed = trendCandles[^2];
+            var prevClosed = trendCandles[^3];
+
+            // rule "vừa đủ đúng trend":
+            // LONG: close vẫn nằm trên/không phá EMA89 một cách rõ ràng
+            // SHORT: close vẫn nằm dưới/không phá EMA89 một cách rõ ràng
+            // (danger confirm mới xử khi phá boundary + confirm bars)
+            if (isLong)
+                return lastClosed.Close >= ema89 || prevClosed.Close >= ema89;
+            else
+                return lastClosed.Close <= ema89 || prevClosed.Close <= ema89;
+        }
+
+        // ============================================================
         //              FLEX EXIT HELPERS
         // ============================================================
 
@@ -1607,8 +1671,10 @@ namespace FuturesBot.Services
 
             string side = isLong ? "SELL" : "BUY";
 
+            // Place SL
             await _exchange.PlaceStopOnlyAsync(symbol, side, posSide, qty, newSL);
 
+            // verify SL tồn tại trên sàn, retry 1 lần nếu missing
             bool slDetected = false;
 
             await Task.Delay(250);
@@ -1628,6 +1694,7 @@ namespace FuturesBot.Services
                     await _notify.SendAsync($"[{symbol}] WARN: SL still missing after retry. (exchange lag/format?)");
             }
 
+            // Keep TP if needed
             if (hasTp && expectedTp.HasValue)
             {
                 var det = await DetectManualSlTpAsync(symbol, isLong, currentPos.EntryPrice, currentPos);
@@ -1972,6 +2039,37 @@ namespace FuturesBot.Services
         }
 
         // ============================================================
+        // Leverage from config (CoinInfo.Leverage) - NEW helper
+        // ============================================================
+
+        private decimal GetLeverageFromConfig(string symbol, CoinInfo? coinInfoFromCaller)
+        {
+            try
+            {
+                int lev = 0;
+
+                if (coinInfoFromCaller != null)
+                    lev = coinInfoFromCaller.Leverage;
+
+                if (lev <= 0 && _botConfig?.CoinInfos != null)
+                {
+                    var c = _botConfig.CoinInfos.FirstOrDefault(x =>
+                        string.Equals(x.Symbol, symbol, StringComparison.OrdinalIgnoreCase));
+                    if (c != null) lev = c.Leverage;
+                }
+
+                if (lev <= 0) lev = 1;
+                if (lev > 125) lev = 125;
+
+                return lev;
+            }
+            catch
+            {
+                return 1m;
+            }
+        }
+
+        // ============================================================
         // MAJOR detection + Danger confirm bars
         // ============================================================
 
@@ -1998,15 +2096,6 @@ namespace FuturesBot.Services
                 }
                 catch { }
 
-                try
-                {
-                    var p = coin.GetType().GetProperty("Major", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
-                         ?? coin.GetType().GetProperty("IsMain", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-                    var v2 = p?.GetValue(coin);
-                    if (v2 is bool b2) return b2;
-                }
-                catch { }
-
                 if (symbol.Equals("BTCUSDT", StringComparison.OrdinalIgnoreCase)) return true;
                 if (symbol.Equals("ETHUSDT", StringComparison.OrdinalIgnoreCase)) return true;
 
@@ -2026,13 +2115,13 @@ namespace FuturesBot.Services
         }
 
         // ============================================================
-        // DANGER CONFIRM (FIXED)
+        // DANGER CONFIRM (TREND-TF BASED)  ✅
         // ============================================================
 
         private async Task<bool> ApplyDangerConfirmAsync(
             string symbol,
             ModeProfile profile,
-            Candle lastClosed,
+            DateTime trendLastClosedOpenTime,
             bool dangerCandidate,
             bool reclaimed,
             bool dangerHard,
@@ -2051,16 +2140,12 @@ namespace FuturesBot.Services
                 return false;
             }
 
-            // HARD CUT
+            // HARD CUT (vẫn cho phép phản ứng nhanh theo 5m)
             if (dangerHard)
             {
-                var absLossUsd = Math.Max(0m, -netPnlUsd);
-                if (absLossUsd >= profile.MinDangerCutAbsLossUsd)
-                {
-                    await _notify.SendAsync($"[{symbol}] DANGER HARD (NET): netRr={netRr:F2} loss={absLossUsd:F4} → allow immediate cut | mode={profile.Tag}");
-                    ClearDangerPending(symbol);
-                    return true;
-                }
+                await _notify.SendAsync($"[{symbol}] DANGER HARD (NET): netRr={netRr:F2} net={netPnlUsd:F4} → allow immediate cut | mode={profile.Tag}");
+                ClearDangerPending(symbol);
+                return true;
             }
 
             int needBars = GetDangerConfirmBars(symbol);
@@ -2070,7 +2155,7 @@ namespace FuturesBot.Services
             {
                 _pendingDangerSinceUtc[symbol] = DateTime.UtcNow;
                 _pendingDangerBars[symbol] = 1;
-                _pendingDangerLastClosedOpenTime[symbol] = lastClosed.OpenTime;
+                _pendingDangerLastClosedOpenTime[symbol] = trendLastClosedOpenTime;
 
                 if (needBars <= 1)
                 {
@@ -2094,18 +2179,18 @@ namespace FuturesBot.Services
                 }
             }
 
-            // chỉ tăng bar khi sang nến đã đóng mới
+            // chỉ tăng bar khi sang nến TREND đã đóng mới
             if (_pendingDangerLastClosedOpenTime.TryGetValue(symbol, out var lastSeenOpen))
             {
-                if (lastSeenOpen != lastClosed.OpenTime)
+                if (lastSeenOpen != trendLastClosedOpenTime)
                 {
-                    _pendingDangerLastClosedOpenTime[symbol] = lastClosed.OpenTime;
+                    _pendingDangerLastClosedOpenTime[symbol] = trendLastClosedOpenTime;
                     _pendingDangerBars[symbol] = _pendingDangerBars.TryGetValue(symbol, out var b) ? (b + 1) : 1;
                 }
             }
             else
             {
-                _pendingDangerLastClosedOpenTime[symbol] = lastClosed.OpenTime;
+                _pendingDangerLastClosedOpenTime[symbol] = trendLastClosedOpenTime;
                 _pendingDangerBars[symbol] = 1;
             }
 
@@ -2120,16 +2205,12 @@ namespace FuturesBot.Services
 
             return false;
         }
+    }
 
-        // ============================================================
-        // FEE STATS INNER
-        // ============================================================
-
-        private sealed class FeeStats
-        {
-            public decimal EwmaRate { get; set; } = DefaultTakerFeeRate;
-            public int Samples { get; set; } = 0;
-            public DateTime LastUpdateUtc { get; set; } = DateTime.MinValue;
-        }
+    internal sealed class FeeStats
+    {
+        public decimal EwmaRate { get; set; }
+        public int Samples { get; set; }
+        public DateTime LastUpdateUtc { get; set; }
     }
 }
