@@ -20,9 +20,13 @@ namespace FuturesBot.Services
     /// PATCH 5 ĐIỂM (giảm miss nhưng vẫn giữ winrate):
     /// 1) Fix touchA: cho phép xuyên sâu (không bắt Low/High nằm trong band)
     /// 2) Nới ConfirmBodyToRangeMin theo Major/Alt
-    /// 3) Volume gate: dùng OR + có "override" khi 1 yếu nhưng 1 rất mạnh
+    /// 3) Volume gate: dùng AND + có "override" khi 1 yếu nhưng 1 rất mạnh
     /// 4) Sideway SL: tính theo swing*(1±StopBufferPercent) (không cộng entry*%)
     /// 5) Trend weak tolerance + RR giảm + require hard confirm khi trend yếu
+    ///
+    /// FIXES (IMPORTANT):
+    /// A) Fix Climax check dùng đúng EMA theo index (iT / iT-1), tránh dùng ema34_T[iT] cho iT-1
+    /// B) Fix Market Structure swing: KHÔNG dùng future candle vượt quá nến đã đóng (endIdxClosed = iT)
     /// </summary>
     public class TradingStrategy : IStrategyService
     {
@@ -253,7 +257,7 @@ namespace FuturesBot.Services
             decimal medianVolUsd = GetMedianVolUsd(candlesTrend, iT, VolumeMedianLookback);
             decimal ratioVsMedian = medianVolUsd > 0 ? (volUsdTrend / medianVolUsd) : 1m;
 
-            // PATCH #3: Volume gate OR + override
+            // PATCH #3: Volume gate AND + override
             if (!IsVolumeOkTrend(isMajor, volUsdTrend, ratioVsMedian))
             {
                 return new TradeSignal
@@ -294,10 +298,10 @@ namespace FuturesBot.Services
             }
 
             // ================= FILTER: CLIMAX + OVEREXTENDED (TREND TF) =================
-
+            // FIX A: dùng EMA đúng index theo candle đang check (iT / iT-1)
             bool climaxDanger =
-                IsClimaxAwayFromEma(candlesTrend, iT, ema34_T[iT], ema89T, ema200T) ||
-                IsClimaxAwayFromEma(candlesTrend, iT - 1, ema34_T[iT], ema89T, ema200T);
+                IsClimaxAwayFromEma(candlesTrend, iT, ema34_T[iT], ema89_T[iT], ema200_T[iT]) ||
+                IsClimaxAwayFromEma(candlesTrend, iT - 1, ema34_T[iT - 1], ema89_T[iT - 1], ema200_T[iT - 1]);
 
             if (climaxDanger)
             {
@@ -374,6 +378,7 @@ namespace FuturesBot.Services
                 rsiT[iT] < ExtremeRsiLow;
 
             // =================== MARKET STRUCTURE (TREND TF) ==================
+            // FIX B: chỉ dùng nến đã đóng đến iT (KHÔNG dùng candles.Count-1 đang chạy để xác nhận swing)
             decimal stTol = isMajor ? StructureBreakToleranceMajor : StructureBreakToleranceAlt;
             var (lowerHigh, higherLow, lastSwingHigh, prevSwingHigh, lastSwingLow, prevSwingLow)
                 = DetectMarketStructure(candlesTrend, iT, stTol);
@@ -1614,7 +1619,7 @@ namespace FuturesBot.Services
             return (list.Count % 2 == 1) ? list[mid] : (list[mid - 1] + list[mid]) / 2m;
         }
 
-        // PATCH #3: volume gate OR + override
+        // PATCH #3: volume gate AND + override (ổn định winrate hơn OR; override cho case 1 yếu 1 mạnh)
         private bool IsVolumeOkTrend(bool isMajor, decimal volUsdTrend, decimal ratioVsMedian)
         {
             if (volUsdTrend <= 0) return false;
@@ -1625,7 +1630,7 @@ namespace FuturesBot.Services
             bool absOk = volUsdTrend >= minAbs;
             bool ratioOk = ratioVsMedian >= minRatio;
 
-            // OR gate: chỉ cần 1 fail là block
+            // BASIC: yêu cầu đủ cả 2 (AND)
             bool basicOk = absOk && ratioOk;
 
             if (basicOk) return true;
@@ -1642,9 +1647,11 @@ namespace FuturesBot.Services
         //                MARKET STRUCTURE HELPERS (Lower-High / Higher-Low)
         // =====================================================================
 
-        private bool IsSwingHigh(IReadOnlyList<Candle> candles, int i, int strength)
+        // FIX B: swing phải chỉ được xác nhận bằng candles <= endIdxClosed (không dùng candle đang chạy)
+        private bool IsSwingHigh(IReadOnlyList<Candle> candles, int i, int strength, int endIdxClosed)
         {
-            if (i - strength < 0 || i + strength >= candles.Count) return false;
+            if (i - strength < 0) return false;
+            if (i + strength > endIdxClosed) return false;
 
             var h = candles[i].High;
             for (int k = 1; k <= strength; k++)
@@ -1655,9 +1662,10 @@ namespace FuturesBot.Services
             return true;
         }
 
-        private bool IsSwingLow(IReadOnlyList<Candle> candles, int i, int strength)
+        private bool IsSwingLow(IReadOnlyList<Candle> candles, int i, int strength, int endIdxClosed)
         {
-            if (i - strength < 0 || i + strength >= candles.Count) return false;
+            if (i - strength < 0) return false;
+            if (i + strength > endIdxClosed) return false;
 
             var l = candles[i].Low;
             for (int k = 1; k <= strength; k++)
@@ -1668,14 +1676,14 @@ namespace FuturesBot.Services
             return true;
         }
 
-        private List<(int idx, decimal price)> GetRecentSwingHighs(IReadOnlyList<Candle> candles, int endIdx, int maxLookback, int strength)
+        private List<(int idx, decimal price)> GetRecentSwingHighs(IReadOnlyList<Candle> candles, int endIdxClosed, int maxLookback, int strength)
         {
             var res = new List<(int, decimal)>();
-            int start = Math.Max(0, endIdx - maxLookback);
+            int start = Math.Max(0, endIdxClosed - maxLookback);
 
-            for (int i = endIdx - strength; i >= start + strength; i--)
+            for (int i = endIdxClosed - strength; i >= start + strength; i--)
             {
-                if (IsSwingHigh(candles, i, strength))
+                if (IsSwingHigh(candles, i, strength, endIdxClosed))
                 {
                     res.Add((i, candles[i].High));
                     if (res.Count >= 5) break;
@@ -1684,14 +1692,14 @@ namespace FuturesBot.Services
             return res;
         }
 
-        private List<(int idx, decimal price)> GetRecentSwingLows(IReadOnlyList<Candle> candles, int endIdx, int maxLookback, int strength)
+        private List<(int idx, decimal price)> GetRecentSwingLows(IReadOnlyList<Candle> candles, int endIdxClosed, int maxLookback, int strength)
         {
             var res = new List<(int, decimal)>();
-            int start = Math.Max(0, endIdx - maxLookback);
+            int start = Math.Max(0, endIdxClosed - maxLookback);
 
-            for (int i = endIdx - strength; i >= start + strength; i--)
+            for (int i = endIdxClosed - strength; i >= start + strength; i--)
             {
-                if (IsSwingLow(candles, i, strength))
+                if (IsSwingLow(candles, i, strength, endIdxClosed))
                 {
                     res.Add((i, candles[i].Low));
                     if (res.Count >= 5) break;
@@ -1701,10 +1709,10 @@ namespace FuturesBot.Services
         }
 
         private (bool lowerHigh, bool higherLow, decimal lastSwingHigh, decimal prevSwingHigh, decimal lastSwingLow, decimal prevSwingLow)
-            DetectMarketStructure(IReadOnlyList<Candle> candlesTrend, int iT, decimal tol)
+            DetectMarketStructure(IReadOnlyList<Candle> candlesTrend, int endIdxClosed, decimal tol)
         {
-            var highs = GetRecentSwingHighs(candlesTrend, iT, StructureMaxLookbackBars, StructureSwingStrength);
-            var lows = GetRecentSwingLows(candlesTrend, iT, StructureMaxLookbackBars, StructureSwingStrength);
+            var highs = GetRecentSwingHighs(candlesTrend, endIdxClosed, StructureMaxLookbackBars, StructureSwingStrength);
+            var lows = GetRecentSwingLows(candlesTrend, endIdxClosed, StructureMaxLookbackBars, StructureSwingStrength);
 
             decimal lastH = 0m, prevH = 0m, lastL = 0m, prevL = 0m;
             bool lh = false, hl = false;
