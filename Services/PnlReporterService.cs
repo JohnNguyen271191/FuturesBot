@@ -155,13 +155,13 @@ PnL   : {trade.PnlUSDT:F2} USDT";
             var pnlPercent = totalPnl / _dailyBaseCapital;
             var cooldownDuration = TimeSpan.FromHours(botConfig.CooldownDuration);
             var vnTimeZone = TimeZoneInfo.FindSystemTimeZoneById("Asia/Ho_Chi_Minh");
-
+            var cooldownVnTime = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow.Add(cooldownDuration), vnTimeZone);
             // Thua >= 5% → cooldown dựa vào cooldownDuration
             if (pnlPercent <= -botConfig.MaxDailyLossPercent)
             {
-                _cooldownUntil = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow.Add(cooldownDuration), vnTimeZone);
+                _cooldownUntil = DateTime.UtcNow.Add(cooldownDuration);
                 
-                await _notifier.SendAsync($":warning: DAILY COOLDOWN TRIGGERED — Lỗ {pnlPercent:P2} (~{totalPnl:F2} USDT trên vốn {_dailyBaseCapital:F2}) → nghỉ {cooldownDuration.TotalHours} giờ, tới {_cooldownUntil:HH:mm} UTC.");
+                await _notifier.SendAsync($":warning: DAILY COOLDOWN TRIGGERED — Lỗ {pnlPercent:P2} (~{totalPnl:F2} USDT trên vốn {_dailyBaseCapital:F2}) → nghỉ {cooldownDuration.TotalHours} giờ, tới {cooldownVnTime:HH:mm}.");
 
                 return;
             }
@@ -169,9 +169,9 @@ PnL   : {trade.PnlUSDT:F2} USDT";
             // Lãi >= 5% → cooldown dựa vào cooldownDuration
             if (pnlPercent >= botConfig.MaxDailyLossPercent)
             {
-                _cooldownUntil = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow.Add(cooldownDuration), vnTimeZone);
+                _cooldownUntil = DateTime.UtcNow.Add(cooldownDuration);
 
-                await _notifier.SendAsync($":tada: DAILY COOLDOWN TRIGGERED — Lãi {pnlPercent:P2} (~{totalPnl:F2} USDT trên vốn {_dailyBaseCapital:F2}) → nghỉ {cooldownDuration.TotalHours} giờ, tới {_cooldownUntil:HH:mm} UTC.");
+                await _notifier.SendAsync($":tada: DAILY COOLDOWN TRIGGERED — Lãi {pnlPercent:P2} (~{totalPnl:F2} USDT trên vốn {_dailyBaseCapital:F2}) → nghỉ {cooldownDuration.TotalHours} giờ, tới {cooldownVnTime:HH:mm}.");
             }
         }
     }
