@@ -154,12 +154,13 @@ PnL   : {trade.PnlUSDT:F2} USDT";
             var totalPnl = tradesToday.Sum(t => t.PnlUSDT);
             var pnlPercent = totalPnl / _dailyBaseCapital;
             var cooldownDuration = TimeSpan.FromHours(botConfig.CooldownDuration);
+            var vnTimeZone = TimeZoneInfo.FindSystemTimeZoneById("Asia/Ho_Chi_Minh");
 
             // Thua >= 5% → cooldown dựa vào cooldownDuration
             if (pnlPercent <= -botConfig.MaxDailyLossPercent)
             {
-                _cooldownUntil = DateTime.UtcNow.Add(cooldownDuration);
-
+                _cooldownUntil = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow.Add(cooldownDuration), vnTimeZone);
+                
                 await _notifier.SendAsync($":warning: DAILY COOLDOWN TRIGGERED — Lỗ {pnlPercent:P2} (~{totalPnl:F2} USDT trên vốn {_dailyBaseCapital:F2}) → nghỉ {cooldownDuration.TotalHours} giờ, tới {_cooldownUntil:HH:mm} UTC.");
 
                 return;
@@ -168,7 +169,7 @@ PnL   : {trade.PnlUSDT:F2} USDT";
             // Lãi >= 5% → cooldown dựa vào cooldownDuration
             if (pnlPercent >= botConfig.MaxDailyLossPercent)
             {
-                _cooldownUntil = DateTime.UtcNow.Add(cooldownDuration);
+                _cooldownUntil = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow.Add(cooldownDuration), vnTimeZone);
 
                 await _notifier.SendAsync($":tada: DAILY COOLDOWN TRIGGERED — Lãi {pnlPercent:P2} (~{totalPnl:F2} USDT trên vốn {_dailyBaseCapital:F2}) → nghỉ {cooldownDuration.TotalHours} giờ, tới {_cooldownUntil:HH:mm} UTC.");
             }
