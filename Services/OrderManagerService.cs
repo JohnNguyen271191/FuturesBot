@@ -22,6 +22,10 @@ namespace FuturesBot.Services
     /// - 5m (MainTimeFrame) chỉ dùng để:
     ///   + time-stop / stall / weakening (nhưng sẽ KHÔNG đóng uổng nếu trend TF còn valid)
     ///   + safety phản ứng nhanh khi có dump/pump mạnh (impulse) -> vẫn được phép danger hard
+    ///
+    /// PATCH: MICRO SCALP ONLY ✅
+    /// - Micro Take/Lock (R-based) chỉ chạy khi mode=Scalp
+    /// - Trend mode sẽ KHÔNG bị micro kéo SL/đóng sớm nữa
     /// </summary>
     public class OrderManagerService
     {
@@ -458,6 +462,7 @@ namespace FuturesBot.Services
                     }
 
                     bool isScalp = signal.Mode == TradeMode.Scalp;
+                    bool enableMicro = isScalp; // ✅ MICRO SCALP ONLY
                     bool inNoKillZone = plannedRR >= NoKillZonePlannedRR;
                     bool noAtrProtectForScalp = isScalp && plannedRR >= NoAtrProtectScalpPlannedRR;
 
@@ -610,9 +615,9 @@ namespace FuturesBot.Services
                             netPnlUsd: netPnlUsd);
 
                         // ======================================================================
-                        // MICRO PROFIT PROTECT (R-based) - giữ nguyên (scale theo planned risk)
+                        // MICRO PROFIT PROTECT (R-based) - ✅ SCALP ONLY
                         // ======================================================================
-                        if (hasEntry && canUseRR)
+                        if (enableMicro && hasEntry && canUseRR)
                         {
                             decimal plannedRiskUsd = GetPlannedRiskUsdFromConfig(symbol);
 
@@ -1393,10 +1398,6 @@ namespace FuturesBot.Services
             var lastClosed = trendCandles[^2];
             var prevClosed = trendCandles[^3];
 
-            // rule "vừa đủ đúng trend":
-            // LONG: close vẫn nằm trên/không phá EMA89 một cách rõ ràng
-            // SHORT: close vẫn nằm dưới/không phá EMA89 một cách rõ ràng
-            // (danger confirm mới xử khi phá boundary + confirm bars)
             if (isLong)
                 return lastClosed.Close >= ema89 || prevClosed.Close >= ema89;
             else
