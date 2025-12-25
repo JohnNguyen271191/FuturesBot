@@ -788,6 +788,114 @@ namespace FuturesBot.Services
             return list;
         }
 
+
+
+        /// <summary>
+        /// Sum commission (USDT only) bằng /fapi/v1/userTrades
+        /// - Vẫn có thể nới window để query tránh miss biên
+        /// - Nhưng khi CỘNG commission phải lọc theo [fromUtc, toUtc] STRICT (không ăn fee của ngày trước)
+        /// - Paginate bằng fromId để không miss/loop
+        /// </summary>
+        public async Task<decimal> GetCommissionFromUserTradesAsync(string symbol, DateTime fromUtc, DateTime toUtc)
+        {
+            if (_config.PaperMode) return 0m;
+
+            // STRICT window: đúng khoảng thời gian caller muốn (vd: start-of-day -> now)
+            long strictStartMs = new DateTimeOffset(fromUtc).ToUnixTimeMilliseconds();
+            long strictEndMs = new DateTimeOffset(toUtc).ToUnixTimeMilliseconds();
+
+            if (strictEndMs < strictStartMs)
+                return 0m;
+
+            // Query window: nới nhẹ để tránh miss trade biên do clock/network
+            // (NHƯNG KHÔNG dùng query window để tính toán)
+            var queryFrom = fromUtc.AddSeconds(-10);
+            var queryTo = toUtc.AddSeconds(10);
+            long queryStartMs = new DateTimeOffset(queryFrom).ToUnixTimeMilliseconds();
+            long queryEndMs = new DateTimeOffset(queryTo).ToUnixTimeMilliseconds();
+
+            const int limit = 1000;
+            decimal totalCommission = 0m;
+
+            long? fromId = null;
+
+            // safety: chống loop vô hạn
+            for (int guard = 0; guard < 50; guard++)
+            {
+                var query = new Dictionary<string, string>
+                {
+                    ["symbol"] = symbol,
+                    ["startTime"] = queryStartMs.ToString(CultureInfo.InvariantCulture),
+                    ["endTime"] = queryEndMs.ToString(CultureInfo.InvariantCulture),
+                    ["limit"] = limit.ToString(CultureInfo.InvariantCulture),
+                    ["recvWindow"] = "60000"
+                };
+
+                if (fromId.HasValue)
+                    query["fromId"] = fromId.Value.ToString(CultureInfo.InvariantCulture);
+
+                var json = await SignedGetAsync(_config.Urls.UserTradesUrl, query);
+
+                using var doc = JsonDocument.Parse(json);
+                var arr = doc.RootElement;
+
+                if (arr.ValueKind != JsonValueKind.Array || arr.GetArrayLength() == 0)
+                    break;
+
+                long maxId = -1;
+
+                foreach (var el in arr.EnumerateArray())
+                {
+                    long t = el.GetProperty("time").GetInt64();
+
+                    // ✅ IMPORTANT: lọc theo STRICT, không lọc theo query window
+                    //if (t < strictStartMs || t > strictEndMs)
+                    //continue;
+
+                    long id = el.GetProperty("id").GetInt64();
+                    if (id > maxId) maxId = id;
+
+                    var asset = el.GetProperty("commissionAsset").GetString();
+                    if (!string.Equals(asset, "USDT", StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    var commStr = el.GetProperty("commission").GetString();
+                    if (!decimal.TryParse(commStr, NumberStyles.Float, CultureInfo.InvariantCulture, out var comm))
+                        continue;
+
+                    // Chuẩn hoá: commission luôn là số âm (Binance thường trả chuỗi dương)
+                    comm = -Math.Abs(comm);
+
+                    totalCommission += comm;
+                }
+
+                // Nếu page < limit => hết dữ liệu
+                if (arr.GetArrayLength() < limit)
+                    break;
+
+                // Nếu không bắt được maxId (do tất cả nằm ngoài strict window),
+                // vẫn cần tiến fromId để tránh lặp page.
+                if (maxId < 0)
+                {
+                    // fallback: lấy id lớn nhất của page
+                    long pageMax = -1;
+                    foreach (var el in arr.EnumerateArray())
+                    {
+                        var id = el.GetProperty("id").GetInt64();
+                        if (id > pageMax) pageMax = id;
+                    }
+                    if (pageMax < 0) break;
+
+                    fromId = pageMax + 1;
+                    continue;
+                }
+
+                fromId = maxId + 1;
+            }
+
+            return totalCommission;
+        }
+
         // ==========================
         //       PRIVATE HELPERS
         // ==========================
@@ -910,112 +1018,6 @@ namespace FuturesBot.Services
             }
 
             return list;
-        }
-
-        /// <summary>
-        /// Sum commission (USDT only) bằng /fapi/v1/userTrades
-        /// - Vẫn có thể nới window để query tránh miss biên
-        /// - Nhưng khi CỘNG commission phải lọc theo [fromUtc, toUtc] STRICT (không ăn fee của ngày trước)
-        /// - Paginate bằng fromId để không miss/loop
-        /// </summary>
-        private async Task<decimal> GetCommissionFromUserTradesAsync(string symbol, DateTime fromUtc, DateTime toUtc)
-        {
-            if (_config.PaperMode) return 0m;
-
-            // STRICT window: đúng khoảng thời gian caller muốn (vd: start-of-day -> now)
-            long strictStartMs = new DateTimeOffset(fromUtc).ToUnixTimeMilliseconds();
-            long strictEndMs = new DateTimeOffset(toUtc).ToUnixTimeMilliseconds();
-
-            if (strictEndMs < strictStartMs)
-                return 0m;
-
-            // Query window: nới nhẹ để tránh miss trade biên do clock/network
-            // (NHƯNG KHÔNG dùng query window để tính toán)
-            var queryFrom = fromUtc.AddSeconds(-10);
-            var queryTo = toUtc.AddSeconds(10);
-            long queryStartMs = new DateTimeOffset(queryFrom).ToUnixTimeMilliseconds();
-            long queryEndMs = new DateTimeOffset(queryTo).ToUnixTimeMilliseconds();
-
-            const int limit = 1000;
-            decimal totalCommission = 0m;
-
-            long? fromId = null;
-
-            // safety: chống loop vô hạn
-            for (int guard = 0; guard < 50; guard++)
-            {
-                var query = new Dictionary<string, string>
-                {
-                    ["symbol"] = symbol,
-                    ["startTime"] = queryStartMs.ToString(CultureInfo.InvariantCulture),
-                    ["endTime"] = queryEndMs.ToString(CultureInfo.InvariantCulture),
-                    ["limit"] = limit.ToString(CultureInfo.InvariantCulture),
-                    ["recvWindow"] = "60000"
-                };
-
-                if (fromId.HasValue)
-                    query["fromId"] = fromId.Value.ToString(CultureInfo.InvariantCulture);
-
-                var json = await SignedGetAsync(_config.Urls.UserTradesUrl, query);
-
-                using var doc = JsonDocument.Parse(json);
-                var arr = doc.RootElement;
-
-                if (arr.ValueKind != JsonValueKind.Array || arr.GetArrayLength() == 0)
-                    break;
-
-                long maxId = -1;
-
-                foreach (var el in arr.EnumerateArray())
-                {
-                    long t = el.GetProperty("time").GetInt64();
-
-                    // ✅ IMPORTANT: lọc theo STRICT, không lọc theo query window
-                    //if (t < strictStartMs || t > strictEndMs)
-                        //continue;
-
-                    long id = el.GetProperty("id").GetInt64();
-                    if (id > maxId) maxId = id;
-
-                    var asset = el.GetProperty("commissionAsset").GetString();
-                    if (!string.Equals(asset, "USDT", StringComparison.OrdinalIgnoreCase))
-                        continue;
-
-                    var commStr = el.GetProperty("commission").GetString();
-                    if (!decimal.TryParse(commStr, NumberStyles.Float, CultureInfo.InvariantCulture, out var comm))
-                        continue;
-
-                    // Chuẩn hoá: commission luôn là số âm (Binance thường trả chuỗi dương)
-                    comm = -Math.Abs(comm);
-
-                    totalCommission += comm;
-                }
-
-                // Nếu page < limit => hết dữ liệu
-                if (arr.GetArrayLength() < limit)
-                    break;
-
-                // Nếu không bắt được maxId (do tất cả nằm ngoài strict window),
-                // vẫn cần tiến fromId để tránh lặp page.
-                if (maxId < 0)
-                {
-                    // fallback: lấy id lớn nhất của page
-                    long pageMax = -1;
-                    foreach (var el in arr.EnumerateArray())
-                    {
-                        var id = el.GetProperty("id").GetInt64();
-                        if (id > pageMax) pageMax = id;
-                    }
-                    if (pageMax < 0) break;
-
-                    fromId = pageMax + 1;
-                    continue;
-                }
-
-                fromId = maxId + 1;
-            }
-
-            return totalCommission;
         }
 
         private async Task CancelAlgoOrderByIdAsync(long algoId)

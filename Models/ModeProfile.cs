@@ -56,7 +56,6 @@ namespace FuturesBot.Models
                     EarlyExitBars = 8,
                     EarlyExitMinRR = 0.10m,
 
-                    // ROI-based (NEW) - mày có thể chỉnh đúng khẩu vị
                     MinProtectRoi = 0.20m,         // +20% margin => bắt đầu protect
                     MinQuickTakeRoi = 0.30m,       // +30% margin => quick take nếu weakening
                     EarlyExitMinRoi = 0.18m,       // +18% margin => early-exit nếu stall/weak
@@ -113,8 +112,8 @@ namespace FuturesBot.Models
                     EarlyExitMinRR = 0.20m,
 
                     // ROI-based (NEW)
-                    MinProtectRoi = 0.25m,
-                    MinQuickTakeRoi = 0.40m,
+                    MinProtectRoi = 0.3m,
+                    MinQuickTakeRoi = 0.5m,
                     EarlyExitMinRoi = 0.22m,
                     MinBoundaryExitRoi = 0.16m,
                     MinDangerCutAbsLossRoi = 0.20m,

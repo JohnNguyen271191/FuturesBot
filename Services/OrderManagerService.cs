@@ -1,9 +1,4 @@
-using System;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.Linq;
-using System.Reflection;
-using System.Threading.Tasks;
 using FuturesBot.Config;
 using FuturesBot.IServices;
 using FuturesBot.Models;
@@ -17,7 +12,7 @@ namespace FuturesBot.Services
     /// - Tất cả gate profit/loss theo % margin (có leverage), tránh hardcode USD
     ///
     /// PATCH "ĐÚNG BẢN CHẤT TREND" (theo yêu cầu):
-    /// - Trend TF lấy từ coinInfo.TrendTimeFrame (mày define riêng từng coin)
+    /// - Trend TF lấy từ coinInfo.TrendTimeFrame
     /// - DANGER confirm chỉ "đúng nghĩa" khi TREND TF bị phá (confirm theo Trend TF)
     /// - 5m (MainTimeFrame) chỉ dùng để:
     ///   + time-stop / stall / weakening (nhưng sẽ KHÔNG đóng uổng nếu trend TF còn valid)
@@ -97,9 +92,6 @@ namespace FuturesBot.Services
 
         private readonly ConcurrentDictionary<string, FeeStats> _feeStatsBySymbol = new(StringComparer.OrdinalIgnoreCase);
 
-        // =============== Debug throttle ===========================
-        private readonly ConcurrentDictionary<string, DateTime> _lastMissingLogUtc = new();
-
         // PATCH: trailing throttle per symbol
         private readonly ConcurrentDictionary<string, DateTime> _lastTrailingUpdateUtc = new();
         private readonly ConcurrentDictionary<string, decimal> _lastTrailingSl = new();
@@ -173,7 +165,7 @@ namespace FuturesBot.Services
                     if (elapsed > profile.LimitTimeout)
                     {
                         await _notify.SendAsync($"[{symbol}] LIMIT quá {profile.LimitTimeout.TotalMinutes:F0} phút chưa khớp → cancel open orders và stop LIMIT monitor.");
-                        await SafeCancelAllOpenOrdersBothAsync(symbol);
+                        await _exchange.CancelAllOpenOrdersAsync(symbol);
                         return;
                     }
 
@@ -237,7 +229,7 @@ namespace FuturesBot.Services
                     if (broken)
                     {
                         await _notify.SendAsync($"[{symbol}] LIMIT setup broke (mode={profile.Tag}) → cancel open orders...");
-                        await SafeCancelAllOpenOrdersBothAsync(symbol);
+                        await _exchange.CancelAllOpenOrdersAsync(symbol);
                         return;
                     }
                 }
@@ -280,7 +272,6 @@ namespace FuturesBot.Services
             DateTime lastTrendFetchUtc = DateTime.MinValue;
             IReadOnlyList<Candle>? trendCandles = null;
             int trendTfMinutes = ParseIntervalMinutesSafe(coinInfo.TrendTimeFrame);
-            if (trendTfMinutes <= 0) trendTfMinutes = 30;
 
             var positionMonitorStartedUtc = DateTime.UtcNow;
 
@@ -309,7 +300,7 @@ namespace FuturesBot.Services
                         await TryAdaptiveFeeUpdateOnCloseAsync(symbol, lastKnownEntry, lastKnownMarkPrice, lastKnownAbsQty);
 
                         await _notify.SendAsync($"[{symbol}] Position closed → stop monitor.");
-                        await SafeCancelLeftoverProtectiveAsync(symbol);
+                        await _exchange.CancelAllOpenOrdersAsync(symbol);
                         ClearDangerPending(symbol);
                         return;
                     }
@@ -433,7 +424,7 @@ namespace FuturesBot.Services
                     }
 
                     // =================== ROI (margin-based, includes leverage) ===================
-                    decimal leverage = GetLeverageFromConfig(symbol, coinInfo);
+                    decimal leverage = coinInfo.Leverage;
                     decimal initialMarginUsd = 0m;
                     decimal roi = 0m;          // +0.30 => +30%
                     decimal absLossRoi = 0m;   // 0.15 => -15% (abs)
@@ -462,7 +453,7 @@ namespace FuturesBot.Services
                     }
 
                     bool isScalp = signal.Mode == TradeMode.Scalp;
-                    bool enableMicro = isScalp; // ✅ MICRO SCALP ONLY
+                    bool enableMicro = isScalp;
                     bool inNoKillZone = plannedRR >= NoKillZonePlannedRR;
                     bool noAtrProtectForScalp = isScalp && plannedRR >= NoAtrProtectScalpPlannedRR;
 
@@ -532,7 +523,7 @@ namespace FuturesBot.Services
                                 await _exchange.ClosePositionAsync(symbol, qty);
                             }
 
-                            await SafeCancelLeftoverProtectiveAsync(symbol);
+                            await _exchange.CancelAllOpenOrdersAsync(symbol);
                             ClearDangerPending(symbol);
                             return;
                         }
@@ -605,21 +596,22 @@ namespace FuturesBot.Services
                         bool dangerHard = netRr <= DangerHardCutNetRr;
 
                         bool dangerConfirmed = await ApplyDangerConfirmAsync(
-                            symbol: symbol,
-                            profile: profile,
-                            trendLastClosedOpenTime: t0?.OpenTime ?? c0.OpenTime, // IMPORTANT: confirm bars theo TREND TF
-                            dangerCandidate: dangerCandidate,
-                            reclaimed: reclaimed,
-                            dangerHard: dangerHard,
-                            netRr: netRr,
-                            netPnlUsd: netPnlUsd);
+                            symbol,
+                            profile,
+                            t0?.OpenTime ?? c0.OpenTime,
+                            dangerCandidate,
+                            reclaimed,
+                            dangerHard,
+                            netRr,
+                            netPnlUsd,
+                            coinInfo);
 
                         // ======================================================================
                         // MICRO PROFIT PROTECT (R-based) - ✅ SCALP ONLY
                         // ======================================================================
                         if (enableMicro && hasEntry && canUseRR)
                         {
-                            decimal plannedRiskUsd = GetPlannedRiskUsdFromConfig(symbol);
+                            decimal plannedRiskUsd = _botConfig.AccountBalance * (coinInfo.RiskPerTradePercent / 100m);
 
                             decimal baseRiskUsd;
                             if (riskUsd > 0m && plannedRiskUsd > 0m)
@@ -640,7 +632,7 @@ namespace FuturesBot.Services
                                         await _notify.SendAsync(
                                             $"[{symbol}] MICRO TAKE (R): net={netPnlUsd:F4} >= {microTakeUsd:F4} ({MicroTakeAtR:F2}R of baseRisk={baseRiskUsd:F4}) → close NOW | mode={profile.Tag}");
                                         await _exchange.ClosePositionAsync(symbol, qty);
-                                        await SafeCancelLeftoverProtectiveAsync(symbol);
+                                        await _exchange.CancelAllOpenOrdersAsync(symbol);
                                         ClearDangerPending(symbol);
                                         return;
                                     }
@@ -734,7 +726,7 @@ namespace FuturesBot.Services
                                     $"pnl={pnlUsd:F4} fee~{estFeeUsd:F4} net={netPnlUsd:F4} risk={riskUsd:F4} roi={(initialMarginUsd > 0 ? (roi * 100m).ToString("F1") + "%" : "NA")} plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} | mode={profile.Tag}");
 
                                 await _exchange.ClosePositionAsync(symbol, qty);
-                                await SafeCancelLeftoverProtectiveAsync(symbol);
+                                await _exchange.CancelAllOpenOrdersAsync(symbol);
                                 ClearDangerPending(symbol);
                                 return;
                             }
@@ -759,7 +751,7 @@ namespace FuturesBot.Services
                                     $"atr={(atr > 0 ? atr.ToString("F4") : "0")} stall={(stall ? "Y" : "N")} weak={(weakening ? "Y" : "N")} nearB={(nearBoundary ? "Y" : "N")} trendValid={(trendValid ? "Y" : "N")} plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} → close | mode={profile.Tag}");
 
                                 await _exchange.ClosePositionAsync(symbol, qty);
-                                await SafeCancelLeftoverProtectiveAsync(symbol);
+                                await _exchange.CancelAllOpenOrdersAsync(symbol);
                                 ClearDangerPending(symbol);
                                 return;
                             }
@@ -1003,7 +995,7 @@ namespace FuturesBot.Services
                                     $"[{symbol}] QUICK TAKE (ROI+FEE): netRr={netRr:F2} roi={(initialMarginUsd > 0 ? (roi * 100m).ToString("F1") + "%" : "NA")} " +
                                     $"net={netPnlUsd:F4} (fee~{estFeeUsd:F4} minNet={minQuickNetProfitUsd:F4}) plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} → close | mode={profile.Tag}");
                                 await _exchange.ClosePositionAsync(symbol, qty);
-                                await SafeCancelLeftoverProtectiveAsync(symbol);
+                                await _exchange.CancelAllOpenOrdersAsync(symbol);
                                 ClearDangerPending(symbol);
                                 return;
                             }
@@ -1017,7 +1009,7 @@ namespace FuturesBot.Services
                                 await _notify.SendAsync(
                                     $"[{symbol}] DANGER CUT (CONFIRMED): netRr={netRr:F2} lossRoi={(initialMarginUsd > 0 ? (absLossRoi * 100m).ToString("F1") + "%" : "NA")} + dangerConfirmed → close | mode={profile.Tag}");
                                 await _exchange.ClosePositionAsync(symbol, qty);
-                                await SafeCancelLeftoverProtectiveAsync(symbol);
+                                await _exchange.CancelAllOpenOrdersAsync(symbol);
                                 ClearDangerPending(symbol);
                                 return;
                             }
@@ -1033,7 +1025,7 @@ namespace FuturesBot.Services
                                 $"[{symbol}] EXIT ON BOUNDARY BREAK (ROI+FEE): netRr={netRr:F2} roi={(initialMarginUsd > 0 ? (roi * 100m).ToString("F1") + "%" : "NA")} " +
                                 $"net={netPnlUsd:F4} (fee~{estFeeUsd:F4} minNet={minBoundaryNetProfitUsd:F4}) plannedRR={(plannedRR > 0 ? plannedRR.ToString("F2") : "NA")} → close | mode={profile.Tag}");
                             await _exchange.ClosePositionAsync(symbol, qty);
-                            await SafeCancelLeftoverProtectiveAsync(symbol);
+                            await _exchange.CancelAllOpenOrdersAsync(symbol);
                             ClearDangerPending(symbol);
                             return;
                         }
@@ -1072,7 +1064,7 @@ namespace FuturesBot.Services
                                 await _notify.SendAsync($"[{symbol}] TP touched → stop monitor. | mode={profile.Tag}");
                             }
 
-                            await SafeCancelLeftoverProtectiveAsync(symbol);
+                            await _exchange.CancelAllOpenOrdersAsync(symbol);
                             ClearDangerPending(symbol);
                             return;
                         }
@@ -1454,7 +1446,7 @@ namespace FuturesBot.Services
             bool strongBody = bodyToRange >= ImpulseBodyToRangeMin;
             bool volSpike = (c1.Volume > 0m) && (c0.Volume >= c1.Volume * ImpulseVolVsPrevMin);
 
-            bool closeNearEdge = false;
+            bool closeNearEdge;
             if (isLong)
             {
                 decimal closePosFromLow = (c0.Close - c0.Low) / range;
@@ -1493,7 +1485,7 @@ namespace FuturesBot.Services
 
             bool oppositeCandle = isLong ? (c0.Close < c0.Open) : (c0.Close > c0.Open);
 
-            bool rejectWick = false;
+            bool rejectWick;
             if (isLong)
             {
                 decimal upperWick = c0.High - Math.Max(c0.Open, c0.Close);
@@ -1646,12 +1638,11 @@ namespace FuturesBot.Services
         {
             await _notify.SendAsync($"[{symbol}] Trailing SL update → {Math.Round(newSL, 6)}");
 
-            await SafeCancelStopLossBothAsync(symbol);
+            await _exchange.CancelStopLossOrdersAsync(symbol);
 
             await Task.Delay(400);
 
-            if (currentPos == null)
-                currentPos = await _exchange.GetPositionAsync(symbol);
+            currentPos ??= await _exchange.GetPositionAsync(symbol);
 
             decimal qty = Math.Abs(currentPos?.PositionAmt ?? 0m);
             string posSide = isLong ? "LONG" : "SHORT";
@@ -1718,16 +1709,6 @@ namespace FuturesBot.Services
         }
 
         // ============================================================
-        //                      CLEANUP / SAFETY
-        // ============================================================
-
-        private async Task SafeCancelLeftoverProtectiveAsync(string symbol)
-        {
-            try { await SafeCancelAllOpenOrdersBothAsync(symbol); } catch { }
-            try { await SafeCancelStopLossBothAsync(symbol); } catch { }
-        }
-
-        // ============================================================
         //                FEE MODEL (estimate + adaptive)
         // ============================================================
 
@@ -1751,11 +1732,9 @@ namespace FuturesBot.Services
                 var fromUtc = DateTime.UtcNow - RealFeeLookback;
                 var toUtc = DateTime.UtcNow;
 
-                decimal? realCommissionAbsUsd = await TryGetRealCommissionAbsUsdAsync(symbol, fromUtc, toUtc);
-                if (!realCommissionAbsUsd.HasValue || realCommissionAbsUsd.Value <= 0m)
-                    return;
-
-                decimal realizedRate = realCommissionAbsUsd.Value / notional2Sides;
+                decimal realCommissionAbsUsd = await _exchange.GetCommissionFromUserTradesAsync(symbol, fromUtc, toUtc);
+                realCommissionAbsUsd = Math.Abs(realCommissionAbsUsd);
+                decimal realizedRate = realCommissionAbsUsd / notional2Sides;
                 if (realizedRate <= 0m || realizedRate > 0.01m)
                     return;
 
@@ -1769,67 +1748,12 @@ namespace FuturesBot.Services
                 stats.LastUpdateUtc = DateTime.UtcNow;
 
                 await _notify.SendAsync(
-                    $"[{symbol}] FEE ADAPT: realComm={realCommissionAbsUsd.Value:F6} notional2={notional2Sides:F2} rate={realizedRate:P4} ewma->{stats.EwmaRate:P4} samples={stats.Samples}");
+                    $"[{symbol}] FEE ADAPT: realComm={realCommissionAbsUsd:F6} notional2={notional2Sides:F2} rate={realizedRate:P4} ewma->{stats.EwmaRate:P4} samples={stats.Samples}");
             }
             catch
             {
                 // silent
             }
-        }
-
-        private async Task<decimal?> TryGetRealCommissionAbsUsdAsync(string symbol, DateTime fromUtc, DateTime toUtc)
-        {
-            object? svc = _exchange;
-            if (svc == null) return null;
-
-            var type = svc.GetType();
-
-            MethodInfo? mi = type.GetMethod("GetCommissionFromUserTradesAsync", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-            if (mi == null) return null;
-
-            var ps = mi.GetParameters();
-
-            if (ps.Length != 3
-                || ps[0].ParameterType != typeof(string)
-                || ps[1].ParameterType != typeof(DateTime)
-                || ps[2].ParameterType != typeof(DateTime))
-                return null;
-
-            object? invokeResult = mi.Invoke(svc, new object?[] { symbol, fromUtc, toUtc });
-
-            if (invokeResult is Task t)
-            {
-                await t.ConfigureAwait(false);
-
-                object? resObj = null;
-                var taskType = t.GetType();
-                if (taskType.IsGenericType)
-                    resObj = taskType.GetProperty("Result")?.GetValue(t);
-
-                return ExtractCommissionAbsUsd(resObj);
-            }
-
-            return ExtractCommissionAbsUsd(invokeResult);
-        }
-
-        private static decimal? ExtractCommissionAbsUsd(object? obj)
-        {
-            if (obj == null) return null;
-
-            if (obj is decimal d) return Math.Abs(d);
-            if (obj is double dd) return (decimal)Math.Abs(dd);
-            if (obj is float ff) return (decimal)Math.Abs(ff);
-
-            var t = obj.GetType();
-            var pComm = t.GetProperty("Commission", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-            if (pComm != null)
-            {
-                var v = pComm.GetValue(obj);
-                if (v is decimal cdec) return Math.Abs(cdec);
-                if (v is double cdbl) return (decimal)Math.Abs(cdbl);
-            }
-
-            return null;
         }
 
         private static decimal GetFeeBreakevenBufferPrice(decimal estFeeUsd, decimal absQty)
@@ -1873,241 +1797,6 @@ namespace FuturesBot.Services
             return 15;
         }
 
-        // ============================================================
-        //  cancel BOTH normal + algo (best-effort via reflection)
-        // ============================================================
-
-        private async Task SafeCancelAllOpenOrdersBothAsync(string symbol)
-        {
-            try { await _exchange.CancelAllOpenOrdersAsync(symbol); } catch { }
-            await TryInvokeCancelAlgoAsync(symbol, cancelStopsOnly: false);
-        }
-
-        private async Task SafeCancelStopLossBothAsync(string symbol)
-        {
-            await TryInvokeCancelNormalStopAsync(symbol);
-            await TryInvokeCancelAlgoAsync(symbol, cancelStopsOnly: true);
-        }
-
-        private async Task TryInvokeCancelNormalStopAsync(string symbol)
-        {
-            try
-            {
-                object? svc = _exchange;
-                if (svc == null) return;
-
-                var type = svc.GetType();
-
-                string[] candidates =
-                {
-                    "CancelStopLossOrdersAsync",
-                    "CancelStopOrdersAsync",
-                    "CancelAllStopOrdersAsync"
-                };
-
-                MethodInfo? mi = null;
-                foreach (var name in candidates)
-                {
-                    mi = type.GetMethod(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-                    if (mi == null) continue;
-
-                    var ps = mi.GetParameters();
-                    if (ps.Length == 1 && ps[0].ParameterType == typeof(string))
-                        break;
-
-                    mi = null;
-                }
-
-                if (mi == null) return;
-
-                object? res = mi.Invoke(svc, new object?[] { symbol });
-                if (res is Task t) await t.ConfigureAwait(false);
-            }
-            catch
-            {
-                // silent
-            }
-        }
-
-        private async Task TryInvokeCancelAlgoAsync(string symbol, bool cancelStopsOnly)
-        {
-            try
-            {
-                object? svc = _exchange;
-                if (svc == null) return;
-
-                var type = svc.GetType();
-
-                string[] candidatesStops =
-                {
-                    "CancelStopLossAlgoOrdersAsync",
-                    "CancelAlgoStopOrdersAsync",
-                    "CancelAlgoStopLossOrdersAsync",
-                    "CancelAlgoOrdersStopAsync",
-                    "CancelAlgoOrdersSLAsync"
-                };
-
-                string[] candidatesAll =
-                {
-                    "CancelAllOpenAlgoOrdersAsync",
-                    "CancelAllAlgoOrdersAsync",
-                    "CancelAlgoOrdersAsync",
-                    "CancelOpenAlgoOrdersAsync"
-                };
-
-                var names = cancelStopsOnly ? candidatesStops.Concat(candidatesAll) : candidatesAll;
-
-                MethodInfo? mi = null;
-                foreach (var name in names)
-                {
-                    mi = type.GetMethod(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-                    if (mi == null) continue;
-
-                    var ps = mi.GetParameters();
-                    if (ps.Length == 1 && ps[0].ParameterType == typeof(string))
-                        break;
-
-                    mi = null;
-                }
-
-                if (mi == null) return;
-
-                object? res = mi.Invoke(svc, new object?[] { symbol });
-                if (res is Task t) await t.ConfigureAwait(false);
-            }
-            catch
-            {
-                // silent
-            }
-        }
-
-        // ============================================================
-        // planned risk USD from appsettings (% risk)
-        // ============================================================
-
-        private decimal GetPlannedRiskUsdFromConfig(string symbol)
-        {
-            try
-            {
-                if (_botConfig == null) return 0m;
-
-                decimal balance = 0m;
-                try { balance = _botConfig.AccountBalance; } catch { }
-
-                if (balance <= 0m)
-                {
-                    var pBal = _botConfig.GetType().GetProperty("AccountBalance", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
-                               ?? _botConfig.GetType().GetProperty("Balance", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-                    if (pBal != null)
-                    {
-                        var v = pBal.GetValue(_botConfig);
-                        if (v is decimal d) balance = d;
-                        else if (v is double dd) balance = (decimal)dd;
-                    }
-                }
-
-                if (balance <= 0m) return 0m;
-
-                var coinInfos = _botConfig.CoinInfos;
-                if (coinInfos == null) return 0m;
-
-                var coin = coinInfos.FirstOrDefault(x => string.Equals(x.Symbol, symbol, StringComparison.OrdinalIgnoreCase));
-                if (coin == null) return 0m;
-
-                decimal pct = 0m;
-                try { pct = coin.RiskPerTradePercent; } catch { }
-
-                if (pct <= 0m)
-                {
-                    var pPct = coin.GetType().GetProperty("RiskPerTradePercent", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
-                               ?? coin.GetType().GetProperty("RiskPercent", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-                    if (pPct != null)
-                    {
-                        var v = pPct.GetValue(coin);
-                        if (v is decimal d) pct = d;
-                        else if (v is double dd) pct = (decimal)dd;
-                    }
-                }
-
-                if (pct <= 0m) return 0m;
-
-                return balance * (pct / 100m);
-            }
-            catch
-            {
-                return 0m;
-            }
-        }
-
-        // ============================================================
-        // Leverage from config (CoinInfo.Leverage) - NEW helper
-        // ============================================================
-
-        private decimal GetLeverageFromConfig(string symbol, CoinInfo? coinInfoFromCaller)
-        {
-            try
-            {
-                int lev = 0;
-
-                if (coinInfoFromCaller != null)
-                    lev = coinInfoFromCaller.Leverage;
-
-                if (lev <= 0 && _botConfig?.CoinInfos != null)
-                {
-                    var c = _botConfig.CoinInfos.FirstOrDefault(x =>
-                        string.Equals(x.Symbol, symbol, StringComparison.OrdinalIgnoreCase));
-                    if (c != null) lev = c.Leverage;
-                }
-
-                if (lev <= 0) lev = 1;
-                if (lev > 125) lev = 125;
-
-                return lev;
-            }
-            catch
-            {
-                return 1m;
-            }
-        }
-
-        // ============================================================
-        // MAJOR detection + Danger confirm bars
-        // ============================================================
-
-        private int GetDangerConfirmBars(string symbol)
-        {
-            return IsMajorSymbol(symbol) ? DangerConfirmBarsMajor : DangerConfirmBarsAlt;
-        }
-
-        private bool IsMajorSymbol(string symbol)
-        {
-            try
-            {
-                if (_botConfig?.CoinInfos == null) return false;
-
-                var coin = _botConfig.CoinInfos.FirstOrDefault(x =>
-                    string.Equals(x.Symbol, symbol, StringComparison.OrdinalIgnoreCase));
-
-                if (coin == null) return false;
-
-                try
-                {
-                    var v = coin.GetType().GetProperty("IsMajor", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(coin);
-                    if (v is bool b) return b;
-                }
-                catch { }
-
-                if (symbol.Equals("BTCUSDT", StringComparison.OrdinalIgnoreCase)) return true;
-                if (symbol.Equals("ETHUSDT", StringComparison.OrdinalIgnoreCase)) return true;
-
-                return false;
-            }
-            catch
-            {
-                return false;
-            }
-        }
-
         private void ClearDangerPending(string symbol)
         {
             _pendingDangerSinceUtc.TryRemove(symbol, out _);
@@ -2127,7 +1816,8 @@ namespace FuturesBot.Services
             bool reclaimed,
             bool dangerHard,
             decimal netRr,
-            decimal netPnlUsd)
+            decimal netPnlUsd,
+            CoinInfo coinInfo)
         {
             if (!dangerCandidate || reclaimed)
             {
@@ -2149,7 +1839,7 @@ namespace FuturesBot.Services
                 return true;
             }
 
-            int needBars = GetDangerConfirmBars(symbol);
+            int needBars = coinInfo.IsMajor ? DangerConfirmBarsMajor : DangerConfirmBarsAlt;
 
             // init pending: bars=1 ngay tại candle danger đầu tiên
             if (!_pendingDangerSinceUtc.ContainsKey(symbol))
@@ -2165,7 +1855,7 @@ namespace FuturesBot.Services
                     return true;
                 }
 
-                await _notify.SendAsync($"[{symbol}] DANGER CANDIDATE → wait confirm {needBars} closed bar(s) (major={(IsMajorSymbol(symbol) ? "Y" : "N")}) | netRr={netRr:F2} | mode={profile.Tag}");
+                await _notify.SendAsync($"[{symbol}] DANGER CANDIDATE → wait confirm {needBars} closed bar(s) (major={(coinInfo.IsMajor ? "Y" : "N")}) | netRr={netRr:F2} | mode={profile.Tag}");
                 return false;
             }
 
@@ -2206,12 +1896,5 @@ namespace FuturesBot.Services
 
             return false;
         }
-    }
-
-    internal sealed class FeeStats
-    {
-        public decimal EwmaRate { get; set; }
-        public int Samples { get; set; }
-        public DateTime LastUpdateUtc { get; set; }
     }
 }
