@@ -271,7 +271,6 @@ namespace FuturesBot.Services
             // === TREND TF CACHE ===
             DateTime lastTrendFetchUtc = DateTime.MinValue;
             IReadOnlyList<Candle>? trendCandles = null;
-            int trendTfMinutes = ParseIntervalMinutesSafe(coinInfo.TrendTimeFrame);
 
             var positionMonitorStartedUtc = DateTime.UtcNow;
 
@@ -282,7 +281,7 @@ namespace FuturesBot.Services
             decimal lastKnownMarkPrice = 0m;
             decimal lastKnownEntry = 0m;
 
-            int tfMinutes = ParseIntervalMinutesSafe(coinInfo.TrendTimeFrame);
+            int tfMinutes = ParseIntervalMinutesSafe(coinInfo.MainTimeFrame);
 
             await _notify.SendAsync($"[{symbol}] Monitor POSITION started... mode={profile.Tag} | FLEX EXIT + TIME-STOP {profile.TimeStopBars}x{tfMinutes}m | trendTF={coinInfo.TrendTimeFrame}");
 
@@ -596,7 +595,6 @@ namespace FuturesBot.Services
                         bool dangerHard = netRr <= DangerHardCutNetRr;
 
                         bool dangerConfirmed = await ApplyDangerConfirmAsync(
-                            symbol,
                             profile,
                             t0?.OpenTime ?? c0.OpenTime,
                             dangerCandidate,
@@ -1809,7 +1807,6 @@ namespace FuturesBot.Services
         // ============================================================
 
         private async Task<bool> ApplyDangerConfirmAsync(
-            string symbol,
             ModeProfile profile,
             DateTime trendLastClosedOpenTime,
             bool dangerCandidate,
@@ -1819,6 +1816,7 @@ namespace FuturesBot.Services
             decimal netPnlUsd,
             CoinInfo coinInfo)
         {
+            var symbol = coinInfo.Symbol;
             if (!dangerCandidate || reclaimed)
             {
                 if (_pendingDangerSinceUtc.ContainsKey(symbol))
