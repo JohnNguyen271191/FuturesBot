@@ -287,7 +287,7 @@ namespace FuturesBot.Services
             decimal lastKnownMarkPrice = 0m;
             decimal lastKnownEntry = 0m;
 
-            int tfMinutes = ParseIntervalMinutesSafe(coinInfo.MainTimeFrame);
+            int tfMinutes = ParseIntervalMinutesSafe(coinInfo.TrendTimeFrame);
 
             await _notify.SendAsync($"[{symbol}] Monitor POSITION started... mode={profile.Tag} | FLEX EXIT + TIME-STOP {profile.TimeStopBars}x{tfMinutes}m | trendTF={coinInfo.TrendTimeFrame}");
 
