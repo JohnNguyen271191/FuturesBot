@@ -50,7 +50,7 @@ namespace FuturesBot.Models
                     QuickTakeMinRR = 0.35m,
                     QuickTakeGoodRR = 0.60m,
                     DangerCutIfRRBelow = -0.25m,
-                    TimeStopBars = 15,
+                    TimeStopBars = 8,
                     TimeStopMinRR = 0.30m,
 
                     EarlyExitBars = 8,
@@ -78,7 +78,7 @@ namespace FuturesBot.Models
                     QuickTakeMinRR = 0.40m,
                     QuickTakeGoodRR = 0.70m,
                     DangerCutIfRRBelow = -0.30m,
-                    TimeStopBars = 15,
+                    TimeStopBars = 8,
                     TimeStopMinRR = 0.30m,
 
                     EarlyExitBars = 8,
@@ -106,7 +106,7 @@ namespace FuturesBot.Models
                     QuickTakeMinRR = 0.45m,
                     QuickTakeGoodRR = 0.75m,
                     DangerCutIfRRBelow = -0.35m,
-                    TimeStopBars = 25,
+                    TimeStopBars = 15,
                     TimeStopMinRR = 0.40m,
 
                     EarlyExitBars = 15,
