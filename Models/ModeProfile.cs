@@ -120,7 +120,7 @@ namespace FuturesBot.Models
 
                     SafetyTpRR = 2.0m,
                     EmaBreakTolerance = 0.001m,
-                    LimitTimeout = TimeSpan.FromMinutes(20),
+                    LimitTimeout = TimeSpan.FromMinutes(40),
                 }
             };
         }
