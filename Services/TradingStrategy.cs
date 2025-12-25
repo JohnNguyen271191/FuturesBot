@@ -1,3 +1,5 @@
+using System;
+using System.Collections.Generic;
 using FuturesBot.Config;
 using FuturesBot.IServices;
 using FuturesBot.Models;
@@ -8,22 +10,29 @@ namespace FuturesBot.Services
 {
     /// <summary>
     /// TradingStrategy V4 WINRATE PATCH + MTF (TF-agnostic)
-    /// MAPPING (TF-agnostic, không fix cứng 15m/3m nữa):
+    ///
     /// GenerateSignal(candlesTrend, candlesEntry, coinInfo)
-    /// - candlesTrend: Trend TF (ví dụ 15m / 30m / 1h...)
-    /// - candlesEntry: Entry TF (ví dụ 3m / 5m / 15m...)
+    /// - candlesTrend: Trend TF (15m/30m/1h...)
+    /// - candlesEntry: Entry TF (3m/5m/15m...)
     /// NOTE: dùng NẾN ĐÃ ĐÓNG (Count - 2)
     ///
-    /// PATCH 5 ĐIỂM (giảm miss nhưng vẫn giữ winrate):
+    /// PATCH CORE:
     /// 1) Fix touchA: cho phép xuyên sâu (không bắt Low/High nằm trong band)
     /// 2) Nới ConfirmBodyToRangeMin theo Major/Alt
-    /// 3) Volume gate: dùng AND + có "override" khi 1 yếu nhưng 1 rất mạnh
-    /// 4) Sideway SL: tính theo swing*(1±StopBufferPercent) (không cộng entry*%)
+    /// 3) Volume gate: AND + override khi 1 yếu nhưng 1 rất mạnh
+    /// 4) Sideway SL: theo swing*(1±StopBufferPercent)
     /// 5) Trend weak tolerance + RR giảm + require hard confirm khi trend yếu
     ///
-    /// FIXES (IMPORTANT):
-    /// A) Fix Climax check dùng đúng EMA theo index (iT / iT-1), tránh dùng ema34_T[iT] cho iT-1
+    /// FIXES:
+    /// A) Fix Climax check dùng đúng EMA theo index (iT / iT-1)
     /// B) Fix Market Structure swing: KHÔNG dùng future candle vượt quá nến đã đóng (endIdxClosed = iT)
+    /// C) FIX: tránh RR bị giảm 2 lần khi trend yếu (double-penalty)
+    /// D) FIX: touchA rõ nghĩa hơn (range cắt qua band + close không quá sâu)
+    /// E) PATCH: Alt slope gate mềm hơn (cho phép pass khi sep+volume mạnh)
+    ///
+    /// NEW PATCH (THEO YÊU CẦU):
+    /// 6) Hard-confirm fallback: khi rejectB fail nhưng momentumHard TRUE => entry "marketable limit" theo close B
+    /// 7) TrendWeak: nếu trend yếu mà entryDistToAnchor quá lớn => BLOCK (tránh chase lúc lấp lửng)
     /// </summary>
     public class TradingStrategy : IStrategyService
     {
@@ -109,7 +118,6 @@ namespace FuturesBot.Services
         // ========================= V4: 2-STEP RETEST + CONFIRM (ENTRY TF) =========================
         private const decimal ConfirmCloseBeyondAnchorMajor = 0.0008m; // 0.08%
         private const decimal ConfirmCloseBeyondAnchorAlt = 0.0012m;   // 0.12%
-        private const decimal ConfirmBodyToRangeMin_Default = 0.55m;
 
         // PATCH: nới body confirm theo Major/Alt
         private const decimal ConfirmBodyToRangeMin_Major = 0.50m;
@@ -204,6 +212,11 @@ namespace FuturesBot.Services
         private const decimal TrendWeakCloseTolAlt = 0.0025m;   // 0.25% cho alt
         private const decimal TrendWeakRRFactor = 0.85m;        // RR giảm khi trend yếu
 
+        // ========================= NEW PATCH 7: TREND WEAK CHASE BLOCK =========================
+        // Trend yếu => giới hạn entryDistToAnchor chặt hơn so với maxDist bình thường
+        private const decimal TrendWeakMaxDistToAnchorFactorMajor = 0.65m; // 65% của maxDist
+        private const decimal TrendWeakMaxDistToAnchorFactorAlt = 0.70m;   // 70% của maxDist
+
         // =====================================================================
         //                           ENTRY SIGNAL (MTF)
         // =====================================================================
@@ -245,7 +258,7 @@ namespace FuturesBot.Services
 
             // =================== BTC vs ALT PROFILE =======================
 
-            decimal rrTrend = isMajor ? RiskRewardMajor : RiskReward;
+            decimal rrTrendBase = isMajor ? RiskRewardMajor : RiskReward;
             decimal rrSideway = isMajor ? RiskRewardSidewayMajor : RiskRewardSideway;
             bool allowSideway = isMajor;
 
@@ -254,7 +267,6 @@ namespace FuturesBot.Services
             decimal medianVolUsd = GetMedianVolUsd(candlesTrend, iT, VolumeMedianLookback);
             decimal ratioVsMedian = medianVolUsd > 0 ? (volUsdTrend / medianVolUsd) : 1m;
 
-            // PATCH #3: Volume gate AND + override
             if (!IsVolumeOkTrend(isMajor, volUsdTrend, ratioVsMedian))
             {
                 return new TradeSignal
@@ -263,20 +275,6 @@ namespace FuturesBot.Services
                     Reason = $"{coinInfo.Symbol}: Volume Trend yếu (vol={volUsdTrend:F0} USDT, vsMedian={ratioVsMedian:P0}) → bỏ qua.",
                     Symbol = coinInfo.Symbol
                 };
-            }
-
-            // Alt: slope on TREND EMA89
-            if (!isMajor)
-            {
-                if (!IsEmaSlopeOk(ema89_T, iT, EmaSlopeLookbackTrend, MinAltEmaSlopeTrend))
-                {
-                    return new TradeSignal
-                    {
-                        Type = SignalType.None,
-                        Reason = $"{coinInfo.Symbol}: Alt sideway, EMA89 Trend slope yếu → NO TRADE.",
-                        Symbol = coinInfo.Symbol
-                    };
-                }
             }
 
             // =================== SIDEWAY FILTER (TREND + ENTRY) ===========================
@@ -295,7 +293,6 @@ namespace FuturesBot.Services
             }
 
             // ================= FILTER: CLIMAX + OVEREXTENDED (TREND TF) =================
-            // FIX A: dùng EMA đúng index theo candle đang check (iT / iT-1)
             bool climaxDanger =
                 IsClimaxAwayFromEma(candlesTrend, iT, ema34_T[iT], ema89_T[iT], ema200_T[iT]) ||
                 IsClimaxAwayFromEma(candlesTrend, iT - 1, ema34_T[iT - 1], ema89_T[iT - 1], ema200_T[iT - 1]);
@@ -320,7 +317,6 @@ namespace FuturesBot.Services
                 lastT.Close < ema89T &&
                 ema89T < ema200T;
 
-            // PATCH #5: trend weak tolerance (cho phép close hơi xuyên ema89 nhưng structure vẫn đúng)
             decimal weakTol = isMajor ? TrendWeakCloseTolMajor : TrendWeakCloseTolAlt;
 
             bool trendUpWeak =
@@ -336,9 +332,9 @@ namespace FuturesBot.Services
             bool trendUp = trendUpStrong || trendUpWeak;
             bool trendDown = trendDownStrong || trendDownWeak;
 
-            // extra: avoid chop around ema200
+            // avoid chop around ema200
             decimal distTo200 = ema200T > 0 ? Math.Abs(lastT.Close - ema200T) / ema200T : 0m;
-            if (distTo200 < 0.0012m) // 0.12% near EMA200 => chop zone
+            if (distTo200 < 0.0012m) // 0.12%
             {
                 return new TradeSignal
                 {
@@ -357,13 +353,9 @@ namespace FuturesBot.Services
             bool downTrend = trendDown && entryBiasDown;
 
             bool trendStrongNow = (trendUpStrong && entryBiasUp) || (trendDownStrong && entryBiasDown);
-            if (!trendStrongNow && (upTrend || downTrend))
-            {
-                // PATCH #5: trend yếu -> giảm RR và yêu cầu hard confirm trong entry builder
-                rrTrend *= TrendWeakRRFactor;
-            }
+            bool trendWeakNow = (upTrend || downTrend) && !trendStrongNow;
 
-            // Extreme cases (use TREND TF, avoid chasing)
+            // Extreme cases (use TREND TF)
             bool extremeUp =
                 lastT.Close > ema89T * (1 + ExtremeEmaBoost) &&
                 macdT[iT] > sigT[iT] &&
@@ -375,7 +367,6 @@ namespace FuturesBot.Services
                 rsiT[iT] < ExtremeRsiLow;
 
             // =================== MARKET STRUCTURE (TREND TF) ==================
-            // FIX B: chỉ dùng nến đã đóng đến iT (KHÔNG dùng candles.Count-1 đang chạy để xác nhận swing)
             decimal stTol = isMajor ? StructureBreakToleranceMajor : StructureBreakToleranceAlt;
             var (lowerHigh, higherLow, lastSwingHigh, prevSwingHigh, lastSwingLow, prevSwingLow)
                 = DetectMarketStructure(candlesTrend, iT, stTol);
@@ -478,6 +469,8 @@ namespace FuturesBot.Services
             }
 
             // =================== TREND STRENGTH FILTER (TREND TF sep + slope) ===================
+            decimal rrTrend = rrTrendBase;
+
             if (trendUp || trendDown)
             {
                 decimal price = lastT.Close > 0 ? lastT.Close : 1m;
@@ -488,7 +481,16 @@ namespace FuturesBot.Services
 
                 bool slopeOkNow = isMajor
                     ? IsEmaSlopeOk(ema89_T, iT, EmaSlopeLookbackTrend, MinMajorEmaSlopeTrend)
-                    : true;
+                    : IsEmaSlopeOk(ema89_T, iT, EmaSlopeLookbackTrend, MinAltEmaSlopeTrend);
+
+                if (!isMajor && !slopeOkNow && sepOk)
+                {
+                    bool volumeStrong = (ratioVsMedian >= 1.00m) && (volUsdTrend >= MinAltVolumeUsdTrend * 1.20m);
+                    bool sepVeryGood = sepTrend >= (MinEmaSeparationAlt * 1.25m);
+
+                    if (volumeStrong && sepVeryGood)
+                        slopeOkNow = true;
+                }
 
                 if (!sepOk || !slopeOkNow)
                 {
@@ -512,11 +514,11 @@ namespace FuturesBot.Services
                     rrTrend = isMajor
                         ? Clamp(rrTrend, TrendRR_MinMajor, TrendRR_MaxMajor)
                         : Clamp(rrTrend, TrendRR_MinAlt, TrendRR_MaxAlt);
-
-                    // PATCH #5: trend yếu (đã xác định ở trên) thì RR còn giảm thêm chút
-                    if (!trendStrongNow)
-                        rrTrend *= TrendWeakRRFactor;
                 }
+
+                // FIX (C): chỉ giảm RR 1 lần khi trend yếu
+                if (trendWeakNow)
+                    rrTrend *= TrendWeakRRFactor;
             }
 
             // =================== BUILD LONG / SHORT (ENTRY TF) =========
@@ -797,12 +799,13 @@ namespace FuturesBot.Services
             decimal anchor = supports.Max();
             decimal confirmBeyond = coinInfo.IsMajor ? ConfirmCloseBeyondAnchorMajor : ConfirmCloseBeyondAnchorAlt;
 
-            // PATCH #1: touchA cho phép xuyên sâu (chỉ cần chạm/đâm xuống <= anchor*(1+band))
+            // touchA rõ nghĩa hơn: range cắt qua band quanh anchor
             bool touchA =
                 anchor > 0m &&
-                A.Low <= anchor * (1 + EmaRetestBand);
+                A.Low <= anchor * (1m + EmaRetestBand) &&
+                A.High >= anchor * (1m - EmaRetestBand);
 
-            // thêm 1 cái "đóng không được dưới anchor quá sâu" (tránh breakdown thật)
+            // đóng không được dưới anchor quá sâu
             decimal maxCloseBelow = anchor * (1m - (EmaRetestBand * 2m));
             bool aCloseNotTooDeep = A.Close >= maxCloseBelow;
 
@@ -819,7 +822,6 @@ namespace FuturesBot.Services
             bool bullishB = B.Close > B.Open;
             bool closeBackAbove = B.Close >= anchor * (1m + confirmBeyond);
 
-            // PATCH nhẹ (giảm miss): breakSmall ưu tiên, nhưng trend yếu thì không bắt buộc cứng
             bool breakSmall = B.High > A.High;
             bool breakSoft = B.Close > A.Close;
 
@@ -831,27 +833,22 @@ namespace FuturesBot.Services
             bool macdCrossUp = macdE[iB] > sigE[iB] && macdE[iB - 1] <= sigE[iB - 1];
             bool rsiBull = rsiE[iB] > RsiBullThreshold && rsiE[iB] >= rsiE[iB - 1];
 
-            // PATCH #2: body confirm theo Major/Alt
             decimal minBody = coinInfo.IsMajor ? ConfirmBodyToRangeMin_Major : ConfirmBodyToRangeMin_Alt;
             bool bodyStrongB = IsBodyStrong(B, minBody);
 
             bool momentumHard = macdCrossUp && rsiBull && bodyStrongB && closeBackAbove;
 
-            bool okBase = touchA && aCloseNotTooDeep && bullishB && closeBackAbove && rejectB;
+            bool okBase = touchA && aCloseNotTooDeep && bullishB && closeBackAbove;
             bool okBreak = breakSmall || breakSoft;
 
-            bool ok = okBase && okBreak;
+            // === NEW PATCH #6: hard-confirm fallback
+            // Nếu rejectB fail nhưng momentumHard true => vẫn ok (đỡ miss cú bật mạnh)
+            bool okByReject = okBase && okBreak && rejectB;
+            bool okByHardConfirm = okBase && okBreak && momentumHard && volumeOkSoft;
 
-            if (!ok && AllowMomentumInsteadOfReject)
-                ok = touchA && aCloseNotTooDeep && bullishB && closeBackAbove && okBreak && momentumHard && volumeOkSoft;
+            bool ok = okByReject || (AllowMomentumInsteadOfReject && okByHardConfirm);
 
-            // PATCH #5: nếu trend yếu -> bắt buộc hard confirm (momentumHard hoặc strongReject)
             bool requireHard = !trendStrongNow;
-            if (ok && requireHard && !momentumHard)
-            {
-                // vẫn cho qua nếu candle là strongReject mode1 (tính phía dưới), còn bình thường thì block
-                // tạm đánh dấu, check strongReject xong sẽ quyết định
-            }
 
             if (!ok)
             {
@@ -892,9 +889,43 @@ namespace FuturesBot.Services
                 };
             }
 
+            // Entry logic:
+            // - StrongReject: marketable close B
+            // - HardConfirm fallback (rejectB false): marketable close B (nhẹ hơn Mode1)
+            // - else: anchor offset
+            bool hardConfirmFallback = momentumHard && !rejectB;
+
             decimal proposedEntry = strongReject
                 ? B.Close * (1m + MarketableLimitOffset)
-                : anchor * (1m + EntryOffsetPercent);
+                : (hardConfirmFallback
+                    ? B.Close * (1m + MarketableLimitOffset)
+                    : anchor * (1m + EntryOffsetPercent));
+
+            // =================== NEW PATCH #7: TrendWeak chase block ===================
+            // Trend yếu => dist to anchor phải nhỏ hơn ngưỡng chặt hơn (tránh chase)
+            bool isTrendWeak = !trendStrongNow;
+
+            decimal maxDist = coinInfo.IsMajor ? MaxEntryDistanceToAnchorMajor : MaxEntryDistanceToAnchorAlt;
+            if (anchor > 0)
+            {
+                decimal dist = Math.Abs(proposedEntry - anchor) / anchor;
+
+                if (isTrendWeak)
+                {
+                    decimal factor = coinInfo.IsMajor ? TrendWeakMaxDistToAnchorFactorMajor : TrendWeakMaxDistToAnchorFactorAlt;
+                    decimal weakMax = maxDist * factor;
+
+                    if (dist > weakMax)
+                    {
+                        return new TradeSignal
+                        {
+                            Type = SignalType.None,
+                            Reason = $"{coinInfo.Symbol}: TREND WEAK – Block LONG vì entry quá xa anchor (dist={dist:P2} > weakMax={weakMax:P2}).",
+                            Symbol = coinInfo.Symbol
+                        };
+                    }
+                }
+            }
 
             if (EnableHumanLikeFilter)
             {
@@ -936,7 +967,7 @@ namespace FuturesBot.Services
 
             decimal entry = proposedEntry;
 
-            decimal maxDist = coinInfo.IsMajor ? MaxEntryDistanceToAnchorMajor : MaxEntryDistanceToAnchorAlt;
+            // Normal dist gate (giữ lại) – áp dụng cho cả strong trend
             if (anchor > 0)
             {
                 decimal dist = Math.Abs(entry - anchor) / anchor;
@@ -962,8 +993,10 @@ namespace FuturesBot.Services
             }
 
             decimal rr = riskRewardTrend;
-            if (AllowMomentumInsteadOfReject && momentumHard && !rejectB)
-                rr *= 0.92m;
+
+            // Nếu là hard-confirm fallback (không có rejectB), giảm RR nhẹ để tránh kèo “đu”
+            if (hardConfirmFallback && !strongReject)
+                rr *= 0.94m;
 
             rr = coinInfo.IsMajor
                 ? Clamp(rr, TrendRR_MinMajor, TrendRR_MaxMajor)
@@ -972,8 +1005,16 @@ namespace FuturesBot.Services
             decimal risk = entry - sl;
             decimal tp = entry + risk * rr;
 
-            var mode = strongReject ? TradeMode.Mode1_StrongReject : TradeMode.Trend;
-            string modeTag = strongReject ? "MODE1" : "TREND_LIMIT";
+            TradeMode mode =
+                strongReject ? TradeMode.Mode1_StrongReject :
+                hardConfirmFallback ? TradeMode.Mode1_StrongReject : // reuse enum (nếu m có enum riêng thì đổi)
+                TradeMode.Trend;
+
+            string tag =
+                strongReject ? "MODE1_STRONG_REJECT" :
+                hardConfirmFallback ? "HARD_CONFIRM_FALLBACK" :
+                "TREND_LIMIT";
+
             string weakTag = requireHard ? " (TREND_WEAK)" : "";
 
             return new TradeSignal
@@ -982,7 +1023,7 @@ namespace FuturesBot.Services
                 EntryPrice = entry,
                 StopLoss = sl,
                 TakeProfit = tp,
-                Reason = $"{coinInfo.Symbol}: LONG{weakTag} (TrendTF + EntryTF) – retest(A)+confirm(B) @EMA({anchor:F6}) + {(strongReject ? "StrongReject" : (momentumHard ? "MomHard" : "Reject"))}. Entry={modeTag}, RR={rr:F2}.",
+                Reason = $"{coinInfo.Symbol}: LONG{weakTag} – retest(A)+confirm(B) @EMA({anchor:F6}) + {(strongReject ? "StrongReject" : (hardConfirmFallback ? "HardConfirmFallback" : (momentumHard ? "MomHard" : "Reject")))}. Entry={tag}, RR={rr:F2}.",
                 Symbol = coinInfo.Symbol,
                 Mode = mode
             };
@@ -1039,12 +1080,11 @@ namespace FuturesBot.Services
             decimal anchor = resistances.Min();
             decimal confirmBeyond = coinInfo.IsMajor ? ConfirmCloseBeyondAnchorMajor : ConfirmCloseBeyondAnchorAlt;
 
-            // PATCH #1: touchA cho phép xuyên sâu (chỉ cần chạm/đâm lên >= anchor*(1-band))
             bool touchA =
                 anchor > 0m &&
-                A.High >= anchor * (1 - EmaRetestBand);
+                A.High >= anchor * (1m - EmaRetestBand) &&
+                A.Low <= anchor * (1m + EmaRetestBand);
 
-            // thêm 1 cái "đóng không được trên anchor quá sâu" (tránh breakout thật)
             decimal maxCloseAbove = anchor * (1m + (EmaRetestBand * 2m));
             bool aCloseNotTooDeep = A.Close <= maxCloseAbove;
 
@@ -1072,19 +1112,19 @@ namespace FuturesBot.Services
             bool macdCrossDown = macdE[iB] < sigE[iB] && macdE[iB - 1] >= sigE[iB - 1];
             bool rsiBear = rsiE[iB] < RsiBearThreshold && rsiE[iB] <= rsiE[iB - 1];
 
-            // PATCH #2: body confirm theo Major/Alt
             decimal minBody = coinInfo.IsMajor ? ConfirmBodyToRangeMin_Major : ConfirmBodyToRangeMin_Alt;
             bool bodyStrongB = IsBodyStrong(B, minBody);
 
             bool momentumHard = macdCrossDown && rsiBear && bodyStrongB && closeBackBelow;
 
-            bool okBase = touchA && aCloseNotTooDeep && bearishB && closeBackBelow && rejectB;
+            bool okBase = touchA && aCloseNotTooDeep && bearishB && closeBackBelow;
             bool okBreak = breakSmall || breakSoft;
 
-            bool ok = okBase && okBreak;
+            // NEW PATCH #6: hard-confirm fallback
+            bool okByReject = okBase && okBreak && rejectB;
+            bool okByHardConfirm = okBase && okBreak && momentumHard && volumeOkSoft;
 
-            if (!ok && AllowMomentumInsteadOfReject)
-                ok = touchA && aCloseNotTooDeep && bearishB && closeBackBelow && okBreak && momentumHard && volumeOkSoft;
+            bool ok = okByReject || (AllowMomentumInsteadOfReject && okByHardConfirm);
 
             bool requireHard = !trendStrongNow;
 
@@ -1116,7 +1156,6 @@ namespace FuturesBot.Services
 
             bool strongReject = allowMode1 && rejectB && IsStrongRejectionShort_OnEntryTf(candlesEntry, iB);
 
-            // PATCH #5: nếu trend yếu, bắt buộc momentumHard hoặc strongReject
             if (requireHard && !momentumHard && !strongReject)
             {
                 return new TradeSignal
@@ -1127,9 +1166,38 @@ namespace FuturesBot.Services
                 };
             }
 
+            bool hardConfirmFallback = momentumHard && !rejectB;
+
             decimal proposedEntry = strongReject
                 ? B.Close * (1m - MarketableLimitOffset)
-                : anchor * (1m - EntryOffsetPercent);
+                : (hardConfirmFallback
+                    ? B.Close * (1m - MarketableLimitOffset)
+                    : anchor * (1m - EntryOffsetPercent));
+
+            // NEW PATCH #7: TrendWeak chase block
+            bool isTrendWeak = !trendStrongNow;
+
+            decimal maxDist = coinInfo.IsMajor ? MaxEntryDistanceToAnchorMajor : MaxEntryDistanceToAnchorAlt;
+            if (anchor > 0)
+            {
+                decimal dist = Math.Abs(proposedEntry - anchor) / anchor;
+
+                if (isTrendWeak)
+                {
+                    decimal factor = coinInfo.IsMajor ? TrendWeakMaxDistToAnchorFactorMajor : TrendWeakMaxDistToAnchorFactorAlt;
+                    decimal weakMax = maxDist * factor;
+
+                    if (dist > weakMax)
+                    {
+                        return new TradeSignal
+                        {
+                            Type = SignalType.None,
+                            Reason = $"{coinInfo.Symbol}: TREND WEAK – Block SHORT vì entry quá xa anchor (dist={dist:P2} > weakMax={weakMax:P2}).",
+                            Symbol = coinInfo.Symbol
+                        };
+                    }
+                }
+            }
 
             if (EnableHumanLikeFilter)
             {
@@ -1171,7 +1239,7 @@ namespace FuturesBot.Services
 
             decimal entry = proposedEntry;
 
-            decimal maxDist = coinInfo.IsMajor ? MaxEntryDistanceToAnchorMajor : MaxEntryDistanceToAnchorAlt;
+            // Normal dist gate
             if (anchor > 0)
             {
                 decimal dist = Math.Abs(entry - anchor) / anchor;
@@ -1197,8 +1265,9 @@ namespace FuturesBot.Services
             }
 
             decimal rr = riskRewardTrend;
-            if (AllowMomentumInsteadOfReject && momentumHard && !rejectB)
-                rr *= 0.92m;
+
+            if (hardConfirmFallback && !strongReject)
+                rr *= 0.94m;
 
             rr = coinInfo.IsMajor
                 ? Clamp(rr, TrendRR_MinMajor, TrendRR_MaxMajor)
@@ -1207,8 +1276,16 @@ namespace FuturesBot.Services
             decimal risk = sl - entry;
             decimal tp = entry - risk * rr;
 
-            var mode = strongReject ? TradeMode.Mode1_StrongReject : TradeMode.Trend;
-            string modeTag = strongReject ? "MODE1" : "TREND_LIMIT";
+            TradeMode mode =
+                strongReject ? TradeMode.Mode1_StrongReject :
+                hardConfirmFallback ? TradeMode.Mode1_StrongReject :
+                TradeMode.Trend;
+
+            string tag =
+                strongReject ? "MODE1_STRONG_REJECT" :
+                hardConfirmFallback ? "HARD_CONFIRM_FALLBACK" :
+                "TREND_LIMIT";
+
             string weakTag = requireHard ? " (TREND_WEAK)" : "";
 
             return new TradeSignal
@@ -1217,7 +1294,7 @@ namespace FuturesBot.Services
                 EntryPrice = entry,
                 StopLoss = sl,
                 TakeProfit = tp,
-                Reason = $"{coinInfo.Symbol}: SHORT{weakTag} (TrendTF + EntryTF) – retest(A)+confirm(B) @EMA({anchor:F6}) + {(strongReject ? "StrongReject" : (momentumHard ? "MomHard" : "Reject"))}. Entry={modeTag}, RR={rr:F2}.",
+                Reason = $"{coinInfo.Symbol}: SHORT{weakTag} – retest(A)+confirm(B) @EMA({anchor:F6}) + {(strongReject ? "StrongReject" : (hardConfirmFallback ? "HardConfirmFallback" : (momentumHard ? "MomHard" : "Reject")))}. Entry={tag}, RR={rr:F2}.",
                 Symbol = coinInfo.Symbol,
                 Mode = mode
             };
@@ -1313,7 +1390,6 @@ namespace FuturesBot.Services
                 if (swingHigh > 0 && entry >= swingHigh)
                     entry = (lastT.Close + swingHigh) / 2;
 
-                // PATCH #4: SL theo swing*(1+buffer) (không cộng entry*%)
                 decimal baseHigh = (swingHigh > 0 ? swingHigh : lastT.High);
                 decimal sl = baseHigh * (1m + StopBufferPercent);
 
@@ -1370,7 +1446,6 @@ namespace FuturesBot.Services
                 if (swingLow > 0 && entry <= swingLow)
                     entry = (lastT.Close + swingLow) / 2;
 
-                // PATCH #4: SL theo swing*(1-buffer) (không trừ entry*%)
                 decimal baseLow = (swingLow > 0 ? swingLow : lastT.Low);
                 decimal sl = baseLow * (1m - StopBufferPercent);
 
@@ -1616,7 +1691,6 @@ namespace FuturesBot.Services
             return (list.Count % 2 == 1) ? list[mid] : (list[mid - 1] + list[mid]) / 2m;
         }
 
-        // PATCH #3: volume gate AND + override (ổn định winrate hơn OR; override cho case 1 yếu 1 mạnh)
         private bool IsVolumeOkTrend(bool isMajor, decimal volUsdTrend, decimal ratioVsMedian)
         {
             if (volUsdTrend <= 0) return false;
@@ -1627,12 +1701,9 @@ namespace FuturesBot.Services
             bool absOk = volUsdTrend >= minAbs;
             bool ratioOk = ratioVsMedian >= minRatio;
 
-            // BASIC: yêu cầu đủ cả 2 (AND)
             bool basicOk = absOk && ratioOk;
-
             if (basicOk) return true;
 
-            // override: nếu 1 fail nhưng 1 cực mạnh -> vẫn cho
             bool overrideOk =
                 (ratioVsMedian >= VolOverrideMedianRatio && volUsdTrend >= minAbs * VolOverrideAbsRatio) ||
                 (volUsdTrend >= minAbs * 1.25m && ratioVsMedian >= minRatio * 0.85m);
@@ -1644,7 +1715,6 @@ namespace FuturesBot.Services
         //                MARKET STRUCTURE HELPERS (Lower-High / Higher-Low)
         // =====================================================================
 
-        // FIX B: swing phải chỉ được xác nhận bằng candles <= endIdxClosed (không dùng candle đang chạy)
         private bool IsSwingHigh(IReadOnlyList<Candle> candles, int i, int strength, int endIdxClosed)
         {
             if (i - strength < 0) return false;
