@@ -10,8 +10,8 @@ namespace FuturesBot.Services
     /// TradingStrategy V4 WINRATE PATCH + MTF (TF-agnostic)
     ///
     /// GenerateSignal(candlesTrend, candlesEntry, coinInfo)
-    /// - candlesTrend: Trend TF (5m/15m/1h...)
-    /// - candlesEntry: Entry TF (30/1h...)
+    /// - candlesTrend: Trend TF (30m/1h...)
+    /// - candlesEntry: Entry TF (5m/15m/1h...)
     /// NOTE: dùng NẾN ĐÃ ĐÓNG (Count - 2)
     ///
     /// PATCH CORE:

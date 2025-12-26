@@ -220,16 +220,16 @@ static async Task RunSymbolWorkerAsync(
             await Task.Delay(sleep, ct);
 
             // 3) fetch candles (chỉ khi tới nhịp nến)
-            var candlesMainTf = await exchange.GetRecentCandlesAsync(
+            var candlesEntryTf = await exchange.GetRecentCandlesAsync(
                 coinInfo.Symbol, coinInfo.MainTimeFrame, 220);
 
             var candlesTrendTf = await exchange.GetRecentCandlesAsync(
                 coinInfo.Symbol, coinInfo.TrendTimeFrame, 220);
 
-            if (candlesMainTf == null || candlesMainTf.Count < 3 || candlesTrendTf == null || candlesTrendTf.Count < 3)
+            if (candlesEntryTf == null || candlesEntryTf.Count < 3 || candlesTrendTf == null || candlesTrendTf.Count < 3)
                 continue;
 
-            var lastClosed = candlesMainTf[^2];
+            var lastClosed = candlesEntryTf[^2];
 
             if (lastClosed.OpenTime <= lastProcessedCandleOpenTimeUtc)
                 continue;
@@ -245,7 +245,7 @@ static async Task RunSymbolWorkerAsync(
             // 5) ENTRY LOGIC: chỉ khi không có position và không cooldown
             if (!hasPosition && !pnl.IsInCooldown())
             {
-                var entrySignal = strategy.GenerateSignal(candlesMainTf, candlesTrendTf, coinInfo);
+                var entrySignal = strategy.GenerateSignal(candlesTrendTf, candlesEntryTf, coinInfo);
                 await executor.HandleSignalAsync(entrySignal, coinInfo);
             }
         }
