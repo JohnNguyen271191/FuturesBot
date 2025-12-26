@@ -45,7 +45,7 @@ namespace FuturesBot.Models
                     Mode = mode,
 
                     // R-based
-                    ProtectAtRR = 0.22m,
+                    ProtectAtRR = 0.35m,
                     BreakEvenBufferR = 0.06m,
                     QuickTakeMinRR = 0.35m,
                     QuickTakeGoodRR = 0.60m,
@@ -72,7 +72,7 @@ namespace FuturesBot.Models
                     Mode = mode,
 
                     // R-based
-                    ProtectAtRR = 0.25m,
+                    ProtectAtRR = 0.35m,
                     BreakEvenBufferR = 0.05m,
                     QuickTakeMinRR = 0.40m,
                     QuickTakeGoodRR = 0.70m,
@@ -100,7 +100,7 @@ namespace FuturesBot.Models
                     Mode = TradeMode.Trend,
 
                     // R-based
-                    ProtectAtRR = 0.30m,
+                    ProtectAtRR = 0.50m,
                     BreakEvenBufferR = 0.05m,
                     QuickTakeMinRR = 0.45m,
                     QuickTakeGoodRR = 0.75m,

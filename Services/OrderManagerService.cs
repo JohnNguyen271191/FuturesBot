@@ -63,8 +63,8 @@ namespace FuturesBot.Services
         private const decimal FeeEwmaAlpha = 0.20m;
         private static readonly TimeSpan RealFeeLookback = TimeSpan.FromMinutes(30);
 
-        private const decimal ProtectMinNetProfitVsFeeMult = 2.0m;
-        private const decimal QuickMinNetProfitVsFeeMult = 2.0m;
+        private const decimal ProtectMinNetProfitVsFeeMult = 3.0m;
+        private const decimal QuickMinNetProfitVsFeeMult = 3.0m;
         private const decimal EarlyExitMinNetProfitVsFeeMult = 1.2m;
         private const decimal BoundaryExitMinNetProfitVsFeeMult = 1.8m;
 
@@ -480,9 +480,9 @@ namespace FuturesBot.Services
 
                     if (isScalp)
                     {
-                        minProtectNetProfitUsd = Math.Max(minProtectNetProfitUsd, estFeeUsd * 2.5m);
-                        minQuickNetProfitUsd = Math.Max(minQuickNetProfitUsd, estFeeUsd * 2.5m);
-                        minBoundaryNetProfitUsd = Math.Max(minBoundaryNetProfitUsd, estFeeUsd * 2.2m);
+                        minProtectNetProfitUsd = Math.Max(minProtectNetProfitUsd, estFeeUsd * 3.5m);
+                        minQuickNetProfitUsd = Math.Max(minQuickNetProfitUsd, estFeeUsd * 3.5m);
+                        minBoundaryNetProfitUsd = Math.Max(minBoundaryNetProfitUsd, estFeeUsd * 3.5m);
                     }
 
                     // =================== SAFETY TP (nếu thiếu TP) ===================
@@ -670,7 +670,7 @@ namespace FuturesBot.Services
                                     if (!IsSlTooCloseToPrice(price, targetSL, atr))
                                     {
                                         if (IsBetterStopLoss(targetSL, sl, isLongPosition)
-                                            && CanUpdateTrailing(symbol, sl, targetSL, isLongPosition, atr))
+                                            && CanUpdateTrailing(symbol, sl, targetSL, atr))
                                         {
                                             var oldSl = sl;
                                             sl = targetSL;
@@ -736,7 +736,7 @@ namespace FuturesBot.Services
                             && timeStopAnchorUtc.HasValue
                             && netPnlUsd >= minEarlyNetProfitUsd
                             && netRr >= profile.EarlyExitMinRR
-                            && (initialMarginUsd > 0m ? roi >= profile.EarlyExitMinRoi : true)
+                            && (initialMarginUsd <= 0m || roi >= profile.EarlyExitMinRoi)
                             && (!trendValid || dangerConfirmed)) // <-- PATCH
                         {
                             int barsPassed = CountClosedBarsSince(timeStopAnchorUtc.Value, c0.OpenTime, tfMinutes);
@@ -758,7 +758,7 @@ namespace FuturesBot.Services
                         // ===== Profit protect (ATR-based) - ROI gate =====
                         if (netRr >= effProtectAtRR
                             && netPnlUsd >= minProtectNetProfitUsd
-                            && (initialMarginUsd > 0m ? roi >= profile.MinProtectRoi : true)
+                            && (initialMarginUsd <= 0m || roi >= profile.MinProtectRoi)
                             && hasSL
                             && IsValidStopLoss(sl, isLongPosition, entry))
                         {
@@ -771,7 +771,7 @@ namespace FuturesBot.Services
                                 if (!IsSlTooCloseToPrice(price, targetSL, atr))
                                 {
                                     if (IsBetterStopLoss(targetSL, sl, isLongPosition)
-                                        && CanUpdateTrailing(symbol, sl, targetSL, isLongPosition, atr))
+                                        && CanUpdateTrailing(symbol, sl, targetSL, atr))
                                     {
                                         var oldSl = sl;
                                         sl = targetSL;
@@ -827,7 +827,7 @@ namespace FuturesBot.Services
 
                                         if (!IsSlTooCloseToPrice(price, beSl, atr)
                                             && IsBetterStopLoss(beSl, sl, isLongPosition)
-                                            && CanUpdateTrailing(symbol, sl, beSl, isLongPosition, atr))
+                                            && CanUpdateTrailing(symbol, sl, beSl, atr))
                                         {
                                             var oldSl = sl;
                                             sl = beSl;
@@ -895,7 +895,7 @@ namespace FuturesBot.Services
                                 if (IsSlTooCloseToPrice(price, targetSL, atr))
                                     goto AFTER_PROTECT_BLOCK;
 
-                                if (IsBetterStopLoss(targetSL, sl, isLongPosition) && CanUpdateTrailing(symbol, sl, targetSL, isLongPosition, atr))
+                                if (IsBetterStopLoss(targetSL, sl, isLongPosition) && CanUpdateTrailing(symbol, sl, targetSL, atr))
                                 {
                                     var oldSl = sl;
                                     sl = targetSL;
@@ -945,7 +945,7 @@ namespace FuturesBot.Services
                                     }
                                 }
 
-                                if (IsBetterStopLoss(targetSL, sl, isLongPosition) && CanUpdateTrailing(symbol, sl, targetSL, isLongPosition, 0m))
+                                if (IsBetterStopLoss(targetSL, sl, isLongPosition) && CanUpdateTrailing(symbol, sl, targetSL, 0m))
                                 {
                                     var oldSl = sl;
                                     sl = targetSL;
@@ -1587,7 +1587,7 @@ namespace FuturesBot.Services
         // PATCH #1: trailing throttle chỉ COMMIT sau khi update SL thành công
         // ============================================================
 
-        private bool CanUpdateTrailing(string symbol, decimal currentSl, decimal targetSl, bool isLong, decimal atr)
+        private bool CanUpdateTrailing(string symbol, decimal currentSl, decimal targetSl, decimal atr)
         {
             var now = DateTime.UtcNow;
 
