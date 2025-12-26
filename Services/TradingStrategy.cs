@@ -39,8 +39,9 @@ namespace FuturesBot.Services
     ///
     /// UPDATE (THEO NHẬN ĐỊNH):
     /// - Sideway touch: dùng "range cross band" (đỡ miss wick reject)
-    /// - Trend slope gate: Major cũng có soft-pass khi sep+volume rất mạnh
-    /// - TrendWeak chase block: nếu strongReject thì bypass chase-block (vì wick reject thường entry xa hơn chút)
+    /// - Trend slope gate: Major/Alt có soft-pass khi sep+volume rất mạnh (tăng "có kèo đều")
+    /// - Volume gate: chuyển từ hard-block sang soft-pass khi trend rõ (sep tốt) để bot không đứng im
+    /// - Sideway scalp: dùng candle MAIN TF để vào lệnh (TrendTF chỉ bias/level) -> scalp đúng nghĩa và đều kèo hơn
     /// </summary>
     public class TradingStrategy : IStrategyService
     {
@@ -237,6 +238,18 @@ namespace FuturesBot.Services
         private const decimal TrendWeakMaxDistToAnchorFactorMajor = 0.65m; // 65% của maxDist
         private const decimal TrendWeakMaxDistToAnchorFactorAlt = 0.70m;   // 70% của maxDist
 
+        // ========================= NEW: "CÓ KÈO ĐỀU" SOFT-PASS KNOBS =========================
+        // Sep rất tốt -> cho soft-pass Volume / Slope
+        private const decimal SepVeryGoodFactorMajor = 1.35m;
+        private const decimal SepVeryGoodFactorAlt = 1.25m;
+
+        private const decimal SoftVolumeMinRatioMajor = 0.42m; // thấp hơn hard 0.55
+        private const decimal SoftVolumeMinRatioAlt = 0.48m;   // thấp hơn hard 0.65
+        private const decimal SoftVolumeAbsFactor = 0.55m;     // abs >= 55% MinAbs
+
+        private const decimal SoftSlopeFactorMajor = 0.70m; // allow slope >= 70% minSlope nếu sep+vol mạnh
+        private const decimal SoftSlopeFactorAlt = 0.65m;
+
         // =====================================================================
         //                           ENTRY SIGNAL (MTF)
         // =====================================================================
@@ -289,31 +302,6 @@ namespace FuturesBot.Services
             decimal volUsdTrend = lastT.Close * lastT.Volume;
             decimal medianVolUsd = GetMedianVolUsd(candlesTrend, iT, VolumeMedianLookback);
             decimal ratioVsMedian = medianVolUsd > 0 ? (volUsdTrend / medianVolUsd) : 1m;
-
-            if (!IsVolumeOkTrend(isMajor, volUsdTrend, ratioVsMedian, coinInfo))
-            {
-                return new TradeSignal
-                {
-                    Type = SignalType.None,
-                    Reason = $"{coinInfo.Symbol}: Volume Trend yếu (vol={volUsdTrend:F0} USDT, vsMedian={ratioVsMedian:P0}) → bỏ qua.",
-                    Symbol = coinInfo.Symbol
-                };
-            }
-
-            // =================== SIDEWAY FILTER (TREND + MAIN) ===========================
-
-            bool sidewayTrend = IsSidewayStrong(candlesTrend, ema34_T, ema89_T);
-            bool sidewayMain = IsSidewayStrong(candlesMain, ema34_M, ema89_M);
-
-            if (!isMajor && (sidewayTrend || sidewayMain))
-            {
-                return new TradeSignal
-                {
-                    Type = SignalType.None,
-                    Reason = $"{coinInfo.Symbol}: Altcoin SIDEWAY mạnh trên {(sidewayTrend ? "TrendTF" : "MainTF")} → NO TRADE.",
-                    Symbol = coinInfo.Symbol
-                };
-            }
 
             // ================= FILTER: CLIMAX + OVEREXTENDED (TREND TF) =================
             bool climaxDanger =
@@ -378,6 +366,33 @@ namespace FuturesBot.Services
             bool trendStrongNow = (trendUpStrong && mainBiasUp) || (trendDownStrong && mainBiasDown);
             bool trendWeakNow = (upTrend || downTrend) && !trendStrongNow;
 
+            // =================== TREND STRENGTH METRICS (for soft-pass) ===================
+            decimal priceT = lastT.Close > 0 ? lastT.Close : 1m;
+            decimal sepTrendNow = Math.Abs(ema89T - ema200T) / priceT;
+            decimal minSep = isMajor ? MinEmaSeparationMajor : MinEmaSeparationAlt;
+
+            decimal sepBoost = isMajor ? (MinEmaSeparationMajor * SepVeryGoodFactorMajor) : (MinEmaSeparationAlt * SepVeryGoodFactorAlt);
+            bool sepVeryGood = sepTrendNow >= sepBoost;
+
+            // =================== VOLUME GATE (UPDATED: SOFT-PASS) ===================
+            bool volumeHardOk = IsVolumeOkTrend(isMajor, volUsdTrend, ratioVsMedian, coinInfo);
+            bool volumeSoftOk = IsVolumeSoftOkTrend(isMajor, volUsdTrend, ratioVsMedian, coinInfo);
+
+            // Chỉ hard-block khi: KHÔNG trend rõ (sep không tốt) hoặc đang sideway/chop
+            if (!volumeHardOk)
+            {
+                bool allowSoft = (trendUpStrong || trendDownStrong) && (sepVeryGood || sepTrendNow >= minSep);
+                if (!(allowSoft && volumeSoftOk))
+                {
+                    return new TradeSignal
+                    {
+                        Type = SignalType.None,
+                        Reason = $"{coinInfo.Symbol}: Volume Trend yếu (vol={volUsdTrend:F0} USDT, vsMedian={ratioVsMedian:P0}) → bỏ qua.",
+                        Symbol = coinInfo.Symbol
+                    };
+                }
+            }
+
             // Extreme cases (use TREND TF)
             bool extremeUp =
                 lastT.Close > ema89T * (1 + ExtremeEmaBoost) &&
@@ -389,6 +404,21 @@ namespace FuturesBot.Services
                 macdT[iT] < sigT[iT] &&
                 rsiT[iT] < ExtremeRsiLow;
 
+            // =================== SIDEWAY FILTER (TREND + MAIN) ===========================
+
+            bool sidewayTrend = IsSidewayStrong(candlesTrend, ema34_T, ema89_T);
+            bool sidewayMain = IsSidewayStrong(candlesMain, ema34_M, ema89_M);
+
+            if (!isMajor && (sidewayTrend || sidewayMain))
+            {
+                return new TradeSignal
+                {
+                    Type = SignalType.None,
+                    Reason = $"{coinInfo.Symbol}: Altcoin SIDEWAY mạnh trên {(sidewayTrend ? "TrendTF" : "MainTF")} → NO TRADE.",
+                    Symbol = coinInfo.Symbol
+                };
+            }
+
             // =================== MARKET STRUCTURE (TREND TF) ==================
             decimal stTol = isMajor ? StructureBreakToleranceMajor : StructureBreakToleranceAlt;
             var (lowerHigh, higherLow, lastSwingHigh, prevSwingHigh, lastSwingLow, prevSwingLow)
@@ -397,7 +427,7 @@ namespace FuturesBot.Services
             bool blockLongByStructure = lowerHigh && !higherLow;
             bool blockShortByStructure = higherLow && !lowerHigh;
 
-            // =================== SIDEWAY / PULLBACK SCALP (TREND TF) ======================
+            // =================== SIDEWAY / MEAN-REVERSION (UPDATED: ENTRY BY MAIN TF) ======================
 
             if (!extremeUp && !extremeDump)
             {
@@ -420,15 +450,20 @@ namespace FuturesBot.Services
                         biasUp = true;
                     }
 
-                    var sidewaySignal = BuildSidewayScalp(
+                    var sidewaySignal = BuildSidewayScalp_ByMainTf(
+                        candlesMain,
                         candlesTrend,
+                        ema34_M,
+                        ema89_M,
                         ema34_T,
                         ema89_T,
                         ema200_T,
+                        rsiM,
+                        macdM,
+                        sigM,
                         rsiT,
                         macdT,
                         sigT,
-                        lastT,
                         coinInfo,
                         biasUp,
                         biasDown,
@@ -496,26 +531,41 @@ namespace FuturesBot.Services
 
             if (trendUp || trendDown)
             {
-                decimal price = lastT.Close > 0 ? lastT.Close : 1m;
-                decimal sepTrend = Math.Abs(ema89T - ema200T) / price;
-
-                decimal minSep = isMajor ? MinEmaSeparationMajor : MinEmaSeparationAlt;
-                bool sepOk = sepTrend >= minSep;
+                bool sepOk = sepTrendNow >= minSep;
 
                 bool slopeOkNow = isMajor
                     ? IsEmaSlopeOk(ema89_T, iT, EmaSlopeLookbackTrend, MinMajorEmaSlopeTrend)
                     : IsEmaSlopeOk(ema89_T, iT, EmaSlopeLookbackTrend, MinAltEmaSlopeTrend);
 
-                // UPDATE: Major cũng có soft-pass slope nếu sep+volume rất mạnh (giảm "bot im" lúc trend mới)
+                // ==== UPDATED: soft-pass slope cho cả Major + Alt khi sep+volume mạnh (tăng kèo đều) ====
                 if (!slopeOkNow && sepOk)
                 {
-                    bool volumeStrong = (ratioVsMedian >= 1.00m) && (volUsdTrend >= coinInfo.MinVolumeUsdTrend * 1.20m);
+                    bool volumeStrong =
+                        (ratioVsMedian >= 0.95m) &&
+                        (volUsdTrend >= coinInfo.MinVolumeUsdTrend * 1.05m);
 
-                    decimal sepBoost = isMajor ? (MinEmaSeparationMajor * 1.35m) : (MinEmaSeparationAlt * 1.25m);
-                    bool sepVeryGood = sepTrend >= sepBoost;
+                    bool allowSoftSlope = sepVeryGood && volumeStrong;
 
-                    if (volumeStrong && sepVeryGood)
+                    // Soft slope threshold (giảm yêu cầu slope một chút khi sep+vol rất mạnh)
+                    if (allowSoftSlope)
+                    {
+                        decimal minSlope = isMajor ? MinMajorEmaSlopeTrend : MinAltEmaSlopeTrend;
+                        decimal softMinSlope = isMajor ? (minSlope * SoftSlopeFactorMajor) : (minSlope * SoftSlopeFactorAlt);
+                        slopeOkNow = IsEmaSlopeOk(ema89_T, iT, EmaSlopeLookbackTrend, softMinSlope);
+                    }
+
+                    // fallback cuối: nếu sep VERY GOOD + vol VERY GOOD -> cho pass luôn (đỡ bot im đúng đoạn mới trend)
+                    if (!slopeOkNow && allowSoftSlope)
                         slopeOkNow = true;
+                }
+
+                // Sep fail nhưng trend đang strong + volume ok -> cho soft-pass sep (nhẹ) để có kèo
+                if (!sepOk && (trendUpStrong || trendDownStrong))
+                {
+                    bool volOkEnough = volumeSoftOk || volumeHardOk;
+                    bool sepNear = sepTrendNow >= (minSep * 0.85m);
+                    if (volOkEnough && sepNear)
+                        sepOk = true;
                 }
 
                 if (!sepOk || !slopeOkNow)
@@ -523,7 +573,7 @@ namespace FuturesBot.Services
                     return new TradeSignal
                     {
                         Type = SignalType.None,
-                        Reason = $"{coinInfo.Symbol}: NO TREND – TrendTF yếu/chop (sep={sepTrend:P2}, slopeOk={slopeOkNow}).",
+                        Reason = $"{coinInfo.Symbol}: NO TREND – TrendTF yếu/chop (sep={sepTrendNow:P2}, slopeOk={slopeOkNow}).",
                         Symbol = coinInfo.Symbol
                     };
                 }
@@ -532,7 +582,7 @@ namespace FuturesBot.Services
                 {
                     rrTrend = GetDynamicTrendRR(
                         isMajor: isMajor,
-                        sepTrend: sepTrend,
+                        sepTrend: sepTrendNow,
                         slopeOk: slopeOkNow,
                         ratioVsMedian: ratioVsMedian,
                         volumeOkSoft: volumeOkSoft);
@@ -978,7 +1028,7 @@ namespace FuturesBot.Services
             {
                 decimal dist = Math.Abs(proposedEntry - anchor) / anchor;
 
-                if (isTrendWeak && !strongReject) // UPDATE: strongReject bypass chase-block
+                if (isTrendWeak && !strongReject) // strongReject bypass chase-block
                 {
                     decimal factor = coinInfo.IsMajor ? TrendWeakMaxDistToAnchorFactorMajor : TrendWeakMaxDistToAnchorFactorAlt;
                     decimal weakMax = maxDist * factor;
@@ -1253,7 +1303,7 @@ namespace FuturesBot.Services
             {
                 decimal dist = Math.Abs(proposedEntry - anchor) / anchor;
 
-                if (isTrendWeak && !strongReject) // UPDATE: strongReject bypass chase-block
+                if (isTrendWeak && !strongReject) // strongReject bypass chase-block
                 {
                     decimal factor = coinInfo.IsMajor ? TrendWeakMaxDistToAnchorFactorMajor : TrendWeakMaxDistToAnchorFactorAlt;
                     decimal weakMax = maxDist * factor;
@@ -1371,31 +1421,42 @@ namespace FuturesBot.Services
             };
         }
 
-        // ========================= SIDEWAY SCALP (TREND TF) =========================
+        // =====================================================================
+        //               SIDEWAY SCALP (UPDATED): ENTRY BY MAIN TF
+        // =====================================================================
 
-        private TradeSignal BuildSidewayScalp(
+        private TradeSignal BuildSidewayScalp_ByMainTf(
+            IReadOnlyList<Candle> candlesMain,
             IReadOnlyList<Candle> candlesTrend,
+            IReadOnlyList<decimal> ema34_M,
+            IReadOnlyList<decimal> ema89_M,
             IReadOnlyList<decimal> ema34_T,
             IReadOnlyList<decimal> ema89_T,
             IReadOnlyList<decimal> ema200_T,
+            IReadOnlyList<decimal> rsiM,
+            IReadOnlyList<decimal> macdM,
+            IReadOnlyList<decimal> sigM,
             IReadOnlyList<decimal> rsiT,
             IReadOnlyList<decimal> macdT,
             IReadOnlyList<decimal> sigT,
-            Candle lastT,
             CoinInfo coinInfo,
             bool trendBiasUp,
             bool trendBiasDown,
             decimal riskRewardSideway)
         {
             int iT = candlesTrend.Count - 2;
-            if (iT <= 0) return new TradeSignal();
+            int iM = candlesMain.Count - 2;
+            if (iT <= 2 || iM <= 2) return new TradeSignal();
 
-            decimal ema34 = ema34_T[iT];
-            decimal ema89 = ema89_T[iT];
-            decimal ema200 = ema200_T[iT];
+            // Bias/levels theo TrendTF (EMA89/200)
+            decimal ema89T = ema89_T[iT];
+            decimal ema200T = ema200_T[iT];
 
-            bool shortBiasT = ema34 <= ema89 && ema34 <= ema200;
-            bool longBiasT = ema34 >= ema89 && ema34 >= ema200;
+            // Entry candle theo MainTF
+            var cM = candlesMain[iM];
+
+            bool shortBiasT = ema34_T[iT] <= ema89T && ema34_T[iT] <= ema200T;
+            bool longBiasT = ema34_T[iT] >= ema89T && ema34_T[iT] >= ema200T;
 
             bool shortBias;
             bool longBias;
@@ -1417,61 +1478,62 @@ namespace FuturesBot.Services
             }
 
             if (!shortBias && !longBias)
-            {
-                return new TradeSignal
-                {
-                    Type = SignalType.None,
-                    Reason = $"{coinInfo.Symbol}: SIDEWAY – không có bias rõ.",
-                    Symbol = coinInfo.Symbol
-                };
-            }
+                return new TradeSignal();
 
-            // ===== AUTO OFFSET (SCALP) dùng EMA34/89 của TrendTF =====
+            // Auto offset (SCALP) dùng EMA34/89 của MAIN TF để hợp nhịp vào lệnh
             decimal scalpOffsetPct = CalcAutoEntryOffsetPercent(
-                price: (lastT.Close > 0 ? lastT.Close : 1m),
-                ema34: ema34,
-                ema89: ema89,
+                price: (cM.Close > 0 ? cM.Close : 1m),
+                ema34: ema34_M[iM],
+                ema89: ema89_M[iM],
                 isScalpMode: true);
 
+            // Momentum nhẹ cho scalp: RSI quay đầu + MACD đi ngang/đảo
+            bool macdUpOrFlat = macdM[iM] >= macdM[iM - 1];
+            bool macdDownOrFlat = macdM[iM] <= macdM[iM - 1];
+
+            // Use Trend EMA levels (nearest sup/res) nhưng touch/reject bằng Main candle
             if (shortBias)
             {
                 var resistances = new List<decimal>();
-                if (ema89 > lastT.Close) resistances.Add(ema89);
-                if (ema200 > lastT.Close) resistances.Add(ema200);
-
-                if (resistances.Count == 0)
-                    return new TradeSignal();
+                if (ema89T > cM.Close) resistances.Add(ema89T);
+                if (ema200T > cM.Close) resistances.Add(ema200T);
+                if (resistances.Count == 0) return new TradeSignal();
 
                 decimal nearestRes = resistances.Min();
 
-                // UPDATE: touch dùng range cross band (đỡ miss wick reject)
-                bool touchRes = TouchBandCross(lastT.Low, lastT.High, nearestRes, EmaRetestBand);
+                bool touchRes = TouchBandCross(cM.Low, cM.High, nearestRes, EmaRetestBand);
+                bool bearBody = cM.Close <= cM.Open;
 
-                bool bearBody = lastT.Close <= lastT.Open;
-                bool reject = lastT.High > nearestRes && lastT.Close < nearestRes && bearBody;
+                bool reject =
+                    cM.High > nearestRes &&
+                    cM.Close < nearestRes &&
+                    bearBody;
 
-                bool rsiHigh = rsiT[iT] >= 55m;
-                bool rsiTurnDown = rsiT[iT] <= rsiT[iT - 1];
-                bool macdDownOrFlat = macdT[iT] <= macdT[iT - 1];
+                bool rsiHigh = rsiM[iM] >= 55m;
+                bool rsiTurnDown = rsiM[iM] <= rsiM[iM - 1];
 
                 bool momentum = rsiHigh && (rsiTurnDown || macdDownOrFlat);
 
-                if (!(touchRes && reject && momentum))
-                    return new TradeSignal();
+                // thêm chút “có kèo đều”: nếu wick reject rõ + MACD cross xuống thì cho pass
+                bool macdCrossDown = macdM[iM] < sigM[iM] && macdM[iM - 1] >= sigM[iM - 1];
+                bool wickStrong = IsStrongRejectionShort_OnEntryTf(candlesMain, iM);
 
-                decimal rawEntry = lastT.Close * (1m + scalpOffsetPct);
+                bool ok = (touchRes && reject && momentum) || (touchRes && wickStrong && macdCrossDown);
 
-                decimal swingHigh = PriceActionHelper.FindSwingHigh(candlesTrend, iT, SwingLookback);
+                if (!ok) return new TradeSignal();
+
+                decimal rawEntry = cM.Close * (1m + scalpOffsetPct);
+
+                // SL theo swing MAIN (scalp) để vừa hơn
+                decimal swingHigh = PriceActionHelper.FindSwingHigh(candlesMain, iM, SwingLookback);
+                decimal baseHigh = (swingHigh > 0 ? swingHigh : cM.High);
+                decimal sl = baseHigh * (1m + StopBufferPercent);
 
                 decimal entry = rawEntry;
                 if (swingHigh > 0 && entry >= swingHigh)
-                    entry = (lastT.Close + swingHigh) / 2;
+                    entry = (cM.Close + swingHigh) / 2m;
 
-                decimal baseHigh = (swingHigh > 0 ? swingHigh : lastT.High);
-                decimal sl = baseHigh * (1m + StopBufferPercent);
-
-                if (sl <= entry)
-                    return new TradeSignal();
+                if (sl <= entry) return new TradeSignal();
 
                 decimal risk = sl - entry;
                 decimal tp = entry - risk * riskRewardSideway;
@@ -1482,7 +1544,7 @@ namespace FuturesBot.Services
                     EntryPrice = entry,
                     StopLoss = sl,
                     TakeProfit = tp,
-                    Reason = $"{coinInfo.Symbol}: SIDEWAY SCALP SHORT – retest EMA + reject + RSI/MACD quay đầu. off={scalpOffsetPct:P2}",
+                    Reason = $"{coinInfo.Symbol}: SIDEWAY SCALP SHORT (MainTF entry) – touch TrendEMA + reject on MainTF. off={scalpOffsetPct:P2}",
                     Symbol = coinInfo.Symbol,
                     Mode = TradeMode.Scalp
                 };
@@ -1491,42 +1553,43 @@ namespace FuturesBot.Services
             // long sideway
             {
                 var supports = new List<decimal>();
-                if (ema89 < lastT.Close) supports.Add(ema89);
-                if (ema200 < lastT.Close) supports.Add(ema200);
-
-                if (supports.Count == 0)
-                    return new TradeSignal();
+                if (ema89T < cM.Close) supports.Add(ema89T);
+                if (ema200T < cM.Close) supports.Add(ema200T);
+                if (supports.Count == 0) return new TradeSignal();
 
                 decimal nearestSup = supports.Max();
 
-                // UPDATE: touch dùng range cross band (đỡ miss wick reject)
-                bool touchSup = TouchBandCross(lastT.Low, lastT.High, nearestSup, EmaRetestBand);
+                bool touchSup = TouchBandCross(cM.Low, cM.High, nearestSup, EmaRetestBand);
+                bool bullBody = cM.Close >= cM.Open;
 
-                bool bullBody = lastT.Close >= lastT.Open;
-                bool reject = lastT.Low < nearestSup && lastT.Close > nearestSup && bullBody;
+                bool reject =
+                    cM.Low < nearestSup &&
+                    cM.Close > nearestSup &&
+                    bullBody;
 
-                bool rsiOk = rsiT[iT] >= 45m;
-                bool rsiTurnUp = rsiT[iT] >= rsiT[iT - 1];
-                bool macdUpOrFlat = macdT[iT] >= macdT[iT - 1];
+                bool rsiOk = rsiM[iM] >= 45m;
+                bool rsiTurnUp = rsiM[iM] >= rsiM[iM - 1];
 
                 bool momentum = rsiOk && (rsiTurnUp || macdUpOrFlat);
 
-                if (!(touchSup && reject && momentum))
-                    return new TradeSignal();
+                bool macdCrossUp = macdM[iM] > sigM[iM] && macdM[iM - 1] <= sigM[iM - 1];
+                bool wickStrong = IsStrongRejectionLong_OnEntryTf(candlesMain, iM);
 
-                decimal rawEntry = lastT.Close * (1m - scalpOffsetPct);
+                bool ok = (touchSup && reject && momentum) || (touchSup && wickStrong && macdCrossUp);
 
-                decimal swingLow = PriceActionHelper.FindSwingLow(candlesTrend, iT, SwingLookback);
+                if (!ok) return new TradeSignal();
+
+                decimal rawEntry = cM.Close * (1m - scalpOffsetPct);
+
+                decimal swingLow = PriceActionHelper.FindSwingLow(candlesMain, iM, SwingLookback);
+                decimal baseLow = (swingLow > 0 ? swingLow : cM.Low);
+                decimal sl = baseLow * (1m - StopBufferPercent);
 
                 decimal entry = rawEntry;
                 if (swingLow > 0 && entry <= swingLow)
-                    entry = (lastT.Close + swingLow) / 2;
+                    entry = (cM.Close + swingLow) / 2m;
 
-                decimal baseLow = (swingLow > 0 ? swingLow : lastT.Low);
-                decimal sl = baseLow * (1m - StopBufferPercent);
-
-                if (sl >= entry || sl <= 0)
-                    return new TradeSignal();
+                if (sl >= entry || sl <= 0) return new TradeSignal();
 
                 decimal risk = entry - sl;
                 decimal tp = entry + risk * riskRewardSideway;
@@ -1537,7 +1600,7 @@ namespace FuturesBot.Services
                     EntryPrice = entry,
                     StopLoss = sl,
                     TakeProfit = tp,
-                    Reason = $"{coinInfo.Symbol}: SIDEWAY SCALP LONG – retest EMA + reject + RSI/MACD quay đầu. off={scalpOffsetPct:P2}",
+                    Reason = $"{coinInfo.Symbol}: SIDEWAY SCALP LONG (MainTF entry) – touch TrendEMA + reject on MainTF. off={scalpOffsetPct:P2}",
                     Symbol = coinInfo.Symbol,
                     Mode = TradeMode.Scalp
                 };
@@ -1785,6 +1848,26 @@ namespace FuturesBot.Services
                 (volUsdTrend >= minAbs * 1.25m && ratioVsMedian >= minRatio * 0.85m);
 
             return overrideOk;
+        }
+
+        private static bool IsVolumeSoftOkTrend(bool isMajor, decimal volUsdTrend, decimal ratioVsMedian, CoinInfo coinInfo)
+        {
+            if (volUsdTrend <= 0) return false;
+
+            decimal minAbs = coinInfo.MinVolumeUsdTrend;
+            decimal softMinRatio = isMajor ? SoftVolumeMinRatioMajor : SoftVolumeMinRatioAlt;
+
+            bool absOk = volUsdTrend >= minAbs * SoftVolumeAbsFactor;
+            bool ratioOk = ratioVsMedian >= softMinRatio;
+
+            // soft-pass chỉ cần 1 trong 2 mạnh + cái còn lại không quá tệ
+            if (absOk && ratioOk) return true;
+
+            bool altSoft =
+                (ratioVsMedian >= softMinRatio * 0.95m && volUsdTrend >= minAbs * 0.65m) ||
+                (volUsdTrend >= minAbs * 0.85m && ratioVsMedian >= softMinRatio * 0.85m);
+
+            return altSoft;
         }
 
         // =====================================================================
