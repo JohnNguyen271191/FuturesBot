@@ -27,6 +27,7 @@
         public decimal RiskPerTradePercent { get; set; } = 1m;
         public string MainTimeFrame { get; set; } = "15m";
         public string TrendTimeFrame { get; set; } = "1h";
+        public decimal MinVolumeUsdTrend { get; set; } = 600_000m;
     }
 
     public class Urls

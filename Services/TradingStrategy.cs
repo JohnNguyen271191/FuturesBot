@@ -1,5 +1,3 @@
-using System;
-using System.Collections.Generic;
 using FuturesBot.Config;
 using FuturesBot.IServices;
 using FuturesBot.Models;
@@ -12,8 +10,8 @@ namespace FuturesBot.Services
     /// TradingStrategy V4 WINRATE PATCH + MTF (TF-agnostic)
     ///
     /// GenerateSignal(candlesTrend, candlesEntry, coinInfo)
-    /// - candlesTrend: Trend TF (15m/30m/1h...)
-    /// - candlesEntry: Entry TF (3m/5m/15m...)
+    /// - candlesTrend: Trend TF (5m/15m/1h...)
+    /// - candlesEntry: Entry TF (30/1h...)
     /// NOTE: dùng NẾN ĐÃ ĐÓNG (Count - 2)
     ///
     /// PATCH CORE:
@@ -45,7 +43,7 @@ namespace FuturesBot.Services
 
         public TradingStrategy(IndicatorService indicators)
         {
-            _indicators = indicators ?? throw new ArgumentNullException(nameof(indicators));
+            _indicators = indicators;
         }
 
         // ========================= CONFIG ==============================
@@ -114,12 +112,6 @@ namespace FuturesBot.Services
         private const decimal ClimaxBodyMultiplier = 1.8m;
         private const decimal ClimaxVolumeMultiplier = 1.5m;
         private const decimal OverextendedFromEmaPercent = 0.01m; // 1% xa EMA gần nhất
-
-        // ========================= BTC vs ALT CONFIG ====================
-
-        // Volume gate uses TREND candle (đặt theo USDT value của 1 nến trend)
-        private const decimal MinMajorVolumeUsdTrend = 2_000_000m; // BTC/ETH
-        private const decimal MinAltVolumeUsdTrend = 600_000m;     // Altcoin
 
         private const int VolumeMedianLookback = 40;
         private const decimal MinVolumeVsMedianRatioMajor = 0.55m;
@@ -290,7 +282,7 @@ namespace FuturesBot.Services
             decimal medianVolUsd = GetMedianVolUsd(candlesTrend, iT, VolumeMedianLookback);
             decimal ratioVsMedian = medianVolUsd > 0 ? (volUsdTrend / medianVolUsd) : 1m;
 
-            if (!IsVolumeOkTrend(isMajor, volUsdTrend, ratioVsMedian))
+            if (!IsVolumeOkTrend(isMajor, volUsdTrend, ratioVsMedian, coinInfo))
             {
                 return new TradeSignal
                 {
@@ -508,7 +500,7 @@ namespace FuturesBot.Services
 
                 if (!isMajor && !slopeOkNow && sepOk)
                 {
-                    bool volumeStrong = (ratioVsMedian >= 1.00m) && (volUsdTrend >= MinAltVolumeUsdTrend * 1.20m);
+                    bool volumeStrong = (ratioVsMedian >= 1.00m) && (volUsdTrend >= coinInfo.MinVolumeUsdTrend * 1.20m);
                     bool sepVeryGood = sepTrend >= (MinEmaSeparationAlt * 1.25m);
 
                     if (volumeStrong && sepVeryGood)
@@ -1749,7 +1741,7 @@ namespace FuturesBot.Services
             return hits >= SidewayConfirmBars;
         }
 
-        private decimal GetMedianVolUsd(IReadOnlyList<Candle> candlesTrend, int endIdx, int lookback)
+        private static decimal GetMedianVolUsd(IReadOnlyList<Candle> candlesTrend, int endIdx, int lookback)
         {
             int start = Math.Max(0, endIdx - lookback + 1);
             var list = new List<decimal>();
@@ -1767,11 +1759,11 @@ namespace FuturesBot.Services
             return (list.Count % 2 == 1) ? list[mid] : (list[mid - 1] + list[mid]) / 2m;
         }
 
-        private bool IsVolumeOkTrend(bool isMajor, decimal volUsdTrend, decimal ratioVsMedian)
+        private static bool IsVolumeOkTrend(bool isMajor, decimal volUsdTrend, decimal ratioVsMedian, CoinInfo coinInfo)
         {
             if (volUsdTrend <= 0) return false;
 
-            decimal minAbs = isMajor ? MinMajorVolumeUsdTrend : MinAltVolumeUsdTrend;
+            decimal minAbs = coinInfo.MinVolumeUsdTrend;
             decimal minRatio = isMajor ? MinVolumeVsMedianRatioMajor : MinVolumeVsMedianRatioAlt;
 
             bool absOk = volUsdTrend >= minAbs;
