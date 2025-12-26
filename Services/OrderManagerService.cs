@@ -480,9 +480,9 @@ namespace FuturesBot.Services
 
                     if (isScalp)
                     {
-                        minProtectNetProfitUsd = Math.Max(minProtectNetProfitUsd, estFeeUsd * 3.5m);
-                        minQuickNetProfitUsd = Math.Max(minQuickNetProfitUsd, estFeeUsd * 3.5m);
-                        minBoundaryNetProfitUsd = Math.Max(minBoundaryNetProfitUsd, estFeeUsd * 3.5m);
+                        minProtectNetProfitUsd = Math.Max(minProtectNetProfitUsd, estFeeUsd * 3m);
+                        minQuickNetProfitUsd = Math.Max(minQuickNetProfitUsd, estFeeUsd * 3m);
+                        minBoundaryNetProfitUsd = Math.Max(minBoundaryNetProfitUsd, estFeeUsd * 3m);
                     }
 
                     // =================== SAFETY TP (nếu thiếu TP) ===================
