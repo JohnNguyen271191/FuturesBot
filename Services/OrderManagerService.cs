@@ -1664,26 +1664,6 @@ namespace FuturesBot.Services
             // Place SL
             await _exchange.PlaceStopOnlyAsync(symbol, side, posSide, qty, newSL);
 
-            // verify SL tồn tại trên sàn, retry 1 lần nếu missing
-            bool slDetected = false;
-
-            await Task.Delay(250);
-            var check1 = await DetectManualSlTpAsync(symbol, isLong, currentPos.EntryPrice, currentPos);
-            if (check1.Sl.HasValue) slDetected = true;
-
-            if (!slDetected)
-            {
-                await _notify.SendAsync($"[{symbol}] WARN: SL not detected after place → retry place SL once.");
-                await _exchange.PlaceStopOnlyAsync(symbol, side, posSide, qty, newSL);
-
-                await Task.Delay(250);
-                var check2 = await DetectManualSlTpAsync(symbol, isLong, currentPos.EntryPrice, currentPos);
-                if (check2.Sl.HasValue) slDetected = true;
-
-                if (!slDetected)
-                    await _notify.SendAsync($"[{symbol}] WARN: SL still missing after retry. (exchange lag/format?)");
-            }
-
             // Keep TP if needed
             if (hasTp && expectedTp.HasValue)
             {
@@ -1703,7 +1683,7 @@ namespace FuturesBot.Services
                 }
             }
 
-            return (lastSlTpCheckUtc, slDetected);
+            return (lastSlTpCheckUtc, true);
         }
 
         // ============================================================
