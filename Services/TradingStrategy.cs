@@ -33,6 +33,11 @@ namespace FuturesBot.Services
     /// NEW PATCH (THEO YÊU CẦU):
     /// 6) Hard-confirm fallback: khi rejectB fail nhưng momentumHard TRUE => entry "marketable limit" theo close B
     /// 7) TrendWeak: nếu trend yếu mà entryDistToAnchor quá lớn => BLOCK (tránh chase lúc lấp lửng)
+    ///
+    /// NEW PATCH (AUTO OFFSET):
+    /// - Auto EntryOffset theo EMA gap (EMA34 vs EMA89) + clamp (ăn chắc, giảm miss DOGE/ADA mà không phá SUI)
+    /// - Trend: gap nhỏ => offset lớn hơn (đỡ miss), gap lớn => offset nhỏ (entry đẹp)
+    /// - Scalp: giữ gần 0.10%, chỉ chỉnh nhẹ theo gap
     /// </summary>
     public class TradingStrategy : IStrategyService
     {
@@ -74,9 +79,27 @@ namespace FuturesBot.Services
         private const decimal TrendRetestRsiMaxForLong = 68m;
         private const decimal TrendRetestRsiMinForShort = 32m;
 
-        // Entry offset để tránh đỉnh/đáy (trend)
-        private const decimal EntryOffsetPercent = 0.003m;          // 0.3% cho trend
-        private const decimal EntryOffsetPercentForScal = 0.001m;   // 0.1% cho scalp
+        // ========================= AUTO ENTRY OFFSET (NEW) =========================
+        // NOTE: % ở đây dạng ratio: 0.0015m = 0.15%
+        private const bool EnableAutoEntryOffset = true;
+
+        // EMA gap thresholds (emaGap = |EMA34-EMA89|/price)
+        private const decimal AutoGapSmall = 0.0015m; // 0.15% -> EMA chồng / range
+        private const decimal AutoGapBig = 0.0030m;   // 0.30% -> trend rõ
+
+        // TREND offset buckets
+        private const decimal AutoTrendOffset_SmallGap = 0.0020m; // 0.20%
+        private const decimal AutoTrendOffset_MidGap = 0.0015m;   // 0.15%
+        private const decimal AutoTrendOffset_BigGap = 0.0010m;   // 0.10%
+
+        // SCALP offset buckets (base ~0.10%)
+        private const decimal AutoScalpOffset_SmallGap = 0.0012m; // 0.12%
+        private const decimal AutoScalpOffset_MidGap = 0.0010m;   // 0.10%
+        private const decimal AutoScalpOffset_BigGap = 0.0008m;   // 0.08%
+
+        // clamp
+        private const decimal AutoOffsetMin = 0.0008m; // 0.08%
+        private const decimal AutoOffsetMax = 0.0022m; // 0.22%
 
         // SL neo EMA cho trend
         private const decimal AnchorSlBufferPercent = 0.0015m;      // 0.15%
@@ -585,6 +608,44 @@ namespace FuturesBot.Services
         }
 
         // =====================================================================
+        //                         AUTO OFFSET HELPERS (NEW)
+        // =====================================================================
+
+        private decimal CalcAutoEntryOffsetPercent(
+            decimal price,
+            decimal ema34,
+            decimal ema89,
+            bool isScalpMode)
+        {
+            if (!EnableAutoEntryOffset)
+                return isScalpMode ? AutoScalpOffset_MidGap : AutoTrendOffset_MidGap;
+
+            if (price <= 0 || ema34 <= 0 || ema89 <= 0)
+                return isScalpMode ? AutoScalpOffset_MidGap : AutoTrendOffset_MidGap;
+
+            var emaGap = Math.Abs(ema34 - ema89) / price; // 0.0015 = 0.15%
+
+            decimal offset;
+            if (isScalpMode)
+            {
+                offset = emaGap < AutoGapSmall ? AutoScalpOffset_SmallGap
+                      : emaGap > AutoGapBig ? AutoScalpOffset_BigGap
+                      : AutoScalpOffset_MidGap;
+            }
+            else
+            {
+                offset = emaGap < AutoGapSmall ? AutoTrendOffset_SmallGap
+                      : emaGap < AutoGapBig ? AutoTrendOffset_MidGap
+                      : AutoTrendOffset_BigGap;
+            }
+
+            if (offset < AutoOffsetMin) offset = AutoOffsetMin;
+            if (offset > AutoOffsetMax) offset = AutoOffsetMax;
+
+            return offset;
+        }
+
+        // =====================================================================
         //                    MODE 2: PULLBACK -> REJECT -> CONTINUATION
         // =====================================================================
 
@@ -842,7 +903,6 @@ namespace FuturesBot.Services
             bool okBreak = breakSmall || breakSoft;
 
             // === NEW PATCH #6: hard-confirm fallback
-            // Nếu rejectB fail nhưng momentumHard true => vẫn ok (đỡ miss cú bật mạnh)
             bool okByReject = okBase && okBreak && rejectB;
             bool okByHardConfirm = okBase && okBreak && momentumHard && volumeOkSoft;
 
@@ -889,20 +949,22 @@ namespace FuturesBot.Services
                 };
             }
 
-            // Entry logic:
-            // - StrongReject: marketable close B
-            // - HardConfirm fallback (rejectB false): marketable close B (nhẹ hơn Mode1)
-            // - else: anchor offset
             bool hardConfirmFallback = momentumHard && !rejectB;
+
+            // ===== AUTO OFFSET (TREND) =====
+            decimal offsetPct = CalcAutoEntryOffsetPercent(
+                price: (B.Close > 0 ? B.Close : anchor),
+                ema34: ema34,
+                ema89: ema89,
+                isScalpMode: false);
 
             decimal proposedEntry = strongReject
                 ? B.Close * (1m + MarketableLimitOffset)
                 : (hardConfirmFallback
                     ? B.Close * (1m + MarketableLimitOffset)
-                    : anchor * (1m + EntryOffsetPercent));
+                    : anchor * (1m + offsetPct));
 
             // =================== NEW PATCH #7: TrendWeak chase block ===================
-            // Trend yếu => dist to anchor phải nhỏ hơn ngưỡng chặt hơn (tránh chase)
             bool isTrendWeak = !trendStrongNow;
 
             decimal maxDist = coinInfo.IsMajor ? MaxEntryDistanceToAnchorMajor : MaxEntryDistanceToAnchorAlt;
@@ -967,7 +1029,7 @@ namespace FuturesBot.Services
 
             decimal entry = proposedEntry;
 
-            // Normal dist gate (giữ lại) – áp dụng cho cả strong trend
+            // Normal dist gate
             if (anchor > 0)
             {
                 decimal dist = Math.Abs(entry - anchor) / anchor;
@@ -1007,13 +1069,13 @@ namespace FuturesBot.Services
 
             TradeMode mode =
                 strongReject ? TradeMode.Mode1_StrongReject :
-                hardConfirmFallback ? TradeMode.Mode1_StrongReject : // reuse enum (nếu m có enum riêng thì đổi)
+                hardConfirmFallback ? TradeMode.Mode1_StrongReject :
                 TradeMode.Trend;
 
             string tag =
                 strongReject ? "MODE1_STRONG_REJECT" :
                 hardConfirmFallback ? "HARD_CONFIRM_FALLBACK" :
-                "TREND_LIMIT";
+                "TREND_LIMIT_AUTO_OFFSET";
 
             string weakTag = requireHard ? " (TREND_WEAK)" : "";
 
@@ -1023,7 +1085,7 @@ namespace FuturesBot.Services
                 EntryPrice = entry,
                 StopLoss = sl,
                 TakeProfit = tp,
-                Reason = $"{coinInfo.Symbol}: LONG{weakTag} – retest(A)+confirm(B) @EMA({anchor:F6}) + {(strongReject ? "StrongReject" : (hardConfirmFallback ? "HardConfirmFallback" : (momentumHard ? "MomHard" : "Reject")))}. Entry={tag}, RR={rr:F2}.",
+                Reason = $"{coinInfo.Symbol}: LONG{weakTag} – retest(A)+confirm(B) @EMA({anchor:F6}) + {(strongReject ? "StrongReject" : (hardConfirmFallback ? "HardConfirmFallback" : (momentumHard ? "MomHard" : "Reject")))}. Entry={tag}, off={offsetPct:P2}, RR={rr:F2}.",
                 Symbol = coinInfo.Symbol,
                 Mode = mode
             };
@@ -1168,11 +1230,18 @@ namespace FuturesBot.Services
 
             bool hardConfirmFallback = momentumHard && !rejectB;
 
+            // ===== AUTO OFFSET (TREND) =====
+            decimal offsetPct = CalcAutoEntryOffsetPercent(
+                price: (B.Close > 0 ? B.Close : anchor),
+                ema34: ema34,
+                ema89: ema89,
+                isScalpMode: false);
+
             decimal proposedEntry = strongReject
                 ? B.Close * (1m - MarketableLimitOffset)
                 : (hardConfirmFallback
                     ? B.Close * (1m - MarketableLimitOffset)
-                    : anchor * (1m - EntryOffsetPercent));
+                    : anchor * (1m - offsetPct));
 
             // NEW PATCH #7: TrendWeak chase block
             bool isTrendWeak = !trendStrongNow;
@@ -1284,7 +1353,7 @@ namespace FuturesBot.Services
             string tag =
                 strongReject ? "MODE1_STRONG_REJECT" :
                 hardConfirmFallback ? "HARD_CONFIRM_FALLBACK" :
-                "TREND_LIMIT";
+                "TREND_LIMIT_AUTO_OFFSET";
 
             string weakTag = requireHard ? " (TREND_WEAK)" : "";
 
@@ -1294,7 +1363,7 @@ namespace FuturesBot.Services
                 EntryPrice = entry,
                 StopLoss = sl,
                 TakeProfit = tp,
-                Reason = $"{coinInfo.Symbol}: SHORT{weakTag} – retest(A)+confirm(B) @EMA({anchor:F6}) + {(strongReject ? "StrongReject" : (hardConfirmFallback ? "HardConfirmFallback" : (momentumHard ? "MomHard" : "Reject")))}. Entry={tag}, RR={rr:F2}.",
+                Reason = $"{coinInfo.Symbol}: SHORT{weakTag} – retest(A)+confirm(B) @EMA({anchor:F6}) + {(strongReject ? "StrongReject" : (hardConfirmFallback ? "HardConfirmFallback" : (momentumHard ? "MomHard" : "Reject")))}. Entry={tag}, off={offsetPct:P2}, RR={rr:F2}.",
                 Symbol = coinInfo.Symbol,
                 Mode = mode
             };
@@ -1355,6 +1424,13 @@ namespace FuturesBot.Services
                 };
             }
 
+            // ===== AUTO OFFSET (SCALP) dùng EMA34/89 của TrendTF =====
+            decimal scalpOffsetPct = CalcAutoEntryOffsetPercent(
+                price: (lastT.Close > 0 ? lastT.Close : 1m),
+                ema34: ema34,
+                ema89: ema89,
+                isScalpMode: true);
+
             if (shortBias)
             {
                 var resistances = new List<decimal>();
@@ -1382,7 +1458,7 @@ namespace FuturesBot.Services
                 if (!(touchRes && reject && momentum))
                     return new TradeSignal();
 
-                decimal rawEntry = lastT.Close * (1 + EntryOffsetPercentForScal);
+                decimal rawEntry = lastT.Close * (1m + scalpOffsetPct);
 
                 decimal swingHigh = PriceActionHelper.FindSwingHigh(candlesTrend, iT, SwingLookback);
 
@@ -1405,7 +1481,7 @@ namespace FuturesBot.Services
                     EntryPrice = entry,
                     StopLoss = sl,
                     TakeProfit = tp,
-                    Reason = $"{coinInfo.Symbol}: SIDEWAY SCALP SHORT – retest EMA + reject + RSI/MACD quay đầu.",
+                    Reason = $"{coinInfo.Symbol}: SIDEWAY SCALP SHORT – retest EMA + reject + RSI/MACD quay đầu. off={scalpOffsetPct:P2}",
                     Symbol = coinInfo.Symbol,
                     Mode = TradeMode.Scalp
                 };
@@ -1438,7 +1514,7 @@ namespace FuturesBot.Services
                 if (!(touchSup && reject && momentum))
                     return new TradeSignal();
 
-                decimal rawEntry = lastT.Close * (1 - EntryOffsetPercentForScal);
+                decimal rawEntry = lastT.Close * (1m - scalpOffsetPct);
 
                 decimal swingLow = PriceActionHelper.FindSwingLow(candlesTrend, iT, SwingLookback);
 
@@ -1461,7 +1537,7 @@ namespace FuturesBot.Services
                     EntryPrice = entry,
                     StopLoss = sl,
                     TakeProfit = tp,
-                    Reason = $"{coinInfo.Symbol}: SIDEWAY SCALP LONG – retest EMA + reject + RSI/MACD quay đầu.",
+                    Reason = $"{coinInfo.Symbol}: SIDEWAY SCALP LONG – retest EMA + reject + RSI/MACD quay đầu. off={scalpOffsetPct:P2}",
                     Symbol = coinInfo.Symbol,
                     Mode = TradeMode.Scalp
                 };
