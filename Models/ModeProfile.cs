@@ -16,15 +16,11 @@ namespace FuturesBot.Models
         public decimal TimeStopMinRR { get; init; }
 
         // ==== ROI-based gates (NEW) ====
-        // ROI = netPnlUsd / initialMarginUsd (có leverage)
-        // Ví dụ ROI=0.30 => +30%
         public decimal MinProtectRoi { get; init; }
         public decimal MinQuickTakeRoi { get; init; }
         public decimal EarlyExitMinRoi { get; init; }
         public decimal MinBoundaryExitRoi { get; init; }
 
-        // Danger cut: yêu cầu thua lỗ tối thiểu theo ROI để tránh cắt vì noise
-        // absLossRoi = (-netPnlUsd)/initialMarginUsd
         public decimal MinDangerCutAbsLossRoi { get; init; }
 
         public int EarlyExitBars { get; init; }
@@ -56,11 +52,13 @@ namespace FuturesBot.Models
                     EarlyExitBars = 8,
                     EarlyExitMinRR = 0.10m,
 
-                    MinProtectRoi = 0.20m,         // +20% margin => bắt đầu protect
-                    MinQuickTakeRoi = 0.30m,       // +30% margin => quick take nếu weakening
-                    EarlyExitMinRoi = 0.18m,       // +18% margin => early-exit nếu stall/weak
-                    MinBoundaryExitRoi = 0.12m,    // +12% margin => exit nếu boundary break confirmed
-                    MinDangerCutAbsLossRoi = 0.15m,// -15% margin => mới cho danger cut (tránh noise)
+                    // ROI-based
+                    // NOTE: HẠ để phù hợp scalp major/fees -> lock sớm hơn, ít bỏ kèo
+                    MinProtectRoi = 0.12m,         // cũ 0.20
+                    MinQuickTakeRoi = 0.22m,       // cũ 0.30
+                    EarlyExitMinRoi = 0.14m,       // cũ 0.18
+                    MinBoundaryExitRoi = 0.10m,    // cũ 0.12
+                    MinDangerCutAbsLossRoi = 0.15m,// giữ
 
                     SafetyTpRR = 1.30m,
                     EmaBreakTolerance = 0.0012m,
@@ -83,7 +81,7 @@ namespace FuturesBot.Models
                     EarlyExitBars = 8,
                     EarlyExitMinRR = 0.13m,
 
-                    // ROI-based (NEW)
+                    // ROI-based
                     MinProtectRoi = 0.22m,
                     MinQuickTakeRoi = 0.32m,
                     EarlyExitMinRoi = 0.20m,
@@ -111,9 +109,9 @@ namespace FuturesBot.Models
                     EarlyExitBars = 15,
                     EarlyExitMinRR = 0.20m,
 
-                    // ROI-based (NEW)
-                    MinProtectRoi = 0.3m,
-                    MinQuickTakeRoi = 0.5m,
+                    // ROI-based
+                    MinProtectRoi = 0.30m,
+                    MinQuickTakeRoi = 0.50m,
                     EarlyExitMinRoi = 0.22m,
                     MinBoundaryExitRoi = 0.16m,
                     MinDangerCutAbsLossRoi = 0.20m,
