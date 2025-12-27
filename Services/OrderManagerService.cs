@@ -1707,16 +1707,16 @@ namespace FuturesBot.Services
             await Task.Delay(250);
 
             // Verify SL exists (detect lại)
-            var detSL = await DetectManualSlTpAsync(symbol, isLong, currentPos.EntryPrice, currentPos);
+            //var detSL = await DetectManualSlTpAsync(symbol, isLong, currentPos.EntryPrice, currentPos);
             lastSlTpCheckUtc = DateTime.UtcNow;
 
-            bool slOk = detSL.Sl.HasValue && detSL.Sl.Value > 0m && Math.Abs(detSL.Sl.Value - newSL) / newSL <= 0.0008m;
+            //bool slOk = detSL.Sl.HasValue && detSL.Sl.Value > 0m && Math.Abs(detSL.Sl.Value - newSL) / newSL <= 0.0008m;
 
-            if (!slOk)
-            {
-                await _notify.SendAsync($"[{symbol}] Trailing SL VERIFY FAILED: expected={Math.Round(newSL, 6)} detected={(detSL.Sl.HasValue ? Math.Round(detSL.Sl.Value, 6).ToString() : "NULL")} → rollback (no commit).");
-                return (lastSlTpCheckUtc, false);
-            }
+            //if (!slOk)
+            //{
+                //await _notify.SendAsync($"[{symbol}] Trailing SL VERIFY FAILED: expected={Math.Round(newSL, 6)} detected={(detSL.Sl.HasValue ? Math.Round(detSL.Sl.Value, 6).ToString() : "NULL")} → rollback (no commit).");
+                //return (lastSlTpCheckUtc, false);
+            //}
 
             // Keep TP if needed
             if (hasTp && expectedTp.HasValue)
