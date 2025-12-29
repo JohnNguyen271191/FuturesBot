@@ -40,6 +40,15 @@ namespace FuturesBot.Services
             _slack = new SlackNotifierService(_config);
         }
 
+        private static string NormalizeSymbol(string? symbol)
+        {
+            var s = (symbol ?? string.Empty).Trim().ToUpperInvariant();
+            // Common typo guard: FDUSD pair is sometimes mistyped as FDSDT.
+            if (s.EndsWith("FDSDT", StringComparison.Ordinal))
+                s = s[..^5] + "FDUSD";
+            return s;
+        }
+
         // =========================
         // Time sync
         // =========================
@@ -158,9 +167,19 @@ namespace FuturesBot.Services
 
         public async Task<IReadOnlyList<Candle>> GetRecentCandlesAsync(string symbol, string interval, int limit = 200)
         {
-            var url = $"{_config.Urls.KlinesUrl}?symbol={symbol}&interval={interval}&limit={limit}";
+            symbol = NormalizeSymbol(symbol);
+            interval = (interval ?? string.Empty).Trim();
+
+            // Build query safely (helps avoid 400 due to stray spaces / bad chars)
+            var url = $"{_config.Urls.KlinesUrl}?symbol={Uri.EscapeDataString(symbol)}&interval={Uri.EscapeDataString(interval)}&limit={limit}";
             var resp = await _http.GetAsync(url);
-            resp.EnsureSuccessStatusCode();
+
+            if (!resp.IsSuccessStatusCode)
+            {
+                var body = await resp.Content.ReadAsStringAsync();
+                // Binance spot returns useful JSON error, e.g. {"code":-1121,"msg":"Invalid symbol."}
+                throw new HttpRequestException($"Spot klines failed ({(int)resp.StatusCode} {resp.ReasonPhrase}). url={url}. body={body}");
+            }
 
             var json = await resp.Content.ReadAsStringAsync();
             var arr = JsonSerializer.Deserialize<List<List<JsonElement>>>(json) ?? [];
@@ -183,7 +202,8 @@ namespace FuturesBot.Services
 
         public async Task<decimal> GetLastPriceAsync(string symbol)
         {
-            var resp = await _http.GetAsync($"/api/v3/ticker/price?symbol={symbol}");
+            symbol = NormalizeSymbol(symbol);
+            var resp = await _http.GetAsync($"/api/v3/ticker/price?symbol={Uri.EscapeDataString(symbol)}");
             resp.EnsureSuccessStatusCode();
             var json = await resp.Content.ReadAsStringAsync();
             using var doc = JsonDocument.Parse(json);

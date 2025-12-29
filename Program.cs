@@ -1,6 +1,7 @@
 using FuturesBot.Config;
 using FuturesBot.IServices;
 using FuturesBot.Services;
+using FuturesBot.Strategies;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -47,7 +48,9 @@ var host = Host
         // Per-symbol scoped services
         services.AddScoped<OrderManagerService>();
         services.AddScoped<SpotOrderManagerService>();
-        services.AddScoped<TradingStrategy>();
+        // Strategies are market-specific (SOLID: don't mix Spot/Futures assumptions)
+        services.AddScoped<IFuturesTradingStrategy, FuturesTrendStrategy>();
+        services.AddScoped<ISpotTradingStrategy, SpotScalpStrategy1m>();
         services.AddScoped<TradeExecutorService>();
     })
     .Build();
@@ -67,7 +70,7 @@ var nowVN = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, vnTimeZone);
 
 pnl.SetDailyBaseCapital();
 
-await notifier.SendAsync($"=== {config.Market}Bot {config.CoinInfos.FirstOrDefault()?.MainTimeFrame.ToUpper()} - {nowVN:dd/MM/yyyy HH:mm:ss} started ===");
+await notifier.SendAsync($"=== FuturesBot {config.CoinInfos.FirstOrDefault()?.MainTimeFrame.ToUpper()} - {nowVN:dd/MM/yyyy HH:mm:ss} started ===");
 
 // ============================================================================
 // GLOBAL COOLDOWN WATCHER
@@ -184,7 +187,7 @@ static async Task RunFuturesSymbolWorkerAsync(
 {
     using var scope = host.Services.CreateScope();
 
-    var strategy = scope.ServiceProvider.GetRequiredService<TradingStrategy>();
+    var strategy = scope.ServiceProvider.GetRequiredService<IFuturesTradingStrategy>();
     var executor = scope.ServiceProvider.GetRequiredService<TradeExecutorService>();
     var exchange = scope.ServiceProvider.GetRequiredService<IFuturesExchangeService>();
     var orderManager = scope.ServiceProvider.GetRequiredService<OrderManagerService>();
@@ -295,7 +298,7 @@ static async Task RunSpotSymbolWorkerAsync(
 {
     using var scope = host.Services.CreateScope();
 
-    var strategy = scope.ServiceProvider.GetRequiredService<TradingStrategy>();
+    var strategy = scope.ServiceProvider.GetRequiredService<ISpotTradingStrategy>();
     var spot = scope.ServiceProvider.GetRequiredService<ISpotExchangeService>();
     var oms = scope.ServiceProvider.GetRequiredService<SpotOrderManagerService>();
 

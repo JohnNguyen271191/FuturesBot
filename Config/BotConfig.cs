@@ -1,3 +1,5 @@
+using System;
+
 namespace FuturesBot.Config
 {
     public enum TradingMarket
