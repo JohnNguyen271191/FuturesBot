@@ -41,7 +41,7 @@ namespace FuturesBot.Services
             ct.ThrowIfCancellationRequested();
 
             var symbol = coinInfo.Symbol;
-            var quoteAsset = "FDUSD";
+            var quoteAsset = _config.SpotQuoteAsset;
             var baseAsset = GuessBaseAsset(symbol);
 
             var price = await _spot.GetLastPriceAsync(symbol);
@@ -112,17 +112,19 @@ namespace FuturesBot.Services
                 if (IsThrottled(symbol))
                     return;
 
-                var pct = Math.Clamp(coinInfo.RiskPerTradePercent, 0.1m, 100m) / 100m;
-                var usdToUse = quote.Free * pct;
+                var usdToUse = Math.Max(0m, quote.Free * (1m - _config.SpotOms.EntryQuoteBufferPercent));
+                // Binance spot rejects quoteOrderQty with too much precision. FDUSD uses 2 decimals.
+                usdToUse = Math.Floor(usdToUse * 100m) / 100m;
                 if (usdToUse <= 0)
                     return;
 
-                var rawQty = usdToUse / price;
-                if (rawQty <= 0)
+                if (usdToUse < _config.SpotOms.MinEntryNotionalUsd)
+                {
+                    await _notify.SendAsync($"[SPOT] Skip BUY {symbol}: quote too small {usdToUse} < minEntryNotional {_config.SpotOms.MinEntryNotionalUsd}");
                     return;
-
-                // BUY
-                var buy = await _spot.PlaceSpotOrderAsync(symbol, SignalType.Long, rawQty);
+                }
+                // BUY (MARKET by quoteOrderQty = "MAX")
+                var buy = await _spot.PlaceMarketBuyByQuoteAsync(symbol, usdToUse);
 
                 // Place OCO exits
                 if (buy.ExecutedQty > 0)
