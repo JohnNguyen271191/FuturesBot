@@ -1,4 +1,4 @@
-﻿using FuturesBot.Models;
+using FuturesBot.Models;
 using static FuturesBot.Utils.EnumTypesHelper;
 
 namespace FuturesBot.IServices
@@ -9,27 +9,34 @@ namespace FuturesBot.IServices
     /// </summary>
     public interface ISpotExchangeService : IMarketDataService
     {
-        /// <summary>
-        /// Get holding for a base asset (e.g., BTC, ETH).
-        /// </summary>
+        /// <summary>Get holding for an asset (e.g., FDUSD, BTC).</summary>
         Task<SpotHolding> GetHoldingAsync(string asset);
 
+        /// <summary>Get last traded price for symbol (e.g., BTCFDUSD).</summary>
         Task<decimal> GetLastPriceAsync(string symbol);
 
         /// <summary>
-        /// Market or limit order. For SELL, quantity is in base asset.
-        /// For BUY market, quantity is in base asset as well.
+        /// Place a spot order.
+        /// - SELL quantity is base asset qty.
+        /// - BUY quantity is base asset qty (use PlaceMarketBuyByQuoteAsync for quote-based MARKET BUY).
         /// </summary>
         Task<SpotOrderResult> PlaceSpotOrderAsync(string symbol, SignalType side, decimal quantity, decimal? limitPrice = null);
 
         /// <summary>
+        /// MARKET BUY using quoteOrderQty (recommended for "MAX" entries and to avoid qty rounding to zero).
+        /// quoteOrderQty is in quote asset (e.g., FDUSD).
+        /// </summary>
+        Task<SpotOrderResult> PlaceMarketBuyByQuoteAsync(string symbol, decimal quoteOrderQty);
+
+
+        /// <summary>
+        /// Place a BUY LIMIT order (intended to be maker by pricing below the current ask).
+        /// </summary>
+        Task<SpotOrderResult> PlaceLimitBuyAsync(string symbol, decimal quantity, decimal price);
+
+        /// <summary>
         /// Place an OCO SELL order (take-profit LIMIT + stop-loss STOP_LIMIT).
         /// </summary>
-        /// <param name="symbol">Trading symbol, e.g., BTCUSDT</param>
-        /// <param name="quantity">Quantity in base asset</param>
-        /// <param name="takeProfitPrice">Take-profit LIMIT price</param>
-        /// <param name="stopPrice">Stop trigger price</param>
-        /// <param name="stopLimitPrice">Stop-limit price (usually slightly worse than stopPrice)</param>
         Task<string> PlaceOcoSellAsync(string symbol, decimal quantity, decimal takeProfitPrice, decimal stopPrice, decimal stopLimitPrice);
 
         Task CancelAllOpenOrdersAsync(string symbol);

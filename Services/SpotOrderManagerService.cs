@@ -1,3 +1,5 @@
+using System;
+using System.Linq;
 using System.Collections.Concurrent;
 using FuturesBot.Config;
 using FuturesBot.IServices;
@@ -41,7 +43,7 @@ namespace FuturesBot.Services
             ct.ThrowIfCancellationRequested();
 
             var symbol = coinInfo.Symbol;
-            var quoteAsset = "FDUSD";
+            var quoteAsset = _config.SpotQuoteAsset;
             var baseAsset = GuessBaseAsset(symbol);
 
             var price = await _spot.GetLastPriceAsync(symbol);
@@ -66,7 +68,7 @@ namespace FuturesBot.Services
 
                     var tp = price * (1m + _config.SpotOms.DefaultTakeProfitPercent);
                     var sl = price * (1m - _config.SpotOms.DefaultStopLossPercent);
-                    var stopLimit = sl * (1m - _config.SpotOms.StopLimitBufferPercent);
+                    var stopLimit = sl * (1m + _config.SpotOms.SlMakerBufferPercent);
 
                     var qty = baseHold.Free;
                     if (qty > 0)
@@ -112,33 +114,52 @@ namespace FuturesBot.Services
                 if (IsThrottled(symbol))
                     return;
 
-                var pct = Math.Clamp(coinInfo.RiskPerTradePercent, 0.1m, 100m) / 100m;
-                var usdToUse = quote.Free * pct;
+                var usdToUse = Math.Max(0m, quote.Free * (1m - _config.SpotOms.EntryQuoteBufferPercent));
+                // Binance spot rejects quoteOrderQty with too much precision. FDUSD uses 2 decimals.
+                usdToUse = Math.Floor(usdToUse * 100m) / 100m;
                 if (usdToUse <= 0)
                     return;
 
-                var rawQty = usdToUse / price;
-                if (rawQty <= 0)
-                    return;
-
-                // BUY
-                var buy = await _spot.PlaceSpotOrderAsync(symbol, SignalType.Long, rawQty);
-
-                // Place OCO exits
-                if (buy.ExecutedQty > 0)
+                if (usdToUse < _config.SpotOms.MinEntryNotionalUsd)
                 {
-                    var tp = signal.TakeProfit ?? (price * (1m + _config.SpotOms.DefaultTakeProfitPercent));
-                    var sl = signal.StopLoss ?? (price * (1m - _config.SpotOms.DefaultStopLossPercent));
-                    var stopLimit = sl * (1m - _config.SpotOms.StopLimitBufferPercent);
-
-                    // Clean any old exits before placing new OCO
-                    await _spot.CancelAllOpenOrdersAsync(symbol);
-                    await _spot.PlaceOcoSellAsync(symbol, buy.ExecutedQty, tp, sl, stopLimit);
-
-                    await _notify.SendAsync($"[SPOT][OMS] Entry BUY {symbol}. qty={buy.ExecutedQty}, tp={tp}, sl={sl}");
-                    MarkAction(symbol);
+                    await _notify.SendAsync($"[SPOT] Skip BUY {symbol}: quote too small {usdToUse} < minEntryNotional {_config.SpotOms.MinEntryNotionalUsd}");
+                    return;
                 }
-            }
+                
+                // Maker-only entry: place BUY LIMIT below last price so it does not execute immediately (maker).
+                // If there is already a pending BUY LIMIT, wait up to EntryRepriceSeconds then cancel & reprice.
+                var openOrders = await _spot.GetOpenOrdersAsync(symbol);
+                var pendingBuy = openOrders.FirstOrDefault(o => o.Side == "BUY" && o.Type == "LIMIT");
+
+                if (pendingBuy != null)
+                {
+                    var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                    if (pendingBuy.TimeMs > 0)
+                    {
+                        var ageSec = (nowMs - pendingBuy.TimeMs) / 1000;
+                        if (ageSec < _config.SpotOms.EntryRepriceSeconds)
+                            return;
+                    }
+
+                    await _spot.CancelAllOpenOrdersAsync(symbol);
+                    await _notify.SendAsync($"[SPOT][OMS] Reprice pending entry {symbol} after {_config.SpotOms.EntryRepriceSeconds}s.");
+                }
+
+                var entryPrice = price * (1m - _config.SpotOms.EntryMakerOffsetPercent);
+                var rawQty = usdToUse / entryPrice;
+
+                var buy = await _spot.PlaceLimitBuyAsync(symbol, rawQty, entryPrice);
+                if (buy.OrderId == "REJECTED" || buy.OrderId == "UNKNOWN")
+                {
+                    // PlaceLimitBuyAsync already validates minQty/minNotional and returns REJECTED when too small.
+                    return;
+                }
+
+                await _notify.SendAsync($"[SPOT][OMS] Maker BUY LIMIT {symbol}: spend≈{usdToUse} {quoteAsset}, price={entryPrice}, rawQty={rawQty}, orderId={buy.OrderId}");
+                MarkAction(symbol);
+
+                // Exits will be placed by the Rescue-OCO block once entry is filled (inPosition becomes true).
+}
         }
 
         private bool IsThrottled(string symbol)

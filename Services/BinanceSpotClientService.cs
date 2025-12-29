@@ -2,7 +2,6 @@ using FuturesBot.Config;
 using FuturesBot.IServices;
 using FuturesBot.Models;
 using System.Globalization;
-using System.Text;
 using FuturesBot.Infrastructure.Binance;
 using System.Text.Json;
 using static FuturesBot.Utils.EnumTypesHelper;
@@ -259,6 +258,53 @@ namespace FuturesBot.Services
             return result;
         }
 
+        public async Task<SpotOrderResult> PlaceMarketBuyByQuoteAsync(string symbol, decimal quoteOrderQty)
+        {
+            if (_config.PaperMode)
+            {
+                return new SpotOrderResult { OrderId = "PAPER_BUY_QUOTE", ExecutedQty = 0m, CummulativeQuoteQty = quoteOrderQty, RawStatus = "PAPER" };
+            }
+
+            // BUY MARKET using quoteOrderQty (FDUSD amount) to avoid qty rounding to zero.
+            var parameters = new Dictionary<string, string>
+            {
+                ["symbol"] = symbol,
+                ["side"] = "BUY",
+                ["type"] = "MARKET",
+                ["quoteOrderQty"] = quoteOrderQty.ToString(CultureInfo.InvariantCulture),
+                ["recvWindow"] = "5000",
+                ["timestamp"] = _time.GetTimestampMsAsync().GetAwaiter().GetResult().ToString(CultureInfo.InvariantCulture),
+            };
+
+            var json = await SendSignedAsync(HttpMethod.Post, _config.SpotUrls.OrderUrl, parameters);
+            using var doc = JsonDocument.Parse(json);
+
+            // For MARKET orders Binance returns: orderId, executedQty, cummulativeQuoteQty, status...
+            var root = doc.RootElement;
+            var orderId = root.TryGetProperty("orderId", out var oid)
+                ? oid.GetInt64().ToString(CultureInfo.InvariantCulture)
+                : "UNKNOWN";
+
+            var executedQty = root.TryGetProperty("executedQty", out var exq)
+                ? decimal.Parse(exq.GetString() ?? "0", CultureInfo.InvariantCulture)
+                : 0m;
+
+            var cumQuote = root.TryGetProperty("cummulativeQuoteQty", out var cqq)
+                ? decimal.Parse(cqq.GetString() ?? "0", CultureInfo.InvariantCulture)
+                : quoteOrderQty;
+
+            var status = root.TryGetProperty("status", out var st) ? st.GetString() ?? "" : "";
+
+            return new SpotOrderResult
+            {
+                OrderId = orderId,
+                ExecutedQty = executedQty,
+                CummulativeQuoteQty = cumQuote,
+                RawStatus = status
+            };
+        }
+
+
         public async Task<string> PlaceOcoSellAsync(string symbol, decimal quantity, decimal takeProfitPrice, decimal stopPrice, decimal stopLimitPrice)
         {
             if (_config.PaperMode)
@@ -314,6 +360,65 @@ namespace FuturesBot.Services
             return "UNKNOWN";
         }
 
+        public async Task<SpotOrderResult> PlaceLimitBuyAsync(string symbol, decimal quantity, decimal price)
+        {
+            if (_config.PaperMode)
+            {
+                return new SpotOrderResult
+                {
+                    OrderId = "PAPER_LIMIT_BUY",
+                    ExecutedQty = 0m,
+                    CummulativeQuoteQty = 0m,
+                    RawStatus = "PAPER"
+                };
+            }
+
+            var rules = await _rulesService.GetRulesAsync(symbol);
+
+            // Round price/qty to exchange rules
+            var roundedPrice = RoundDown(price, rules.PriceStep);
+            var (roundedQty, _, _) = await RoundAndValidateQtyAsync(symbol, quantity, roundedPrice);
+
+            if (roundedQty <= 0)
+            {
+                await _slack.SendAsync($"[SPOT] Reject order {symbol} qty too small after rounding (raw={quantity}).");
+                return new SpotOrderResult { OrderId = "REJECTED", ExecutedQty = 0m, CummulativeQuoteQty = 0m, RawStatus = "REJECTED" };
+            }
+
+            var parameters = new Dictionary<string, string>
+            {
+                ["symbol"] = symbol,
+                ["side"] = "BUY",
+                ["type"] = "LIMIT",
+                ["timeInForce"] = "GTC",
+                ["quantity"] = roundedQty.ToString(CultureInfo.InvariantCulture),
+                ["price"] = roundedPrice.ToString(CultureInfo.InvariantCulture),
+                ["recvWindow"] = "5000",
+            };
+
+            var ts = await _time.GetTimestampMsAsync();
+            parameters["timestamp"] = ts.ToString(CultureInfo.InvariantCulture);
+
+            var json = await SendSignedAsync(HttpMethod.Post, _config.SpotUrls.OrderUrl, parameters);
+
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            return new SpotOrderResult
+            {
+                OrderId = root.TryGetProperty("orderId", out var oid)
+                    ? oid.GetInt64().ToString(CultureInfo.InvariantCulture)
+                    : "UNKNOWN",
+                ExecutedQty = root.TryGetProperty("executedQty", out var eq)
+                    ? decimal.Parse(eq.GetString() ?? "0", CultureInfo.InvariantCulture)
+                    : 0m,
+                CummulativeQuoteQty = root.TryGetProperty("cummulativeQuoteQty", out var cq)
+                    ? decimal.Parse(cq.GetString() ?? "0", CultureInfo.InvariantCulture)
+                    : 0m,
+                RawStatus = root.TryGetProperty("status", out var st) ? (st.GetString() ?? "") : ""
+            };
+        }
+
         public async Task CancelAllOpenOrdersAsync(string symbol)
         {
             if (_config.PaperMode)
@@ -359,7 +464,8 @@ namespace FuturesBot.Services
                         // spot openOrders includes stopPrice for stop/oco legs
                         StopPrice = o.TryGetProperty("stopPrice", out var sp)
                             ? decimal.Parse(sp.GetString() ?? "0", CultureInfo.InvariantCulture)
-                            : 0m
+                            : 0m,
+                        TimeMs = o.TryGetProperty("time", out var tm) ? tm.GetInt64() : 0L
                     });
                 }
 

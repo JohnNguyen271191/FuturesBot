@@ -1,4 +1,4 @@
-﻿using FuturesBot.Models;
+using FuturesBot.Models;
 using static FuturesBot.Utils.EnumTypesHelper;
 
 namespace FuturesBot.IServices

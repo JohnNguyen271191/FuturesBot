@@ -11,5 +11,6 @@
         public decimal OrigQty { get; set; }
         public decimal ExecutedQty { get; set; }
         public decimal StopPrice { get; set; }
+        public long TimeMs { get; set; }
     }
 }

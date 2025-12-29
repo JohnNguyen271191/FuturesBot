@@ -12,6 +12,9 @@ namespace FuturesBot.Config
     {
         public CoinInfo[] CoinInfos { get; set; } = [];
 
+        // Spot quote asset (e.g., FDUSD)
+        public string SpotQuoteAsset { get; set; } = "FDUSD";
+
         // Risk
         public decimal AccountBalance { get; set; } = 200m;
         public decimal MaxDailyLossPercent { get; set; } = 5m;
@@ -65,6 +68,34 @@ namespace FuturesBot.Config
         public decimal StopLimitBufferPercent { get; set; } = 0.001m;
 
         /// <summary>
+        /// Minimal quote notional to enter a new position (e.g., FDUSD amount).
+        /// Prevents tiny entries that would round quantity to zero.
+        /// </summary>
+        public decimal MinEntryNotionalUsd { get; set; } = 10m;
+
+        /// <summary>
+        /// For MAX entry, we spend quoteFree * (1 - buffer). Example: 0.02 = use 98%.
+        /// </summary>
+        public decimal EntryQuoteBufferPercent { get; set; } = 0.02m;
+
+        
+
+        /// <summary>
+        /// Maker entry offset (percent). Example: 0.0003 = 0.03% below last price for BUY LIMIT.
+        /// </summary>
+        public decimal EntryMakerOffsetPercent { get; set; } = 0.0003m;
+
+        /// <summary>
+        /// StopLimit maker buffer (percent). Example: 0.0003 = 0.03% above stopPrice for SELL STOP_LIMIT.
+        /// This makes the triggered limit order non-marketable (maker) but may not fill in fast drops.
+        /// </summary>
+        public decimal SlMakerBufferPercent { get; set; } = 0.0003m;
+
+        /// <summary>
+        /// If maker entry is not filled within this many seconds, cancel and reprice.
+        /// </summary>
+        public int EntryRepriceSeconds { get; set; } = 60;
+/// <summary>
         /// Throttle placing/canceling orders to avoid spam.
         /// </summary>
         public int MinSecondsBetweenActions { get; set; } = 5;
