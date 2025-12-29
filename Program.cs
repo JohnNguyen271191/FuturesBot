@@ -70,7 +70,7 @@ var nowVN = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, vnTimeZone);
 
 pnl.SetDailyBaseCapital();
 
-await notifier.SendAsync($"=== FuturesBot {config.CoinInfos.FirstOrDefault()?.MainTimeFrame.ToUpper()} - {nowVN:dd/MM/yyyy HH:mm:ss} started ===");
+await notifier.SendAsync($"=== {config.Market}Bot {config.CoinInfos.FirstOrDefault()?.MainTimeFrame.ToUpper()} - {nowVN:dd/MM/yyyy HH:mm:ss} started ===");
 
 // ============================================================================
 // GLOBAL COOLDOWN WATCHER
