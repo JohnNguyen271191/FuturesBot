@@ -12,6 +12,9 @@ namespace FuturesBot.Config
     {
         public CoinInfo[] CoinInfos { get; set; } = [];
 
+        // Spot quote asset (e.g., FDUSD)
+        public string SpotQuoteAsset { get; set; } = "FDUSD";
+
         // Risk
         public decimal AccountBalance { get; set; } = 200m;
         public decimal MaxDailyLossPercent { get; set; } = 5m;
@@ -63,6 +66,17 @@ namespace FuturesBot.Config
         /// Example: 0.001 = 0.1%
         /// </summary>
         public decimal StopLimitBufferPercent { get; set; } = 0.001m;
+
+        /// <summary>
+        /// Minimal quote notional to enter a new position (e.g., FDUSD amount).
+        /// Prevents tiny entries that would round quantity to zero.
+        /// </summary>
+        public decimal MinEntryNotionalUsd { get; set; } = 10m;
+
+        /// <summary>
+        /// For MAX entry, we spend quoteFree * (1 - buffer). Example: 0.02 = use 98%.
+        /// </summary>
+        public decimal EntryQuoteBufferPercent { get; set; } = 0.02m;
 
         /// <summary>
         /// Throttle placing/canceling orders to avoid spam.
