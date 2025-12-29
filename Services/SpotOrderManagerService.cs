@@ -1,5 +1,3 @@
-using System;
-using System.Linq;
 using System.Collections.Concurrent;
 using FuturesBot.Config;
 using FuturesBot.IServices;

@@ -78,38 +78,38 @@ await notifier.SendAsync($"=== {config.Market}Bot {config.CoinInfos.FirstOrDefau
 
 if (config.Market != TradingMarket.Spot)
 {
-_ = Task.Run(async () =>
-{
-    bool notified = false;
-
-    while (!lifetime.ApplicationStopping.IsCancellationRequested)
+    _ = Task.Run(async () =>
     {
-        try
+        bool notified = false;
+
+        while (!lifetime.ApplicationStopping.IsCancellationRequested)
         {
-            bool inCooldown = pnl.IsInCooldown();
-
-            if (inCooldown && !notified)
+            try
             {
-                notified = true;
-                var remain = pnl.GetCooldownRemaining();
-                var mins = Math.Max(0, remain?.TotalMinutes ?? 0);
+                bool inCooldown = pnl.IsInCooldown();
 
-                await notifier.SendAsync($"BOT đang trong COOLDOWN (còn ~{mins:F0} phút) → không mở lệnh mới.");
+                if (inCooldown && !notified)
+                {
+                    notified = true;
+                    var remain = pnl.GetCooldownRemaining();
+                    var mins = Math.Max(0, remain?.TotalMinutes ?? 0);
+
+                    await notifier.SendAsync($"BOT đang trong COOLDOWN (còn ~{mins:F0} phút) → không mở lệnh mới.");
+                }
+                else if (!inCooldown && notified)
+                {
+                    notified = false;
+                    await notifier.SendAsync("COOLDOWN kết thúc → BOT tiếp tục tìm ENTRY.");
+                }
             }
-            else if (!inCooldown && notified)
+            catch (Exception ex)
             {
-                notified = false;
-                await notifier.SendAsync("COOLDOWN kết thúc → BOT tiếp tục tìm ENTRY.");
+                Console.WriteLine($"[ERROR] CooldownWatcher: {ex}");
             }
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[ERROR] CooldownWatcher: {ex}");
-        }
 
-        await Task.Delay(TimeSpan.FromSeconds(15), lifetime.ApplicationStopping);
-    }
-});
+            await Task.Delay(TimeSpan.FromSeconds(15), lifetime.ApplicationStopping);
+        }
+    });
 }
 
 // ============================================================================
@@ -118,22 +118,22 @@ _ = Task.Run(async () =>
 
 if (config.Market != TradingMarket.Spot)
 {
-_ = Task.Run(async () =>
-{
-    while (!lifetime.ApplicationStopping.IsCancellationRequested)
+    _ = Task.Run(async () =>
     {
-        try
+        while (!lifetime.ApplicationStopping.IsCancellationRequested)
         {
-            await liveSync.SyncAsync(config.CoinInfos);
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[ERROR] LiveSyncLoop: {ex}");
-        }
+            try
+            {
+                await liveSync.SyncAsync(config.CoinInfos);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[ERROR] LiveSyncLoop: {ex}");
+            }
 
-        await Task.Delay(TimeSpan.FromSeconds(5), lifetime.ApplicationStopping);
-    }
-});
+            await Task.Delay(TimeSpan.FromSeconds(5), lifetime.ApplicationStopping);
+        }
+    });
 }
 
 // ============================================================================
@@ -142,22 +142,22 @@ _ = Task.Run(async () =>
 
 if (config.Market != TradingMarket.Spot)
 {
-_ = Task.Run(async () =>
-{
-    while (!lifetime.ApplicationStopping.IsCancellationRequested)
+    _ = Task.Run(async () =>
     {
-        try
+        while (!lifetime.ApplicationStopping.IsCancellationRequested)
         {
-            await pnl.SendQuickDailySummary();
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[ERROR] PnlSummaryLoop: {ex}");
-        }
+            try
+            {
+                await pnl.SendQuickDailySummary();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[ERROR] PnlSummaryLoop: {ex}");
+            }
 
-        await Task.Delay(TimeSpan.FromSeconds(10), lifetime.ApplicationStopping);
-    }
-});
+            await Task.Delay(TimeSpan.FromSeconds(10), lifetime.ApplicationStopping);
+        }
+    });
 }
 
 // ============================================================================
