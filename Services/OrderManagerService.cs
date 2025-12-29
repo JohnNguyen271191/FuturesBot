@@ -171,7 +171,7 @@ namespace FuturesBot.Services
                 return;
             }
 
-            await _notify.SendAsync($"[{symbol}] Monitor LIMIT started... mode={profile.Tag}, timeout={profile.LimitTimeout.TotalMinutes:F0}m");
+            await _notify.SendAsync($"[{symbol}] Monitor LIMIT start (mode={profile.Tag}, timeout={profile.LimitTimeout.TotalMinutes:F0}m)");
 
             var startTime = DateTime.UtcNow;
 
@@ -304,7 +304,7 @@ namespace FuturesBot.Services
 
             int tfMinutes = ParseIntervalMinutesSafe(coinInfo.MainTimeFrame);
 
-            await _notify.SendAsync($"[{symbol}] Monitor POSITION started... mode={profile.Tag} | FLEX EXIT + TIME-STOP {profile.TimeStopBars}x{tfMinutes}m | trendTF={coinInfo.TrendTimeFrame}");
+            await _notify.SendAsync($"[{symbol}] Monitor POSITION start (mode={profile.Tag}) | timeStopBars={profile.TimeStopBars}x{tfMinutes}m | trendTF={coinInfo.TrendTimeFrame}");
 
             try
             {
