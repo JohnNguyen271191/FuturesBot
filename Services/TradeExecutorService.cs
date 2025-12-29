@@ -6,13 +6,13 @@ using static FuturesBot.Utils.EnumTypesHelper;
 namespace FuturesBot.Services
 {
     public class TradeExecutorService(
-        IExchangeClientService exchange,
+        IFuturesExchangeService exchange,
         RiskManager risk,
         BotConfig config,
         SlackNotifierService notifier,
         OrderManagerService orderManagerService)
     {
-        private readonly IExchangeClientService _exchange = exchange;
+        private readonly IFuturesExchangeService _exchange = exchange;
         private readonly RiskManager _risk = risk;
         private readonly BotConfig _config = config;
         private readonly SlackNotifierService _notifier = notifier;

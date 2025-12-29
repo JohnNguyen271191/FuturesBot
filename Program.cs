@@ -22,8 +22,22 @@ var host = Host
 
         services.AddSingleton(botConfig);
 
+        // Choose active URL set by market (default: Futures)
+        if (botConfig.Market == TradingMarket.Spot && botConfig.SpotUrls != null && !string.IsNullOrWhiteSpace(botConfig.SpotUrls.BaseUrl))
+        {
+            botConfig.Urls = botConfig.SpotUrls;
+        }
+        else if (botConfig.FuturesUrls != null && !string.IsNullOrWhiteSpace(botConfig.FuturesUrls.BaseUrl))
+        {
+            botConfig.Urls = botConfig.FuturesUrls;
+        }
+
+
         // Singleton services
-        services.AddSingleton<IExchangeClientService, BinanceFuturesClientService>();
+        // Exchange clients (separated by market domain)
+        services.AddSingleton<IFuturesExchangeService, BinanceFuturesClientService>();
+        services.AddSingleton<ISpotExchangeService, BinanceSpotClientService>();
+
         services.AddSingleton<IndicatorService>();
         services.AddSingleton<RiskManager>();
         services.AddSingleton<SlackNotifierService>();
@@ -32,6 +46,7 @@ var host = Host
 
         // Per-symbol scoped services
         services.AddScoped<OrderManagerService>();
+        services.AddScoped<SpotOrderManagerService>();
         services.AddScoped<TradingStrategy>();
         services.AddScoped<TradeExecutorService>();
     })
@@ -52,12 +67,14 @@ var nowVN = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, vnTimeZone);
 
 pnl.SetDailyBaseCapital();
 
-await notifier.SendAsync($"=== FuturesBot {config.CoinInfos.FirstOrDefault()?.MainTimeFrame.ToUpper()} - {nowVN:dd/MM/yyyy HH:mm:ss} started ===");
+await notifier.SendAsync($"=== {config.Market}Bot {config.CoinInfos.FirstOrDefault()?.MainTimeFrame.ToUpper()} - {nowVN:dd/MM/yyyy HH:mm:ss} started ===");
 
 // ============================================================================
 // GLOBAL COOLDOWN WATCHER
 // ============================================================================
 
+if (config.Market != TradingMarket.Spot)
+{
 _ = Task.Run(async () =>
 {
     bool notified = false;
@@ -90,11 +107,14 @@ _ = Task.Run(async () =>
         await Task.Delay(TimeSpan.FromSeconds(15), lifetime.ApplicationStopping);
     }
 });
+}
 
 // ============================================================================
 // GLOBAL LIVE SYNC LOOP
 // ============================================================================
 
+if (config.Market != TradingMarket.Spot)
+{
 _ = Task.Run(async () =>
 {
     while (!lifetime.ApplicationStopping.IsCancellationRequested)
@@ -111,11 +131,14 @@ _ = Task.Run(async () =>
         await Task.Delay(TimeSpan.FromSeconds(5), lifetime.ApplicationStopping);
     }
 });
+}
 
 // ============================================================================
 // GLOBAL PNL SUMMARY LOOP
 // ============================================================================
 
+if (config.Market != TradingMarket.Spot)
+{
 _ = Task.Run(async () =>
 {
     while (!lifetime.ApplicationStopping.IsCancellationRequested)
@@ -132,18 +155,16 @@ _ = Task.Run(async () =>
         await Task.Delay(TimeSpan.FromSeconds(10), lifetime.ApplicationStopping);
     }
 });
+}
 
 // ============================================================================
 // LAUNCH PER-SYMBOL WORKERS
 // ============================================================================
 
 var tasks = config.CoinInfos
-    .Select(s => RunSymbolWorkerAsync(
-        s,
-        host,
-        config,
-        pnl,
-        lifetime.ApplicationStopping))
+    .Select(s => config.Market == TradingMarket.Spot
+        ? RunSpotSymbolWorkerAsync(s, host, config, lifetime.ApplicationStopping)
+        : RunFuturesSymbolWorkerAsync(s, host, config, pnl, lifetime.ApplicationStopping))
     .ToList();
 
 await Task.WhenAll(tasks);
@@ -154,7 +175,7 @@ await Task.WhenAll(tasks);
 // - Entry vẫn chỉ chạy theo nhịp nến đóng.
 // ============================================================================
 
-static async Task RunSymbolWorkerAsync(
+static async Task RunFuturesSymbolWorkerAsync(
     CoinInfo coinInfo,
     IHost host,
     BotConfig config,
@@ -165,7 +186,7 @@ static async Task RunSymbolWorkerAsync(
 
     var strategy = scope.ServiceProvider.GetRequiredService<TradingStrategy>();
     var executor = scope.ServiceProvider.GetRequiredService<TradeExecutorService>();
-    var exchange = scope.ServiceProvider.GetRequiredService<IExchangeClientService>();
+    var exchange = scope.ServiceProvider.GetRequiredService<IFuturesExchangeService>();
     var orderManager = scope.ServiceProvider.GetRequiredService<OrderManagerService>();
 
     var mainTf = coinInfo.MainTimeFrame;
@@ -256,6 +277,66 @@ static async Task RunSymbolWorkerAsync(
         catch (Exception ex)
         {
             Console.WriteLine($"[ERROR] Worker {coinInfo.Symbol}: {ex}");
+        }
+    }
+}
+
+// ============================================================================
+// SPOT WORKER (simple, long-only by holdings)
+// - Strategy is reused, but execution is spot-native (no "position" mapping).
+// - BUY/SELL MARKET only for now.
+// ============================================================================
+
+static async Task RunSpotSymbolWorkerAsync(
+    CoinInfo coinInfo,
+    IHost host,
+    BotConfig config,
+    CancellationToken ct)
+{
+    using var scope = host.Services.CreateScope();
+
+    var strategy = scope.ServiceProvider.GetRequiredService<TradingStrategy>();
+    var spot = scope.ServiceProvider.GetRequiredService<ISpotExchangeService>();
+    var oms = scope.ServiceProvider.GetRequiredService<SpotOrderManagerService>();
+
+    var mainTf = coinInfo.MainTimeFrame;
+    var mainSpan = ParseFrameTime(mainTf);
+
+    DateTime lastProcessedCandleOpenTimeUtc = DateTime.MinValue;
+    var afterCloseDelay = TimeSpan.FromSeconds(2);
+
+    while (!ct.IsCancellationRequested)
+    {
+        try
+        {
+            var sleep = GetDelayToNextCloseUtc(mainSpan) + afterCloseDelay;
+            if (sleep < TimeSpan.FromMilliseconds(200))
+                sleep = TimeSpan.FromMilliseconds(200);
+
+            await Task.Delay(sleep, ct);
+
+            var candlesMainTf = await spot.GetRecentCandlesAsync(coinInfo.Symbol, coinInfo.MainTimeFrame, 220);
+            var candlesTrendTf = await spot.GetRecentCandlesAsync(coinInfo.Symbol, coinInfo.TrendTimeFrame, 220);
+
+            if (candlesMainTf == null || candlesMainTf.Count < 3 || candlesTrendTf == null || candlesTrendTf.Count < 3)
+                continue;
+
+            var lastClosed = candlesMainTf[^2];
+            if (lastClosed.OpenTime <= lastProcessedCandleOpenTimeUtc)
+                continue;
+
+            lastProcessedCandleOpenTimeUtc = lastClosed.OpenTime;
+
+            var signal = strategy.GenerateSignal(candlesMainTf, candlesTrendTf, coinInfo);
+            await oms.TickAsync(signal, coinInfo, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[ERROR] SpotWorker {coinInfo.Symbol}: {ex}");
         }
     }
 }

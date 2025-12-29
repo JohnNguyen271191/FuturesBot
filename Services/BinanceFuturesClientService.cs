@@ -10,7 +10,7 @@ using static FuturesBot.Utils.EnumTypesHelper;
 
 namespace FuturesBot.Services
 {
-    public class BinanceFuturesClientService : IExchangeClientService
+    public class BinanceFuturesClientService : IFuturesExchangeService
     {
         private readonly HttpClient _http;
         private readonly BotConfig _config;
@@ -194,7 +194,7 @@ namespace FuturesBot.Services
             return true;
         }
 
-        public async Task<PositionInfo> GetPositionAsync(string symbol)
+        public async Task<FuturesPosition> GetPositionAsync(string symbol)
         {
             string json = "";
             for (int attempt = 1; attempt <= 3; attempt++)
@@ -222,13 +222,13 @@ namespace FuturesBot.Services
                     }
 
                     await _slack.SendAsync($"[ERROR] GetPositionAsync FAILED for {symbol} after 3 attempts: {ex.Message}");
-                    return new PositionInfo
+                    return new FuturesPosition
                     {
                         Symbol = symbol,
                         PositionAmt = 0,
                         EntryPrice = 0,
-                        MarkPrice = 0,
-                        UpdateTime = DateTime.UtcNow
+                        UnrealizedPnl = 0,
+                        PositionSide = "BOTH"
                     };
                 }
             }
@@ -256,25 +256,25 @@ namespace FuturesBot.Services
                     await _slack.SendAsync($"[GetPositionAsync PARSE ERROR] {symbol}: {ex.Message}. Raw: {json}");
                 }
 
-                return new PositionInfo
+                return new FuturesPosition
                 {
                     Symbol = symbol,
                     PositionAmt = 0,
                     EntryPrice = 0,
-                    MarkPrice = 0,
-                    UpdateTime = DateTime.UtcNow
+                    UnrealizedPnl = 0,
+                    PositionSide = "BOTH"
                 };
             }
 
             if (root.GetArrayLength() == 0)
             {
-                return new PositionInfo
+                return new FuturesPosition
                 {
                     Symbol = symbol,
                     PositionAmt = 0,
                     EntryPrice = 0,
-                    MarkPrice = 0,
-                    UpdateTime = DateTime.UtcNow
+                    UnrealizedPnl = 0,
+                    PositionSide = "BOTH"
                 };
             }
 
@@ -301,13 +301,13 @@ namespace FuturesBot.Services
             if (!chosen.HasValue)
             {
                 await _slack.SendAsync($"[GetPositionAsync] Symbol {symbol} not found in positionRisk array. Raw: {json}");
-                return new PositionInfo
+                return new FuturesPosition
                 {
                     Symbol = symbol,
                     PositionAmt = 0,
                     EntryPrice = 0,
-                    MarkPrice = 0,
-                    UpdateTime = DateTime.UtcNow
+                    UnrealizedPnl = 0,
+                    PositionSide = "BOTH"
                 };
             }
 
@@ -315,26 +315,37 @@ namespace FuturesBot.Services
 
             decimal positionAmt = decimal.Parse(elx.GetProperty("positionAmt").GetString() ?? "0", CultureInfo.InvariantCulture);
             decimal entryPrice = decimal.Parse(elx.GetProperty("entryPrice").GetString() ?? "0", CultureInfo.InvariantCulture);
-            decimal markPrice = decimal.Parse(elx.GetProperty("markPrice").GetString() ?? "0", CultureInfo.InvariantCulture);
 
-            DateTime updateTime;
+            decimal markPrice = 0m;
             try
             {
-                long updateMs = elx.GetProperty("updateTime").GetInt64();
-                updateTime = DateTimeOffset.FromUnixTimeMilliseconds(updateMs).UtcDateTime;
+                markPrice = decimal.Parse(elx.GetProperty("markPrice").GetString() ?? "0", CultureInfo.InvariantCulture);
             }
             catch
             {
-                updateTime = DateTime.UtcNow;
+                markPrice = 0m;
             }
 
-            return new PositionInfo
+            DateTime updateTimeUtc = DateTime.UtcNow;
+            try
+            {
+                long updateMs = elx.GetProperty("updateTime").GetInt64();
+                updateTimeUtc = DateTimeOffset.FromUnixTimeMilliseconds(updateMs).UtcDateTime;
+            }
+            catch
+            {
+                updateTimeUtc = DateTime.UtcNow;
+            }
+
+            return new FuturesPosition
             {
                 Symbol = symbol,
                 PositionAmt = positionAmt,
                 EntryPrice = entryPrice,
                 MarkPrice = markPrice,
-                UpdateTime = updateTime
+                UnrealizedPnl = 0,
+                PositionSide = "BOTH",
+                UpdateTimeUtc = updateTimeUtc
             };
         }
 

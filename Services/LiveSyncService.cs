@@ -5,11 +5,11 @@ using static FuturesBot.Utils.EnumTypesHelper;
 
 namespace FuturesBot.Services
 {
-    public class LiveSyncService(IExchangeClientService exchange, PnlReporterService pnl, OrderManagerService orderManagerService)
+    public class LiveSyncService(IFuturesExchangeService exchange, PnlReporterService pnl, OrderManagerService orderManagerService)
     {
         private class PositionState
         {
-            public PositionInfo LastPosition { get; set; } = new();
+            public FuturesPosition LastPosition { get; set; } = new();
             public DateTime LastChangeTime { get; set; } = DateTime.UtcNow;
         }
 
@@ -25,7 +25,7 @@ namespace FuturesBot.Services
                     _states[coinInfo.Symbol] = state;
                 }
 
-                PositionInfo pos;
+                FuturesPosition pos;
 
                 // ===============================
                 // 1) LẤY POSITION – SAFE MODE
@@ -61,7 +61,7 @@ namespace FuturesBot.Services
                 if (wasOpen && nowFlat)
                 {
                     // DOUBLE CONFIRM – tránh close ảo
-                    PositionInfo pos2;
+                    FuturesPosition pos2;
                     try
                     {
                         await Task.Delay(80);

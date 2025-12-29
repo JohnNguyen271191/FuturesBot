@@ -27,7 +27,7 @@ namespace FuturesBot.Services
     /// </summary>
     public class OrderManagerService
     {
-        private readonly IExchangeClientService _exchange;
+        private readonly IFuturesExchangeService _exchange;
         private readonly SlackNotifierService _notify;
         private readonly BotConfig _botConfig;
 
@@ -147,7 +147,7 @@ namespace FuturesBot.Services
         // CONSTRUCTOR
         // ============================================================
 
-        public OrderManagerService(IExchangeClientService exchange, SlackNotifierService notify, BotConfig config)
+        public OrderManagerService(IFuturesExchangeService exchange, SlackNotifierService notify, BotConfig config)
         {
             _exchange = exchange;
             _notify = notify;
@@ -1122,7 +1122,7 @@ namespace FuturesBot.Services
         //          MANUAL ATTACH POSITION (AUTO SAFETY TP) - TREND DEFAULT
         // ============================================================
 
-        public async Task AttachManualPositionAsync(PositionInfo pos)
+        public async Task AttachManualPositionAsync(FuturesPosition pos)
         {
             if (pos == null || pos.PositionAmt == 0)
                 return;
@@ -1209,7 +1209,7 @@ namespace FuturesBot.Services
         }
 
         private async Task<SlTpDetection> DetectManualSlTpAsync(
-            string symbol, bool isLong, decimal entryPriceFromCaller, PositionInfo pos)
+            string symbol, bool isLong, decimal entryPriceFromCaller, FuturesPosition pos)
         {
             var normalOrders = await _exchange.GetOpenOrdersAsync(symbol);
             var algoOrders = await _exchange.GetOpenAlgoOrdersAsync(symbol);
@@ -1673,7 +1673,7 @@ namespace FuturesBot.Services
             bool isLong,
             bool hasTp,
             decimal? expectedTp,
-            PositionInfo currentPos,
+            FuturesPosition currentPos,
             DateTime lastSlTpCheckUtc)
         {
             await _notify.SendAsync($"[{symbol}] Trailing SL update → {Math.Round(newSL, 6)}");
