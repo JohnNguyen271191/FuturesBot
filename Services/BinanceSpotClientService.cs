@@ -2,8 +2,8 @@ using FuturesBot.Config;
 using FuturesBot.IServices;
 using FuturesBot.Models;
 using System.Globalization;
-using System.Security.Cryptography;
 using System.Text;
+using FuturesBot.Infrastructure.Binance;
 using System.Text.Json;
 using static FuturesBot.Utils.EnumTypesHelper;
 
@@ -24,20 +24,22 @@ namespace FuturesBot.Services
         private readonly SymbolRulesService _rulesService;
         private readonly SlackNotifierService _slack;
 
-        private long _serverTimeOffsetMs;
-        private DateTime _lastTimeSyncUtc = DateTime.MinValue;
+        private readonly IBinanceTimeProvider _time;
+        private readonly IBinanceSigner _signer;
 
         // Stop-limit price buffer from stop trigger for SELL stop (avoid immediate reject).
         private const decimal DefaultStopLimitBufferPercent = 0.001m; // 0.10%
 
-        public BinanceSpotClientService(BotConfig config)
+        public BinanceSpotClientService(BotConfig config, SlackNotifierService slack)
         {
             _config = config;
             _http = new HttpClient { BaseAddress = new Uri(config.Urls.BaseUrl) };
             _http.DefaultRequestHeaders.Add("X-MBX-APIKEY", config.ApiKey);
 
+            _slack = slack;
             _rulesService = new SymbolRulesService(_http, _config);
-            _slack = new SlackNotifierService(_config);
+            _signer = new BinanceSigner(_config.ApiSecret);
+            _time = new BinanceTimeProvider(_http, _config.Urls.TimeUrl, _slack);
         }
 
         private static string NormalizeSymbol(string? symbol)
@@ -50,56 +52,14 @@ namespace FuturesBot.Services
         }
 
         // =========================
-        // Time sync
-        // =========================
-
-        private async Task EnsureServerTimeSyncedAsync()
-        {
-            if (_lastTimeSyncUtc != DateTime.MinValue && (DateTime.UtcNow - _lastTimeSyncUtc) <= TimeSpan.FromMinutes(5))
-                return;
-
-            try
-            {
-                var resp = await _http.GetAsync(_config.Urls.TimeUrl);
-                resp.EnsureSuccessStatusCode();
-                var json = await resp.Content.ReadAsStringAsync();
-
-                using var doc = JsonDocument.Parse(json);
-                var serverTime = doc.RootElement.GetProperty("serverTime").GetInt64();
-                var local = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-
-                _serverTimeOffsetMs = local - serverTime;
-                _lastTimeSyncUtc = DateTime.UtcNow;
-            }
-            catch (Exception ex)
-            {
-                // Best-effort; still allow request
-                await _slack.SendAsync($"[SPOT TIME SYNC ERROR] {ex.Message}");
-            }
-        }
-
-        private long GetBinanceTimestampMs()
-        {
-            EnsureServerTimeSyncedAsync().GetAwaiter().GetResult();
-            var local = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            return local - _serverTimeOffsetMs;
-        }
-
-        // =========================
         // Signing helpers
         // =========================
 
-        private string Sign(string queryString)
-        {
-            var keyBytes = Encoding.UTF8.GetBytes(_config.ApiSecret);
-            using var hmac = new HMACSHA256(keyBytes);
-            var hash = hmac.ComputeHash(Encoding.UTF8.GetBytes(queryString));
-            return BitConverter.ToString(hash).Replace("-", "").ToLowerInvariant();
-        }
+        private string Sign(string queryString) => _signer.Sign(queryString);
 
         private string BuildSignedQuery(Dictionary<string, string> parameters)
         {
-            parameters["timestamp"] = GetBinanceTimestampMs().ToString(CultureInfo.InvariantCulture);
+            parameters["timestamp"] = _time.GetTimestampMsAsync().GetAwaiter().GetResult().ToString(CultureInfo.InvariantCulture);
 
             // Keep stable ordering for signature
             var qs = string.Join("&", parameters.OrderBy(k => k.Key).Select(kvp => $"{kvp.Key}={kvp.Value}"));

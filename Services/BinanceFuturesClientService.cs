@@ -3,8 +3,8 @@ using FuturesBot.IServices;
 using FuturesBot.Models;
 using FuturesBot.Utils;
 using System.Globalization;
-using System.Security.Cryptography;
 using System.Text;
+using FuturesBot.Infrastructure.Binance;
 using System.Text.Json;
 using static FuturesBot.Utils.EnumTypesHelper;
 
@@ -14,18 +14,20 @@ namespace FuturesBot.Services
     {
         private readonly HttpClient _http;
         private readonly BotConfig _config;
-        private long _serverTimeOffsetMs = 0;
-        private DateTime _lastTimeSync = DateTime.MinValue;
+        private readonly IBinanceTimeProvider _time;
+        private readonly IBinanceSigner _signer;
         private readonly SymbolRulesService _rulesService;
         private readonly SlackNotifierService _slack;
 
-        public BinanceFuturesClientService(BotConfig config)
+        public BinanceFuturesClientService(BotConfig config, SlackNotifierService slack)
         {
             _config = config;
             _http = new HttpClient { BaseAddress = new Uri(config.Urls.BaseUrl) };
             _http.DefaultRequestHeaders.Add("X-MBX-APIKEY", config.ApiKey);
             _rulesService = new SymbolRulesService(_http, _config);
-            _slack = new SlackNotifierService(_config);
+            _slack = slack;
+            _signer = new BinanceSigner(_config.ApiSecret);
+            _time = new BinanceTimeProvider(_http, _config.Urls.TimeUrl, _slack);
         }
 
         // ==========================
@@ -460,24 +462,8 @@ namespace FuturesBot.Services
 
         public async Task SyncServerTimeAsync()
         {
-            try
-            {
-                var resp = await _http.GetAsync($"{_config.Urls.BaseUrl}{_config.Urls.TimeUrl}");
-                resp.EnsureSuccessStatusCode();
-
-                var json = await resp.Content.ReadAsStringAsync();
-                using var doc = JsonDocument.Parse(json);
-
-                var serverTime = doc.RootElement.GetProperty("serverTime").GetInt64();
-                var localTime = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-
-                _serverTimeOffsetMs = localTime - serverTime;
-                _lastTimeSync = DateTime.UtcNow;
-            }
-            catch (Exception ex)
-            {
-                await _slack.SendAsync("[TIME SYNC ERROR] " + ex.Message);
-            }
+            // Kept for backward compatibility
+            await _time.GetTimestampMsAsync();
         }
 
         public async Task CancelAllOpenOrdersAsync(string symbol)
@@ -486,10 +472,7 @@ namespace FuturesBot.Services
 
             var qs = $"symbol={symbol}&timestamp={ts}";
 
-            var keyBytes = Encoding.UTF8.GetBytes(_config.ApiSecret);
-            using var hmac = new HMACSHA256(keyBytes);
-            var hash = hmac.ComputeHash(Encoding.UTF8.GetBytes(qs));
-            var signature = BitConverter.ToString(hash).Replace("-", "").ToLowerInvariant();
+            var signature = _signer.Sign(qs);
 
             string url = $"{_config.Urls.AllOpenOrdersUrl}?{qs}&signature={signature}";
 
@@ -512,7 +495,7 @@ namespace FuturesBot.Services
             {
                 long ts2 = GetBinanceTimestamp();
                 var qs2 = $"symbol={symbol}&timestamp={ts2}";
-                var sig2 = BinanceSignatureHelper.Sign(qs2, _config.ApiSecret);
+                var sig2 = _signer.Sign(qs2);
 
                 string url2 = $"{_config.Urls.AlgoOpenOrdersUrl}?{qs2}&signature={sig2}";
                 var req2 = new HttpRequestMessage(HttpMethod.Delete, url2);
@@ -983,17 +966,7 @@ namespace FuturesBot.Services
             return body;
         }
 
-        private long GetBinanceTimestamp()
-        {
-            if (_lastTimeSync == DateTime.MinValue ||
-                (DateTime.UtcNow - _lastTimeSync) > TimeSpan.FromMinutes(5))
-            {
-                SyncServerTimeAsync().GetAwaiter().GetResult();
-            }
-
-            var local = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            return local - _serverTimeOffsetMs;
-        }
+        private long GetBinanceTimestamp() => _time.GetTimestampMsAsync().GetAwaiter().GetResult();
 
         private async Task<List<IncomeRecord>> GetIncomeAsync(string symbol, DateTime startTimeUtc, DateTime endTimeUtc)
         {
