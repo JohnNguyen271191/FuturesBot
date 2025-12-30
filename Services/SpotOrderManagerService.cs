@@ -318,15 +318,18 @@ namespace FuturesBot.Services
             // Initialize entry reference once when holding
             if (st.EntryRefPrice <= 0)
             {
-                var refPx = signal?.EntryPrice > 0 ? signal!.EntryPrice : lastPrice;
-                st.EntryRefPrice = refPx.GetValueOrDefault();
+                // Prefer strategy-provided reference price (spot), then generic EntryPrice, else fallback to lastPrice.
+                var refCandidate = signal?.SpotEntryRefPrice ?? signal?.EntryPrice;
+                var refPx = (refCandidate.HasValue && refCandidate.Value > 0) ? refCandidate.Value : lastPrice;
+
+                st.EntryRefPrice = refPx;
                 st.EntrySeenUtc = DateTime.UtcNow;
                 UpsertPersisted(symbol, st.EntryRefPrice, st.EntrySeenUtc);
             }
 
             // ====== Exit triggers ======
             // (You can keep using signal.Short as "exit hint" if your pipeline does that)
-            var exitHint = signal?.Type == SignalType.Short;
+            var exitHint = (signal?.SpotExitNow == true) || (signal?.Type == SignalType.Short);
 
             var stopRef = st.EntryRefPrice * (1m - _config.Spot.Oms.DefaultStopLossPercent);
             var stopHit = lastPrice <= stopRef;
