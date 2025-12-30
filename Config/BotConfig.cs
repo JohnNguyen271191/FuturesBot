@@ -95,7 +95,79 @@ namespace FuturesBot.Config
         /// If maker entry is not filled within this many seconds, cancel and reprice.
         /// </summary>
         public int EntryRepriceSeconds { get; set; } = 60;
-/// <summary>
+
+        // =============================
+        // EXIT MANAGEMENT (NO-OCO)
+        // =============================
+
+        /// <summary>
+        /// If true, Spot OMS will create OCO exits (legacy mode).
+        /// If false, Spot OMS will self-manage exits: TP as maker LIMIT and SL as soft maker -> fallback market.
+        /// Recommended: false.
+        /// </summary>
+        public bool UseOcoExitOrders { get; set; } = false;
+
+        /// <summary>
+        /// When in position, ensure there is always a maker TAKE-PROFIT LIMIT SELL at entryRef*(1+tp%).
+        /// If strategy provides TakeProfit, OMS may prefer it.
+        /// </summary>
+        public bool MaintainMakerTakeProfit { get; set; } = true;
+
+        /// <summary>
+        /// TP manager: if existing TP distance to lastPrice is below this, TP is too close and will be replaced.
+        /// Example: 0.0015 = 0.15%
+        /// </summary>
+        public decimal TpMinDistancePercent { get; set; } = 0.0015m;
+
+        /// <summary>
+        /// TP manager: if existing TP distance to lastPrice is above this, TP is too far and will be replaced.
+        /// Example: 0.006 = 0.6%
+        /// </summary>
+        public decimal TpMaxDistancePercent { get; set; } = 0.006m;
+
+        /// <summary>
+        /// How often (seconds) to re-check and potentially replace TP.
+        /// </summary>
+        public int TpRecheckSeconds { get; set; } = 5;
+
+        /// <summary>
+        /// Soft SL maker: place LIMIT_MAKER SELL inside the spread, closer to bid to increase fill probability.
+        /// 0 = at ask, 1 = 10% into spread from bid, etc.
+        /// Example: 0.2 means bid + 20%*(ask-bid).
+        /// </summary>
+        public decimal SoftSlInsideSpreadRatio { get; set; } = 0.2m;
+
+        /// <summary>
+        /// Soft SL maker: when exiting (STOP/early-exit), place LIMIT_MAKER SELL first,
+        /// wait SoftSlWaitSeconds; if not filled then cancel and fallback to MARKET SELL.
+        /// </summary>
+        public int SoftSlWaitSeconds { get; set; } = 10;
+
+        /// <summary>
+        /// Soft SL maker price uses current bestAsk (preferred) or lastPrice * (1 + SoftSlMakerOffsetPercent).
+        /// Example: 0.0001 = +0.01%.
+        /// </summary>
+        public decimal SoftSlMakerOffsetPercent { get; set; } = 0.0001m;
+
+        /// <summary>
+        /// Extra guard: if price is dumping fast (e.g., lastPrice below stop by this percent),
+        /// skip soft maker and go straight to MARKET SELL.
+        /// Example: 0.001 = 0.1%.
+        /// </summary>
+        public decimal SoftSlSkipIfWorseThanStopByPercent { get; set; } = 0.001m;
+
+        /// <summary>
+        /// Time-stop: if holding exists for too long without reaching TP, exit via soft SL.
+        /// Set 0 to disable.
+        /// </summary>
+        public int TimeStopSeconds { get; set; } = 0;
+
+        /// <summary>
+        /// Cooldown after closing a spot position, to prevent immediate re-entry spam.
+        /// </summary>
+        public int PostExitCooldownSeconds { get; set; } = 5;
+
+        /// <summary>
         /// Throttle placing/canceling orders to avoid spam.
         /// </summary>
         public int MinSecondsBetweenActions { get; set; } = 5;

@@ -302,6 +302,10 @@ static async Task RunSpotSymbolWorkerAsync(
     var spot = scope.ServiceProvider.GetRequiredService<ISpotExchangeService>();
     var oms = scope.ServiceProvider.GetRequiredService<SpotOrderManagerService>();
 
+    // Resume spot position state after restart
+    await oms.RecoverAsync(new[] { coinInfo }, ct);
+
+
     var mainTf = coinInfo.MainTimeFrame;
     var mainSpan = ParseFrameTime(mainTf);
 

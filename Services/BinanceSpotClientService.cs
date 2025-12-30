@@ -5,6 +5,7 @@ using System.Globalization;
 using FuturesBot.Infrastructure.Binance;
 using System.Text.Json;
 using static FuturesBot.Utils.EnumTypesHelper;
+using System.Net.Http;
 
 namespace FuturesBot.Services
 {
@@ -169,6 +170,18 @@ namespace FuturesBot.Services
             return decimal.Parse(doc.RootElement.GetProperty("price").GetString()!, CultureInfo.InvariantCulture);
         }
 
+        public async Task<(decimal bid, decimal ask)> GetBestBidAskAsync(string symbol)
+        {
+            symbol = NormalizeSymbol(symbol);
+            var resp = await _http.GetAsync($"/api/v3/ticker/bookTicker?symbol={Uri.EscapeDataString(symbol)}");
+            resp.EnsureSuccessStatusCode();
+            var json = await resp.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(json);
+            var bid = decimal.Parse(doc.RootElement.GetProperty("bidPrice").GetString()!, CultureInfo.InvariantCulture);
+            var ask = decimal.Parse(doc.RootElement.GetProperty("askPrice").GetString()!, CultureInfo.InvariantCulture);
+            return (bid, ask);
+        }
+
         // =========================
         // Spot account
         // =========================
@@ -256,6 +269,97 @@ namespace FuturesBot.Services
                 result.RawStatus = st.GetString() ?? "";
 
             return result;
+        }
+
+        public async Task<SpotOrderResult> PlaceLimitMakerAsync(string symbol, SignalType side, decimal quantity, decimal price)
+        {
+            if (_config.PaperMode)
+            {
+                return new SpotOrderResult { OrderId = "PAPER_LIMIT_MAKER", ExecutedQty = 0m, CummulativeQuoteQty = 0m, RawStatus = "PAPER" };
+            }
+
+            symbol = NormalizeSymbol(symbol);
+            var rules = await _rulesService.GetRulesAsync(symbol);
+
+            var roundedPrice = RoundDown(price, rules.PriceStep);
+            var (roundedQty, _, _) = await RoundAndValidateQtyAsync(symbol, quantity, roundedPrice);
+            if (roundedQty <= 0)
+            {
+                await _slack.SendAsync($"[SPOT] Reject LIMIT_MAKER {symbol} qty too small after rounding (raw={quantity}).");
+                return new SpotOrderResult { OrderId = "REJECTED", ExecutedQty = 0m, CummulativeQuoteQty = 0m, RawStatus = "REJECTED" };
+            }
+
+            var parameters = new Dictionary<string, string>
+            {
+                ["symbol"] = symbol,
+                ["side"] = side == SignalType.Long ? "BUY" : "SELL",
+                ["type"] = "LIMIT_MAKER",
+                ["quantity"] = roundedQty.ToString(CultureInfo.InvariantCulture),
+                ["price"] = roundedPrice.ToString(CultureInfo.InvariantCulture),
+                ["recvWindow"] = "5000",
+            };
+
+            var ts = await _time.GetTimestampMsAsync();
+            parameters["timestamp"] = ts.ToString(CultureInfo.InvariantCulture);
+
+            var json = await SendSignedAsync(HttpMethod.Post, _config.SpotUrls.OrderUrl, parameters);
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            return new SpotOrderResult
+            {
+                OrderId = root.TryGetProperty("orderId", out var oid)
+                    ? oid.GetInt64().ToString(CultureInfo.InvariantCulture)
+                    : "UNKNOWN",
+                ExecutedQty = root.TryGetProperty("executedQty", out var eq)
+                    ? decimal.Parse(eq.GetString() ?? "0", CultureInfo.InvariantCulture)
+                    : 0m,
+                CummulativeQuoteQty = root.TryGetProperty("cummulativeQuoteQty", out var cq)
+                    ? decimal.Parse(cq.GetString() ?? "0", CultureInfo.InvariantCulture)
+                    : 0m,
+                RawStatus = root.TryGetProperty("status", out var st) ? (st.GetString() ?? "") : ""
+            };
+        }
+
+        public async Task<SpotOrderStatus> GetOrderStatusAsync(string symbol, string orderId)
+        {
+            if (_config.PaperMode)
+            {
+                return new SpotOrderStatus { OrderId = orderId, Status = "PAPER", OrigQty = 0m, ExecutedQty = 0m, Price = 0m, Side = "", Type = "" };
+            }
+
+            symbol = NormalizeSymbol(symbol);
+            var body = await SendSignedAsync(HttpMethod.Get, _config.SpotUrls.OrderUrl, new Dictionary<string, string>
+            {
+                ["symbol"] = symbol,
+                ["orderId"] = orderId,
+            });
+
+            using var doc = JsonDocument.Parse(body);
+            var root = doc.RootElement;
+            return new SpotOrderStatus
+            {
+                OrderId = orderId,
+                Status = root.TryGetProperty("status", out var st) ? (st.GetString() ?? "") : "",
+                OrigQty = root.TryGetProperty("origQty", out var oq) ? decimal.Parse(oq.GetString() ?? "0", CultureInfo.InvariantCulture) : 0m,
+                ExecutedQty = root.TryGetProperty("executedQty", out var eq) ? decimal.Parse(eq.GetString() ?? "0", CultureInfo.InvariantCulture) : 0m,
+                Price = root.TryGetProperty("price", out var px) ? decimal.Parse(px.GetString() ?? "0", CultureInfo.InvariantCulture) : 0m,
+                Side = root.TryGetProperty("side", out var sd) ? (sd.GetString() ?? "") : "",
+                Type = root.TryGetProperty("type", out var tp) ? (tp.GetString() ?? "") : "",
+            };
+        }
+
+        public async Task CancelOrderAsync(string symbol, string orderId)
+        {
+            if (_config.PaperMode)
+                return;
+
+            symbol = NormalizeSymbol(symbol);
+            await SendSignedAsync(HttpMethod.Delete, _config.SpotUrls.OrderUrl, new Dictionary<string, string>
+            {
+                ["symbol"] = symbol,
+                ["orderId"] = orderId,
+            });
         }
 
         public async Task<SpotOrderResult> PlaceMarketBuyByQuoteAsync(string symbol, decimal quoteOrderQty)
