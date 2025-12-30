@@ -195,7 +195,7 @@ namespace FuturesBot.Services
                     bool hasPosition = pos.PositionAmt != 0;
                     bool hasOpenOrder = openOrders.Any();
 
-                    var coinInfo = _botConfig.CoinInfos.FirstOrDefault(i => i.Symbol.Equals(symbol));
+                    var coinInfo = _botConfig.Futures.Coins.FirstOrDefault(i => i.Symbol.Equals(symbol));
                     if (coinInfo == null)
                     {
                         await _notify.SendAsync($"[{symbol}] không tìm thấy trong setting.");
@@ -265,7 +265,7 @@ namespace FuturesBot.Services
         //         MONITOR POSITION (FLEX EXIT) - MODE AWARE
         // ============================================================
 
-        public async Task MonitorPositionAsync(TradeSignal signal, CoinInfo coinInfo)
+        public async Task MonitorPositionAsync(TradeSignal signal, FuturesCoinConfig coinInfo)
         {
             string symbol = signal.Symbol;
             var profile = ModeProfile.For(signal.Mode);
@@ -649,7 +649,7 @@ namespace FuturesBot.Services
                         // ======================================================================
                         if (enableMicro && hasEntry && canUseRR)
                         {
-                            decimal plannedRiskUsd = _botConfig.AccountBalance * (coinInfo.RiskPerTradePercent / 100m);
+                            decimal plannedRiskUsd = _botConfig.Global.AccountBalance * (coinInfo.RiskPerTradePercent / 100m);
 
                             decimal baseRiskUsd;
                             if (riskUsd > 0m && plannedRiskUsd > 0m)
@@ -1176,7 +1176,7 @@ namespace FuturesBot.Services
                 Mode = TradeMode.Trend
             };
 
-            var coinInfo = _botConfig.CoinInfos.FirstOrDefault(i => i.Symbol.Equals(pos.Symbol));
+            var coinInfo = _botConfig.Futures.Coins.FirstOrDefault(i => i.Symbol.Equals(pos.Symbol));
             if (coinInfo == null)
             {
                 await _notify.SendAsync($"[{pos.Symbol}] không tìm thấy trong setting.");
@@ -1848,7 +1848,7 @@ namespace FuturesBot.Services
             bool dangerHard,
             decimal netRr,
             decimal netPnlUsd,
-            CoinInfo coinInfo)
+            FuturesCoinConfig coinInfo)
         {
             var symbol = coinInfo.Symbol;
             if (!dangerCandidate || reclaimed)

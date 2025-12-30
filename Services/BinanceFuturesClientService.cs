@@ -14,6 +14,7 @@ namespace FuturesBot.Services
     {
         private readonly HttpClient _http;
         private readonly BotConfig _config;
+        private readonly FuturesUrls _urls;
         private readonly IBinanceTimeProvider _time;
         private readonly IBinanceSigner _signer;
         private readonly SymbolRulesService _rulesService;
@@ -22,12 +23,13 @@ namespace FuturesBot.Services
         public BinanceFuturesClientService(BotConfig config, SlackNotifierService slack)
         {
             _config = config;
-            _http = new HttpClient { BaseAddress = new Uri(config.Urls.BaseUrl) };
+            _urls = config.Futures.Urls;
+            _http = new HttpClient { BaseAddress = new Uri(_urls.BaseUrl) };
             _http.DefaultRequestHeaders.Add("X-MBX-APIKEY", config.ApiKey);
-            _rulesService = new SymbolRulesService(_http, _config);
+            _rulesService = new SymbolRulesService(_http, _urls.ExchangeInfoUrl);
             _slack = slack;
             _signer = new BinanceSigner(_config.ApiSecret);
-            _time = new BinanceTimeProvider(_http, _config.Urls.TimeUrl, _slack);
+            _time = new BinanceTimeProvider(_http, _urls.TimeUrl, _slack);
         }
 
         // ==========================
@@ -36,7 +38,7 @@ namespace FuturesBot.Services
 
         public async Task<IReadOnlyList<Candle>> GetRecentCandlesAsync(string symbol, string interval, int limit = 200)
         {
-            var url = $"{_config.Urls.KlinesUrl}?symbol={symbol}&interval={interval}&limit={limit}";
+            var url = $"{_urls.KlinesUrl}?symbol={symbol}&interval={interval}&limit={limit}";
             for (int attempt = 1; attempt <= 3; attempt++)
             {
                 try
@@ -150,7 +152,7 @@ namespace FuturesBot.Services
             var notifier = slackNotifierService ?? _slack;
 
             await notifier.SendAsync("=== SEND ENTRY ORDER ===");
-            var entryResp = await SignedPostAsync($"{_config.Urls.OrderUrl}", entryParams);
+            var entryResp = await SignedPostAsync($"{_urls.OrderUrl}", entryParams);
             if (entryResp.Contains("[BINANCE ERROR]"))
             {
                 await notifier.SendAsync($"Send order: symbol={symbol}, side={sideStr}, qty={qty} - {rules.QtyStep}, price={entry} - {rules.PriceStep}, sl={sl}, tp={tp}");
@@ -173,7 +175,7 @@ namespace FuturesBot.Services
             };
 
             await notifier.SendAsync("=== SEND STOP LOSS (ALGO) ===");
-            var slResp = await SignedPostAsync($"{_config.Urls.AlgoOrderUrl}", slAlgoParams);
+            var slResp = await SignedPostAsync($"{_urls.AlgoOrderUrl}", slAlgoParams);
             await notifier.SendAsync($"[SL RESP] {slResp}");
 
             // 4. Đặt TAKE_PROFIT_MARKET (Take Profit) qua Algo Order API
@@ -190,7 +192,7 @@ namespace FuturesBot.Services
             };
 
             await notifier.SendAsync("=== SEND TAKE PROFIT (ALGO) ===");
-            var tpResp = await SignedPostAsync($"{_config.Urls.AlgoOrderUrl}", tpAlgoParams);
+            var tpResp = await SignedPostAsync($"{_urls.AlgoOrderUrl}", tpAlgoParams);
             await notifier.SendAsync($"[TP RESP] {tpResp}");
 
             return true;
@@ -203,7 +205,7 @@ namespace FuturesBot.Services
             {
                 try
                 {
-                    json = await SignedGetAsync($"{_config.Urls.PositionRiskUrl}", new Dictionary<string, string>
+                    json = await SignedGetAsync($"{_urls.PositionRiskUrl}", new Dictionary<string, string>
                     {
                         ["symbol"] = symbol
                     });
@@ -362,7 +364,7 @@ namespace FuturesBot.Services
                 ["recvWindow"] = "60000"
             };
 
-            var posJson = await SignedGetAsync($"{_config.Urls.PositionRiskUrl}", posParams);
+            var posJson = await SignedGetAsync($"{_urls.PositionRiskUrl}", posParams);
 
             try
             {
@@ -392,7 +394,7 @@ namespace FuturesBot.Services
                 ["recvWindow"] = "60000"
             };
 
-            var ordersJson = await SignedGetAsync($"{_config.Urls.OpenOrdersUrl}", orderParams);
+            var ordersJson = await SignedGetAsync($"{_urls.OpenOrdersUrl}", orderParams);
 
             try
             {
@@ -413,7 +415,7 @@ namespace FuturesBot.Services
                     ["recvWindow"] = "60000"
                 };
 
-                var algoJson = await SignedGetAsync($"{_config.Urls.OpenAlgoOrdersUrl}", algoParams);
+                var algoJson = await SignedGetAsync($"{_urls.OpenAlgoOrdersUrl}", algoParams);
 
                 using var doc = JsonDocument.Parse(algoJson);
                 if (doc.RootElement.ValueKind == JsonValueKind.Array &&
@@ -434,7 +436,7 @@ namespace FuturesBot.Services
         {
             long fromMs = new DateTimeOffset(since).ToUnixTimeMilliseconds();
 
-            var json = await SignedGetAsync($"{_config.Urls.UserTradesUrl}", new Dictionary<string, string>
+            var json = await SignedGetAsync($"{_urls.UserTradesUrl}", new Dictionary<string, string>
             {
                 ["symbol"] = symbol,
                 ["startTime"] = fromMs.ToString(),
@@ -474,7 +476,7 @@ namespace FuturesBot.Services
 
             var signature = _signer.Sign(qs);
 
-            string url = $"{_config.Urls.AllOpenOrdersUrl}?{qs}&signature={signature}";
+            string url = $"{_urls.AllOpenOrdersUrl}?{qs}&signature={signature}";
 
             var req = new HttpRequestMessage(HttpMethod.Delete, url);
 
@@ -497,7 +499,7 @@ namespace FuturesBot.Services
                 var qs2 = $"symbol={symbol}&timestamp={ts2}";
                 var sig2 = _signer.Sign(qs2);
 
-                string url2 = $"{_config.Urls.AlgoOpenOrdersUrl}?{qs2}&signature={sig2}";
+                string url2 = $"{_urls.AlgoOpenOrdersUrl}?{qs2}&signature={sig2}";
                 var req2 = new HttpRequestMessage(HttpMethod.Delete, url2);
 
                 var resp2 = await _http.SendAsync(req2);
@@ -522,7 +524,7 @@ namespace FuturesBot.Services
         {
             var side = quantity > 0 ? "SELL" : "BUY";
             var positionSide = quantity > 0 ? "LONG" : "SHORT";
-            await SignedPostAsync($"{_config.Urls.OrderUrl}", new Dictionary<string, string>
+            await SignedPostAsync($"{_urls.OrderUrl}", new Dictionary<string, string>
             {
                 ["symbol"] = symbol,
                 ["side"] = side,
@@ -538,7 +540,7 @@ namespace FuturesBot.Services
             if (_config.PaperMode)
                 return [];
 
-            var json = await SignedGetAsync($"{_config.Urls.OpenOrdersUrl}", new Dictionary<string, string>
+            var json = await SignedGetAsync($"{_urls.OpenOrdersUrl}", new Dictionary<string, string>
             {
                 ["symbol"] = symbol,
                 ["recvWindow"] = "60000"
@@ -598,7 +600,7 @@ namespace FuturesBot.Services
                 ["quantity"] = qty.ToString(CultureInfo.InvariantCulture),
                 ["recvWindow"] = "60000"
             };
-            var resp = await SignedPostAsync($"{_config.Urls.AlgoOrderUrl}", param);
+            var resp = await SignedPostAsync($"{_urls.AlgoOrderUrl}", param);
 
             if (resp.Contains("[BINANCE ERROR]"))
             {
@@ -657,7 +659,7 @@ namespace FuturesBot.Services
                 ["recvWindow"] = "60000"
             };
 
-            var json = await SignedGetAsync($"{_config.Urls.OpenAlgoOrdersUrl}", param);
+            var json = await SignedGetAsync($"{_urls.OpenAlgoOrdersUrl}", param);
 
             using var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;
@@ -714,7 +716,7 @@ namespace FuturesBot.Services
                 ["recvWindow"] = "60000",
             };
 
-            var resp = await SignedPostAsync(_config.Urls.AlgoOrderUrl, param);
+            var resp = await SignedPostAsync(_urls.AlgoOrderUrl, param);
 
             if (resp.Contains("[BINANCE ERROR]"))
             {
@@ -728,7 +730,7 @@ namespace FuturesBot.Services
 
         public async Task<bool> HasTakeProfitOrderAsync(string symbol)
         {
-            var json = await SignedGetAsync(_config.Urls.OpenAlgoOrdersUrl,
+            var json = await SignedGetAsync(_urls.OpenAlgoOrdersUrl,
                 new Dictionary<string, string> { ["symbol"] = symbol });
 
             using var doc = JsonDocument.Parse(json);
@@ -749,7 +751,7 @@ namespace FuturesBot.Services
             if (_config.PaperMode)
                 return [];
 
-            var json = await SignedGetAsync($"{_config.Urls.OpenAlgoOrdersUrl}", new Dictionary<string, string>
+            var json = await SignedGetAsync($"{_urls.OpenAlgoOrdersUrl}", new Dictionary<string, string>
             {
                 ["symbol"] = symbol,
                 ["recvWindow"] = "60000"
@@ -828,7 +830,7 @@ namespace FuturesBot.Services
                 if (fromId.HasValue)
                     query["fromId"] = fromId.Value.ToString(CultureInfo.InvariantCulture);
 
-                var json = await SignedGetAsync(_config.Urls.UserTradesUrl, query);
+                var json = await SignedGetAsync(_urls.UserTradesUrl, query);
 
                 using var doc = JsonDocument.Parse(json);
                 var arr = doc.RootElement;
@@ -903,7 +905,7 @@ namespace FuturesBot.Services
                 ["recvWindow"] = "60000"
             };
 
-            var resp = await SignedPostAsync($"{_config.Urls.LeverageUrl}", param);
+            var resp = await SignedPostAsync($"{_urls.LeverageUrl}", param);
             await _slack.SendAsync("[LEVERAGE RESP] " + resp);
         }
 
@@ -982,7 +984,7 @@ namespace FuturesBot.Services
                                     .ToString()
             };
 
-            var json = await SignedGetAsync($"{_config.Urls.IncomeUrl}", query);
+            var json = await SignedGetAsync($"{_urls.IncomeUrl}", query);
 
             var list = new List<IncomeRecord>();
             using var doc = JsonDocument.Parse(json);
@@ -1017,7 +1019,7 @@ namespace FuturesBot.Services
             var qs = $"algoId={algoId}&timestamp={ts}";
             var signature = BinanceSignatureHelper.Sign(qs, _config.ApiSecret);
 
-            string url = $"{_config.Urls.AlgoOrderUrl}?{qs}&signature={signature}";
+            string url = $"{_urls.AlgoOrderUrl}?{qs}&signature={signature}";
             var req = new HttpRequestMessage(HttpMethod.Delete, url);
 
             var resp = await _http.SendAsync(req);

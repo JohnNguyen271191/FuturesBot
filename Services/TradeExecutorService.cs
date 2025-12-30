@@ -18,7 +18,7 @@ namespace FuturesBot.Services
         private readonly SlackNotifierService _notifier = notifier;
         private readonly OrderManagerService _orderManagerService = orderManagerService;
 
-        public async Task HandleSignalAsync(TradeSignal signal, CoinInfo coinInfo)
+        public async Task HandleSignalAsync(TradeSignal signal, FuturesCoinConfig coinInfo)
         {
             if (signal.Type == SignalType.None) return;
 

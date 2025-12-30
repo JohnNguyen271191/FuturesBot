@@ -137,7 +137,7 @@ namespace FuturesBot.Services
         /// - hydrate EntryRefPrice from persisted file (or lastPrice fallback)
         /// - lock WasInPosition = true to prevent accidental re-entry
         /// </summary>
-        public async Task RecoverAsync(IEnumerable<CoinInfo> spotCoins, CancellationToken ct)
+        public async Task RecoverAsync(IEnumerable<SpotCoinConfig> spotCoins, CancellationToken ct)
         {
             Dictionary<string, PersistedSpotState> persisted;
             lock (_stateFileLock) persisted = LoadPersistedUnsafe();
@@ -148,7 +148,7 @@ namespace FuturesBot.Services
 
                 var symbol = coin.Symbol;
                 var baseAsset = GuessBaseAsset(symbol);
-                var quoteAsset = _config.SpotQuoteAsset;
+                var quoteAsset = _config.Spot.QuoteAsset;
 
                 var lastPrice = await _spot.GetLastPriceAsync(symbol);
                 if (lastPrice <= 0) continue;
@@ -157,7 +157,7 @@ namespace FuturesBot.Services
                 var baseTotal = baseHold.Free + baseHold.Locked;
                 var holdingNotional = baseTotal * lastPrice;
 
-                if (holdingNotional < _config.SpotOms.MinHoldingNotionalUsd)
+                if (holdingNotional < _config.Spot.Oms.MinHoldingNotionalUsd)
                     continue;
 
                 var st = _state.GetOrAdd(symbol, _ => new SpotSymbolState());
@@ -186,12 +186,12 @@ namespace FuturesBot.Services
             }
         }
 
-        public async Task TickAsync(TradeSignal? signal, CoinInfo coinInfo, CancellationToken ct)
+        public async Task TickAsync(TradeSignal? signal, SpotCoinConfig coinInfo, CancellationToken ct)
         {
             ct.ThrowIfCancellationRequested();
 
             var symbol = coinInfo.Symbol;
-            var quoteAsset = _config.SpotQuoteAsset;
+            var quoteAsset = _config.Spot.QuoteAsset;
             var baseAsset = GuessBaseAsset(symbol);
 
             // Ensure state exists early (we use it for transition notify)
@@ -207,7 +207,7 @@ namespace FuturesBot.Services
             // IMPORTANT: include Locked. TP orders lock base and Free becomes 0.
             var baseTotal = baseHold.Free + baseHold.Locked;
             var holdingNotional = baseTotal * lastPrice;
-            var inPosition = holdingNotional >= _config.SpotOms.MinHoldingNotionalUsd;
+            var inPosition = holdingNotional >= _config.Spot.Oms.MinHoldingNotionalUsd;
 
             // Pull open orders once per tick
             var open = await _spot.GetOpenOrdersAsync(symbol);
@@ -256,12 +256,12 @@ namespace FuturesBot.Services
                     if (pendingBuy.TimeMs > 0)
                     {
                         var ageSec = (nowMs - pendingBuy.TimeMs) / 1000;
-                        if (ageSec < _config.SpotOms.EntryRepriceSeconds)
+                        if (ageSec < _config.Spot.Oms.EntryRepriceSeconds)
                             return;
                     }
 
                     await _spot.CancelAllOpenOrdersAsync(symbol);
-                    await _notify.SendAsync($"[SPOT][OMS] Reprice pending entry {symbol} after {_config.SpotOms.EntryRepriceSeconds}s.");
+                    await _notify.SendAsync($"[SPOT][OMS] Reprice pending entry {symbol} after {_config.Spot.Oms.EntryRepriceSeconds}s.");
                     MarkAction(symbol);
                     return;
                 }
@@ -284,11 +284,11 @@ namespace FuturesBot.Services
 
                 // Determine maker entry price (below current)
                 var (bestBid, bestAsk) = await _spot.GetBestBidAskAsync(symbol);
-                var entryPrice = lastPrice * (1m - _config.SpotOms.EntryMakerOffsetPercent);
+                var entryPrice = lastPrice * (1m - _config.Spot.Oms.EntryMakerOffsetPercent);
 
                 // ensure non-marketable buy (try keep below ask)
                 if (bestAsk > 0 && entryPrice >= bestAsk)
-                    entryPrice = bestBid > 0 ? bestBid * (1m - _config.SpotOms.EntryMakerOffsetPercent) : entryPrice;
+                    entryPrice = bestBid > 0 ? bestBid * (1m - _config.Spot.Oms.EntryMakerOffsetPercent) : entryPrice;
 
                 if (entryPrice <= 0)
                     return;
@@ -328,11 +328,11 @@ namespace FuturesBot.Services
             // (You can keep using signal.Short as "exit hint" if your pipeline does that)
             var exitHint = signal?.Type == SignalType.Short;
 
-            var stopRef = st.EntryRefPrice * (1m - _config.SpotOms.DefaultStopLossPercent);
+            var stopRef = st.EntryRefPrice * (1m - _config.Spot.Oms.DefaultStopLossPercent);
             var stopHit = lastPrice <= stopRef;
 
-            var timeStopHit = _config.SpotOms.TimeStopSeconds > 0 &&
-                              (DateTime.UtcNow - st.EntrySeenUtc).TotalSeconds >= _config.SpotOms.TimeStopSeconds;
+            var timeStopHit = _config.Spot.Oms.TimeStopSeconds > 0 &&
+                              (DateTime.UtcNow - st.EntrySeenUtc).TotalSeconds >= _config.Spot.Oms.TimeStopSeconds;
 
             if ((exitHint || stopHit || timeStopHit) && !st.SoftExitInProgress)
             {
@@ -348,7 +348,7 @@ namespace FuturesBot.Services
                 baseHold = await _spot.GetHoldingAsync(baseAsset);
                 baseTotal = baseHold.Free + baseHold.Locked;
                 holdingNotional = baseTotal * lastPrice;
-                inPosition = holdingNotional >= _config.SpotOms.MinHoldingNotionalUsd;
+                inPosition = holdingNotional >= _config.Spot.Oms.MinHoldingNotionalUsd;
 
                 if (!inPosition)
                 {
@@ -365,9 +365,9 @@ namespace FuturesBot.Services
             }
 
             // ====== TP management (maker) ======
-            if (_config.SpotOms.MaintainMakerTakeProfit && !st.SoftExitInProgress)
+            if (_config.Spot.Oms.MaintainMakerTakeProfit && !st.SoftExitInProgress)
             {
-                if (DateTime.UtcNow - st.LastTpCheckUtc >= TimeSpan.FromSeconds(Math.Max(1, _config.SpotOms.TpRecheckSeconds)))
+                if (DateTime.UtcNow - st.LastTpCheckUtc >= TimeSpan.FromSeconds(Math.Max(1, _config.Spot.Oms.TpRecheckSeconds)))
                 {
                     st.LastTpCheckUtc = DateTime.UtcNow;
 
@@ -385,7 +385,7 @@ namespace FuturesBot.Services
                         if (hasBaseToSell && !IsThrottled(symbol))
                         {
                             var entryRef = st.EntryRefPrice > 0 ? st.EntryRefPrice : lastPrice;
-                            var tpPrice = entryRef * (1m + _config.SpotOms.DefaultTakeProfitPercent);
+                            var tpPrice = entryRef * (1m + _config.Spot.Oms.DefaultTakeProfitPercent);
 
                             var tp = await _spot.PlaceLimitMakerAsync(symbol, SignalType.Short, baseFree, tpPrice);
                             if (!string.IsNullOrWhiteSpace(tp.OrderId) && tp.OrderId != "REJECTED" && tp.OrderId != "REJECT_QTY")
@@ -407,8 +407,8 @@ namespace FuturesBot.Services
                             ? (sellLimit.Price - lastPrice) / lastPrice
                             : 0m;
 
-                        var tooClose = dist > 0 && dist < _config.SpotOms.TpMinDistancePercent;
-                        var tooFar = dist > _config.SpotOms.TpMaxDistancePercent;
+                        var tooClose = dist > 0 && dist < _config.Spot.Oms.TpMinDistancePercent;
+                        var tooFar = dist > _config.Spot.Oms.TpMaxDistancePercent;
 
                         if ((tooClose || tooFar) && hasBaseToSell && !IsThrottled(symbol))
                         {
@@ -421,7 +421,7 @@ namespace FuturesBot.Services
                             if (baseFree > 0)
                             {
                                 var entryRef = st.EntryRefPrice > 0 ? st.EntryRefPrice : lastPrice;
-                                var newTpPrice = entryRef * (1m + _config.SpotOms.DefaultTakeProfitPercent);
+                                var newTpPrice = entryRef * (1m + _config.Spot.Oms.DefaultTakeProfitPercent);
 
                                 var tp2 = await _spot.PlaceLimitMakerAsync(symbol, SignalType.Short, baseFree, newTpPrice);
                                 if (!string.IsNullOrWhiteSpace(tp2.OrderId) && tp2.OrderId != "REJECTED" && tp2.OrderId != "REJECT_QTY")
@@ -456,7 +456,7 @@ namespace FuturesBot.Services
 
             // If price is already far below stop, skip soft maker to avoid missing exit.
             var worseThanStopBy = stopRef > 0 ? (stopRef - lastPrice) / stopRef : 0m;
-            if (worseThanStopBy >= _config.SpotOms.SoftSlSkipIfWorseThanStopByPercent)
+            if (worseThanStopBy >= _config.Spot.Oms.SoftSlSkipIfWorseThanStopByPercent)
             {
                 var mkt = await _spot.PlaceSpotOrderAsync(symbol, SignalType.Short, qty); // MARKET SELL
                 var avg = (mkt.ExecutedQty > 0 && mkt.CummulativeQuoteQty > 0) ? (mkt.CummulativeQuoteQty / mkt.ExecutedQty) : lastPrice;
@@ -468,16 +468,16 @@ namespace FuturesBot.Services
             var (bid, ask) = await _spot.GetBestBidAskAsync(symbol);
             var spread = Math.Max(0m, ask - bid);
 
-            var ratio = _config.SpotOms.SoftSlInsideSpreadRatio;
+            var ratio = _config.Spot.Oms.SoftSlInsideSpreadRatio;
             if (ratio < 0m) ratio = 0m;
             if (ratio > 1m) ratio = 1m;
 
             var inside = bid + spread * ratio;
 
             // must be > bid to be maker; LIMIT_MAKER will reject if marketable
-            var makerPrice = spread > 0 ? inside : (lastPrice * (1m + _config.SpotOms.SoftSlMakerOffsetPercent));
+            var makerPrice = spread > 0 ? inside : (lastPrice * (1m + _config.Spot.Oms.SoftSlMakerOffsetPercent));
             if (makerPrice <= bid)
-                makerPrice = ask > bid ? ask : (bid * (1m + _config.SpotOms.SoftSlMakerOffsetPercent));
+                makerPrice = ask > bid ? ask : (bid * (1m + _config.Spot.Oms.SoftSlMakerOffsetPercent));
 
             var soft = await _spot.PlaceLimitMakerAsync(symbol, SignalType.Short, qty, makerPrice);
             if (soft.OrderId == "REJECTED" || soft.OrderId == "UNKNOWN")
@@ -491,12 +491,12 @@ namespace FuturesBot.Services
             await _notify.SendAsync($"[SPOT][SL][SOFT] {symbol} LIMIT_MAKER placed qty={qty:0.########}, price={makerPrice:0.########}, reason={reason}");
 
             // Wait then check if still holding
-            await Task.Delay(TimeSpan.FromSeconds(Math.Max(1, _config.SpotOms.SoftSlWaitSeconds)), ct);
+            await Task.Delay(TimeSpan.FromSeconds(Math.Max(1, _config.Spot.Oms.SoftSlWaitSeconds)), ct);
 
             hold = await _spot.GetHoldingAsync(baseAsset);
             qty = hold.Free + hold.Locked;
 
-            if (qty * lastPrice < _config.SpotOms.MinHoldingNotionalUsd)
+            if (qty * lastPrice < _config.Spot.Oms.MinHoldingNotionalUsd)
             {
                 await _notify.SendAsync($"[SPOT][SL][SOFT] {symbol} filled, reason={reason}");
                 return;
@@ -533,7 +533,7 @@ namespace FuturesBot.Services
 
         private bool IsThrottled(string symbol)
         {
-            var min = TimeSpan.FromSeconds(Math.Max(1, _config.SpotOms.MinSecondsBetweenActions));
+            var min = TimeSpan.FromSeconds(Math.Max(1, _config.Spot.Oms.MinSecondsBetweenActions));
             if (_lastActionUtc.TryGetValue(symbol, out var last))
             {
                 if (DateTime.UtcNow - last < min)

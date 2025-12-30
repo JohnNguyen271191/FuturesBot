@@ -21,6 +21,7 @@ namespace FuturesBot.Services
     {
         private readonly HttpClient _http;
         private readonly BotConfig _config;
+        private readonly SpotUrls _urls;
         private readonly SymbolRulesService _rulesService;
         private readonly SlackNotifierService _slack;
 
@@ -33,13 +34,14 @@ namespace FuturesBot.Services
         public BinanceSpotClientService(BotConfig config, SlackNotifierService slack)
         {
             _config = config;
-            _http = new HttpClient { BaseAddress = new Uri(config.Urls.BaseUrl) };
+            _urls = config.Spot.Urls;
+            _http = new HttpClient { BaseAddress = new Uri(_urls.BaseUrl) };
             _http.DefaultRequestHeaders.Add("X-MBX-APIKEY", config.ApiKey);
 
             _slack = slack;
-            _rulesService = new SymbolRulesService(_http, _config);
+            _rulesService = new SymbolRulesService(_http, _config.Spot.Urls.ExchangeInfoUrl);
             _signer = new BinanceSigner(_config.ApiSecret);
-            _time = new BinanceTimeProvider(_http, _config.Urls.TimeUrl, _slack);
+            _time = new BinanceTimeProvider(_http, _urls.TimeUrl, _slack);
         }
 
         private static string NormalizeSymbol(string? symbol)
@@ -131,7 +133,7 @@ namespace FuturesBot.Services
             interval = (interval ?? string.Empty).Trim();
 
             // Build query safely (helps avoid 400 due to stray spaces / bad chars)
-            var url = $"{_config.Urls.KlinesUrl}?symbol={Uri.EscapeDataString(symbol)}&interval={Uri.EscapeDataString(interval)}&limit={limit}";
+            var url = $"{_urls.KlinesUrl}?symbol={Uri.EscapeDataString(symbol)}&interval={Uri.EscapeDataString(interval)}&limit={limit}";
             var resp = await _http.GetAsync(url);
 
             if (!resp.IsSuccessStatusCode)
@@ -191,7 +193,7 @@ namespace FuturesBot.Services
             if (_config.PaperMode)
                 return new SpotHolding { Asset = asset.ToUpperInvariant(), Free = 0m, Locked = 0m };
 
-            var body = await SendSignedAsync(HttpMethod.Get, _config.Urls.AccountUrl, new Dictionary<string, string>());
+            var body = await SendSignedAsync(HttpMethod.Get, _urls.AccountUrl, new Dictionary<string, string>());
             using var doc = JsonDocument.Parse(body);
 
             if (!doc.RootElement.TryGetProperty("balances", out var balances) || balances.ValueKind != JsonValueKind.Array)
@@ -250,7 +252,7 @@ namespace FuturesBot.Services
 
             p["quantity"] = qty.ToString(CultureInfo.InvariantCulture);
 
-            var body = await SendSignedAsync(HttpMethod.Post, _config.Urls.OrderUrl, p);
+            var body = await SendSignedAsync(HttpMethod.Post, _urls.OrderUrl, p);
             using var doc = JsonDocument.Parse(body);
             var result = new SpotOrderResult();
 
@@ -302,7 +304,7 @@ namespace FuturesBot.Services
             var ts = await _time.GetTimestampMsAsync();
             parameters["timestamp"] = ts.ToString(CultureInfo.InvariantCulture);
 
-            var json = await SendSignedAsync(HttpMethod.Post, _config.SpotUrls.OrderUrl, parameters);
+            var json = await SendSignedAsync(HttpMethod.Post, _urls.OrderUrl, parameters);
             using var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;
 
@@ -329,7 +331,7 @@ namespace FuturesBot.Services
             }
 
             symbol = NormalizeSymbol(symbol);
-            var body = await SendSignedAsync(HttpMethod.Get, _config.SpotUrls.OrderUrl, new Dictionary<string, string>
+            var body = await SendSignedAsync(HttpMethod.Get, _urls.OrderUrl, new Dictionary<string, string>
             {
                 ["symbol"] = symbol,
                 ["orderId"] = orderId,
@@ -355,7 +357,7 @@ namespace FuturesBot.Services
                 return;
 
             symbol = NormalizeSymbol(symbol);
-            await SendSignedAsync(HttpMethod.Delete, _config.SpotUrls.OrderUrl, new Dictionary<string, string>
+            await SendSignedAsync(HttpMethod.Delete, _urls.OrderUrl, new Dictionary<string, string>
             {
                 ["symbol"] = symbol,
                 ["orderId"] = orderId,
@@ -380,7 +382,7 @@ namespace FuturesBot.Services
                 ["timestamp"] = _time.GetTimestampMsAsync().GetAwaiter().GetResult().ToString(CultureInfo.InvariantCulture),
             };
 
-            var json = await SendSignedAsync(HttpMethod.Post, _config.SpotUrls.OrderUrl, parameters);
+            var json = await SendSignedAsync(HttpMethod.Post, _urls.OrderUrl, parameters);
             using var doc = JsonDocument.Parse(json);
 
             // For MARKET orders Binance returns: orderId, executedQty, cummulativeQuoteQty, status...
@@ -454,7 +456,7 @@ namespace FuturesBot.Services
                 ["stopLimitTimeInForce"] = "GTC",
             };
 
-            var body = await SendSignedAsync(HttpMethod.Post, _config.Urls.OcoOrderUrl, p);
+            var body = await SendSignedAsync(HttpMethod.Post, _urls.OcoOrderUrl, p);
 
             // Response contains orderListId.
             using var doc = JsonDocument.Parse(body);
@@ -503,7 +505,7 @@ namespace FuturesBot.Services
             var ts = await _time.GetTimestampMsAsync();
             parameters["timestamp"] = ts.ToString(CultureInfo.InvariantCulture);
 
-            var json = await SendSignedAsync(HttpMethod.Post, _config.SpotUrls.OrderUrl, parameters);
+            var json = await SendSignedAsync(HttpMethod.Post, _urls.OrderUrl, parameters);
 
             using var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;
@@ -529,7 +531,7 @@ namespace FuturesBot.Services
                 return;
 
             // Spot: DELETE /api/v3/openOrders?symbol=...
-            await SendSignedAsync(HttpMethod.Delete, _config.Urls.AllOpenOrdersUrl, new Dictionary<string, string>
+            await SendSignedAsync(HttpMethod.Delete, _urls.AllOpenOrdersUrl, new Dictionary<string, string>
             {
                 ["symbol"] = symbol
             });
@@ -540,7 +542,7 @@ namespace FuturesBot.Services
             if (_config.PaperMode)
                 return Array.Empty<OpenOrderInfo>();
 
-            var body = await SendSignedAsync(HttpMethod.Get, _config.Urls.OpenOrdersUrl, new Dictionary<string, string>
+            var body = await SendSignedAsync(HttpMethod.Get, _urls.OpenOrdersUrl, new Dictionary<string, string>
             {
                 ["symbol"] = symbol
             });

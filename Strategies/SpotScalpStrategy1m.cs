@@ -39,7 +39,7 @@ namespace FuturesBot.Strategies
         private const decimal DefaultTp = 0.0045m; // +0.45%
         private const decimal DefaultSl = 0.0030m; // -0.30%
 
-        public TradeSignal GenerateSignal(IReadOnlyList<Candle> candlesMain, IReadOnlyList<Candle> candlesTrend, CoinInfo coinInfo)
+        public TradeSignal GenerateSignal(IReadOnlyList<Candle> candlesMain, IReadOnlyList<Candle> candlesTrend, SpotCoinConfig coinInfo)
         {
             // Spot 1m is noisy; we operate purely on main TF.
             if (candlesMain == null || candlesMain.Count < MinBars)
