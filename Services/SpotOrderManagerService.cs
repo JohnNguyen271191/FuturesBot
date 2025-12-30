@@ -1,6 +1,11 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
 using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
 using FuturesBot.Config;
 using FuturesBot.IServices;
 using FuturesBot.Models;
@@ -246,10 +251,9 @@ namespace FuturesBot.Services
             // ------------------- ENTRY PATH (only if NOT holding) -------------------
             if (!inPosition)
             {
-                // No holding => allow entry logic (but block if pending entry exists)
                 st.SoftExitInProgress = false;
 
-                // If there is a pending BUY LIMIT/LIMIT_MAKER, wait then cancel & reprice.
+                // If pending BUY exists, wait then cancel & reprice.
                 if (pendingBuy != null)
                 {
                     var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -274,13 +278,38 @@ namespace FuturesBot.Services
                 if (IsThrottled(symbol))
                     return;
 
-                // Use quote balance * risk% as spend (works for FDUSD)
-                var riskPct = coinInfo.RiskPerTradePercent > 0 ? coinInfo.RiskPerTradePercent : 1m;
-                var usdToUse = quoteHold.Free * (riskPct / 100m);
+                // ------------------- ENFORCE MIN ENTRY NOTIONAL -------------------
+                var minEntry = _config.Spot.Oms.MinEntryNotionalUsd;
+                var bufferPct = _config.Spot.Oms.EntryQuoteBufferPercent;
 
-                // Safety clamp: ensure positive and enough
-                if (usdToUse <= 0)
+                // Not enough quote to even satisfy minimum
+                if (quoteHold.Free < minEntry)
+                {
+                    await _notify.SendAsync($"[SPOT][SKIP] {symbol} quoteFree={quoteHold.Free:0.####} {quoteAsset} < minEntry={minEntry:0.####}. Cannot place entry.");
                     return;
+                }
+
+                // Risk-based spend, but must be >= minEntry
+                var riskPct = coinInfo.RiskPerTradePercent > 0 ? coinInfo.RiskPerTradePercent : 1m;
+                var riskSpend = quoteHold.Free * (riskPct / 100m);
+
+                // Leave buffer to avoid using 100% quote
+                var maxUsable = quoteHold.Free * (1m - bufferPct);
+                if (maxUsable <= 0)
+                {
+                    await _notify.SendAsync($"[SPOT][SKIP] {symbol} maxUsable<=0 (quoteFree={quoteHold.Free:0.####}, bufferPct={bufferPct:P2}).");
+                    return;
+                }
+
+                // Final spend: max(minEntry, riskSpend) but cannot exceed maxUsable
+                var usdToUse = Math.Max(minEntry, riskSpend);
+                usdToUse = Math.Min(usdToUse, maxUsable);
+
+                if (usdToUse < minEntry)
+                {
+                    await _notify.SendAsync($"[SPOT][SKIP] {symbol} afterBuffer usdToUse={usdToUse:0.####} < minEntry={minEntry:0.####}. quoteFree={quoteHold.Free:0.####}, bufferPct={bufferPct:P2}");
+                    return;
+                }
 
                 // Determine maker entry price (below current)
                 var (bestBid, bestAsk) = await _spot.GetBestBidAskAsync(symbol);
@@ -293,13 +322,21 @@ namespace FuturesBot.Services
                 if (entryPrice <= 0)
                     return;
 
+                // Qty from usdToUse
                 var rawQty = usdToUse / entryPrice;
+
+                // Place maker-only entry
                 var buy = await _spot.PlaceLimitMakerAsync(symbol, SignalType.Long, rawQty, entryPrice);
 
                 if (buy.OrderId == "REJECTED" || buy.OrderId == "UNKNOWN" || buy.OrderId == "REJECT_QTY")
+                {
+                    await _notify.SendAsync($"[SPOT][REJECT] LIMIT_MAKER {symbol} rawQty={rawQty:0.################} spend={usdToUse:0.####} {quoteAsset} (minEntry={minEntry:0.####}).");
                     return;
+                }
 
-                await _notify.SendAsync($"[SPOT][OMS] Maker BUY LIMIT_MAKER {symbol}: spend≈{usdToUse:0.####} {quoteAsset}, price={entryPrice:0.########}, rawQty={rawQty:0.########}, orderId={buy.OrderId}");
+                await _notify.SendAsync(
+                    $"[SPOT][OMS] Maker BUY LIMIT_MAKER {symbol}: quoteFree={quoteHold.Free:0.####} {quoteAsset}, spend={usdToUse:0.####} (min={minEntry:0.####}, risk={riskPct:0.##}%, buffer={bufferPct:P2}), price={entryPrice:0.########}, rawQty={rawQty:0.########}, orderId={buy.OrderId}"
+                );
                 MarkAction(symbol);
                 return;
             }
@@ -309,7 +346,6 @@ namespace FuturesBot.Services
             // block accidental entry while holding
             if (hasPendingEntry)
             {
-                // Just in case: if you see a BUY while holding, cancel it.
                 await _spot.CancelAllOpenOrdersAsync(symbol);
                 await _notify.SendAsync($"[SPOT][GUARD] {symbol} holding but has pending BUY -> cancelled.");
                 MarkAction(symbol);
@@ -318,7 +354,6 @@ namespace FuturesBot.Services
             // Initialize entry reference once when holding
             if (st.EntryRefPrice <= 0)
             {
-                // Prefer strategy-provided reference price (spot), then generic EntryPrice, else fallback to lastPrice.
                 var refCandidate = signal?.SpotEntryRefPrice ?? signal?.EntryPrice;
                 var refPx = (refCandidate.HasValue && refCandidate.Value > 0) ? refCandidate.Value : lastPrice;
 
@@ -328,7 +363,6 @@ namespace FuturesBot.Services
             }
 
             // ====== Exit triggers ======
-            // (You can keep using signal.Short as "exit hint" if your pipeline does that)
             var exitHint = (signal?.SpotExitNow == true) || (signal?.Type == SignalType.Short);
 
             var stopRef = st.EntryRefPrice * (1m - _config.Spot.Oms.DefaultStopLossPercent);
@@ -347,7 +381,6 @@ namespace FuturesBot.Services
                 var reason = exitHint ? "EXIT_HINT" : (stopHit ? "STOP_HIT" : "TIME_STOP");
                 await ExitViaSoftMakerAsync(symbol, lastPrice, stopRef, reason, ct);
 
-                // refresh holding to see if closed
                 baseHold = await _spot.GetHoldingAsync(baseAsset);
                 baseTotal = baseHold.Free + baseHold.Locked;
                 holdingNotional = baseTotal * lastPrice;
@@ -374,13 +407,12 @@ namespace FuturesBot.Services
                 {
                     st.LastTpCheckUtc = DateTime.UtcNow;
 
-                    // Maintain exactly ONE TP SELL LIMIT/LIMIT_MAKER
                     var sellLimit = open
                         .Where(o => o.Side == "SELL" && (o.Type == "LIMIT" || o.Type == "LIMIT_MAKER"))
                         .OrderByDescending(o => o.Price)
                         .FirstOrDefault();
 
-                    var baseFree = baseHold.Free; // TP uses Free base
+                    var baseFree = baseHold.Free;
                     var hasBaseToSell = baseFree > 0;
 
                     if (sellLimit == null)
@@ -405,7 +437,6 @@ namespace FuturesBot.Services
                         st.LastTpOrderId = sellLimit.OrderId;
                         st.LastTpPrice = sellLimit.Price;
 
-                        // distance in percent
                         var dist = (sellLimit.Price > 0 && lastPrice > 0)
                             ? (sellLimit.Price - lastPrice) / lastPrice
                             : 0m;
@@ -417,7 +448,6 @@ namespace FuturesBot.Services
                         {
                             await _spot.CancelAllOpenOrdersAsync(symbol);
 
-                            // refresh after cancel unlocks base
                             baseHold = await _spot.GetHoldingAsync(baseAsset);
                             baseFree = baseHold.Free;
 
@@ -447,27 +477,23 @@ namespace FuturesBot.Services
         {
             ct.ThrowIfCancellationRequested();
 
-            // Cancel all open orders to free locked base (e.g., TP).
             await _spot.CancelAllOpenOrdersAsync(symbol);
 
-            // Refresh holdings after cancel
             var baseAsset = GuessBaseAsset(symbol);
             var hold = await _spot.GetHoldingAsync(baseAsset);
             var qty = hold.Free + hold.Locked;
             if (qty <= 0)
                 return;
 
-            // If price is already far below stop, skip soft maker to avoid missing exit.
             var worseThanStopBy = stopRef > 0 ? (stopRef - lastPrice) / stopRef : 0m;
             if (worseThanStopBy >= _config.Spot.Oms.SoftSlSkipIfWorseThanStopByPercent)
             {
-                var mkt = await _spot.PlaceSpotOrderAsync(symbol, SignalType.Short, qty); // MARKET SELL
+                var mkt = await _spot.PlaceSpotOrderAsync(symbol, SignalType.Short, qty);
                 var avg = (mkt.ExecutedQty > 0 && mkt.CummulativeQuoteQty > 0) ? (mkt.CummulativeQuoteQty / mkt.ExecutedQty) : lastPrice;
                 await _notify.SendAsync($"[SPOT][SL][MARKET] {symbol} qty={qty:0.########}, avg={avg:0.########}, reason={reason} (skip soft: worseBy={worseThanStopBy:P2})");
                 return;
             }
 
-            // Place maker SELL closer to bid (inside spread) to increase fill probability while remaining maker.
             var (bid, ask) = await _spot.GetBestBidAskAsync(symbol);
             var spread = Math.Max(0m, ask - bid);
 
@@ -477,7 +503,6 @@ namespace FuturesBot.Services
 
             var inside = bid + spread * ratio;
 
-            // must be > bid to be maker; LIMIT_MAKER will reject if marketable
             var makerPrice = spread > 0 ? inside : (lastPrice * (1m + _config.Spot.Oms.SoftSlMakerOffsetPercent));
             if (makerPrice <= bid)
                 makerPrice = ask > bid ? ask : (bid * (1m + _config.Spot.Oms.SoftSlMakerOffsetPercent));
@@ -485,7 +510,6 @@ namespace FuturesBot.Services
             var soft = await _spot.PlaceLimitMakerAsync(symbol, SignalType.Short, qty, makerPrice);
             if (soft.OrderId == "REJECTED" || soft.OrderId == "UNKNOWN")
             {
-                // If LIMIT_MAKER rejected, fallback immediately.
                 await _spot.PlaceSpotOrderAsync(symbol, SignalType.Short, qty);
                 await _notify.SendAsync($"[SPOT][SL][MARKET] {symbol} qty={qty:0.########}, reason={reason} (soft rejected)");
                 return;
@@ -493,7 +517,6 @@ namespace FuturesBot.Services
 
             await _notify.SendAsync($"[SPOT][SL][SOFT] {symbol} LIMIT_MAKER placed qty={qty:0.########}, price={makerPrice:0.########}, reason={reason}");
 
-            // Wait then check if still holding
             await Task.Delay(TimeSpan.FromSeconds(Math.Max(1, _config.Spot.Oms.SoftSlWaitSeconds)), ct);
 
             hold = await _spot.GetHoldingAsync(baseAsset);
@@ -505,7 +528,6 @@ namespace FuturesBot.Services
                 return;
             }
 
-            // Still holding => try cancel soft order then market sell
             try
             {
                 var status = await _spot.GetOrderStatusAsync(symbol, soft.OrderId);
@@ -519,7 +541,6 @@ namespace FuturesBot.Services
                 // ignore and proceed
             }
 
-            // Refresh qty again
             hold = await _spot.GetHoldingAsync(baseAsset);
             qty = hold.Free + hold.Locked;
             if (qty <= 0)
