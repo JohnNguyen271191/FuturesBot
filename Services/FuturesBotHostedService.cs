@@ -1,12 +1,8 @@
 using FuturesBot.Config;
 using FuturesBot.IServices;
-using FuturesBot.Models;
 using FuturesBot.Utils;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
-using System;
-using System.Linq;
-using System.Threading.Tasks;
 
 namespace FuturesBot.Services
 {
@@ -21,19 +17,22 @@ namespace FuturesBot.Services
         private readonly SlackNotifierService _notify;
         private readonly PnlReporterService _pnl;
         private readonly LiveSyncService _live;
+        private readonly OrderManagerService _orderManager;
 
         public FuturesBotHostedService(
             IServiceProvider sp,
             BotConfig config,
             SlackNotifierService notify,
             PnlReporterService pnl,
-            LiveSyncService live)
+            LiveSyncService live,
+            OrderManagerService orderManager)
         {
             _sp = sp;
             _config = config;
             _notify = notify;
             _pnl = pnl;
             _live = live;
+            _orderManager = orderManager;
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -60,7 +59,7 @@ namespace FuturesBot.Services
             // Background periodic tasks
             var background = RunBackgroundLoopsAsync(coins, stoppingToken);
 
-            await Task.WhenAll(workers.Concat(new[] { background }));
+            await Task.WhenAll(workers.Concat([background]));
         }
 
         private async Task RunBackgroundLoopsAsync(CoinInfo[] coins, CancellationToken ct)
@@ -96,12 +95,32 @@ namespace FuturesBot.Services
             var mainSec = TimeframeHelper.ParseToSeconds(coin.MainTimeFrame);
             var trendSec = TimeframeHelper.ParseToSeconds(coin.TrendTimeFrame);
 
+            var lastPosCheckUtc = DateTime.MinValue;
+            var posCheckInterval = TimeSpan.FromSeconds(8);
+            var afterCloseDelay = TimeSpan.FromSeconds(2);
+
             // simple cadence: check every 2 seconds, but use closed candles (Count-2)
             while (!ct.IsCancellationRequested)
             {
                 try
                 {
-                    if (_pnl.IsInCooldown())
+                    if (DateTime.UtcNow - lastPosCheckUtc >= posCheckInterval)
+                    {
+                        lastPosCheckUtc = DateTime.UtcNow;
+
+                        var pos = await exchange.GetPositionAsync(coin.Symbol);
+                        if (pos.PositionAmt != 0)
+                        {
+                            await _orderManager.AttachManualPositionAsync(pos);
+                        }
+                    }
+
+                    var pos2 = await exchange.GetPositionAsync(coin.Symbol);
+                    await _orderManager.AttachManualPositionAsync(pos2);
+
+                    bool hasPosition = pos2.PositionAmt != 0;
+
+                    if (!hasPosition && _pnl.IsInCooldown())
                     {
                         await Task.Delay(TimeSpan.FromSeconds(3), ct);
                         continue;
@@ -114,7 +133,7 @@ namespace FuturesBot.Services
                     {
                         await Task.Delay(TimeSpan.FromSeconds(2), ct);
                         continue;
-                    }
+                    }                    
 
                     var signal = strategy.GenerateSignal(candlesMain, candlesTrend, coin);
                     if (signal.Type != EnumTypesHelper.SignalType.None)
@@ -128,7 +147,7 @@ namespace FuturesBot.Services
                 }
 
                 // small delay
-                await Task.Delay(TimeSpan.FromSeconds(2), ct);
+                await Task.Delay(afterCloseDelay, ct);
             }
         }
     }

@@ -195,7 +195,7 @@ namespace FuturesBot.Services
                     bool hasPosition = pos.PositionAmt != 0;
                     bool hasOpenOrder = openOrders.Any();
 
-                    var coinInfo = _botConfig.CoinInfos.FirstOrDefault(i => i.Symbol.Equals(symbol));
+                    var coinInfo = _botConfig.Futures.Coins.FirstOrDefault(i => i.Symbol.Equals(symbol));
                     if (coinInfo == null)
                     {
                         await _notify.SendAsync($"[{symbol}] không tìm thấy trong setting.");
@@ -1176,7 +1176,7 @@ namespace FuturesBot.Services
                 Mode = TradeMode.Trend
             };
 
-            var coinInfo = _botConfig.CoinInfos.FirstOrDefault(i => i.Symbol.Equals(pos.Symbol));
+            var coinInfo = _botConfig.Futures.Coins.FirstOrDefault(i => i.Symbol.Equals(pos.Symbol));
             if (coinInfo == null)
             {
                 await _notify.SendAsync($"[{pos.Symbol}] không tìm thấy trong setting.");
