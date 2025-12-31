@@ -1,166 +1,165 @@
 namespace FuturesBot.Config
 {
-    public enum TradingMarket
-    {
-        Futures,
-        Spot
-    }
-
-    // =========================
-    // ROOT CONFIG
-    // =========================
+    /// <summary>
+    /// Root configuration.
+    ///
+    /// IMPORTANT:
+    /// - New schema supports running Spot + Futures in parallel with multiple coins.
+    /// - We keep a few legacy fields for backward compatibility with older code paths.
+    /// </summary>
     public sealed class BotConfig
     {
-        // Mode
-        public TradingMarket Market { get; set; } = TradingMarket.Futures;
-        public bool PaperMode { get; set; } = true;
+        // ============================
+        // NEW SCHEMA (recommended)
+        // ============================
 
-        // API keys
+        public SpotSettings Spot { get; set; } = new();
+        public FuturesSettings Futures { get; set; } = new();
+
+        // ============================
+        // LEGACY SCHEMA (back-compat)
+        // ============================
+
+        /// <summary>
+        /// Legacy: used when bot was running a single market at a time.
+        /// </summary>
+        public CoinInfo[] CoinInfos { get; set; } = [];
+
+        /// <summary>
+        /// Legacy spot quote asset.
+        /// </summary>
+        public string SpotQuoteAsset { get; set; } = "FDUSD";
+
+        /// <summary>
+        /// Legacy futures account balance used by old RiskManager.
+        /// New sizing uses Spot/Futures WalletCapUsd instead.
+        /// </summary>
+        public decimal AccountBalance { get; set; } = 200m;
+
+        public decimal MaxDailyLossPercent { get; set; } = 5m;
+        public double CooldownDuration { get; set; } = 1;
+
+        // Binance
         public string ApiKey { get; set; } = Environment.GetEnvironmentVariable("BINANCE_API_KEY") ?? "";
         public string ApiSecret { get; set; } = Environment.GetEnvironmentVariable("BINANCE_API_SECRET") ?? "";
 
-        // Slack
+        // Spot OMS (legacy)
+        public SpotOmsConfig SpotOms { get; set; } = new();
+
+        // Url sets
+        public Urls FuturesUrls { get; set; } = new();
+        public Urls SpotUrls { get; set; } = new();
+
+        // Back-compat: some old code reads config.Urls
+        public Urls Urls { get; set; } = new();
+
+        // Mode
+        public bool PaperMode { get; set; } = true;
         public string SlackWebhookUrl { get; set; } = Environment.GetEnvironmentVariable("SLACK_WEBHOOK_URL") ?? "";
-
-        // Global
-        public GlobalConfig Global { get; set; } = new();
-
-        // Market-specific
-        public SpotConfig Spot { get; set; } = new();
-        public FuturesConfig Futures { get; set; } = new();
     }
 
-    // =========================
-    // GLOBAL
-    // =========================
-    public sealed class GlobalConfig
+    public sealed class SpotSettings
     {
-        public decimal AccountBalance { get; set; } = 200m;
-        public decimal MaxDailyLossPercent { get; set; } = 5m;
-        public double CooldownDuration { get; set; } = 1;
-    }
-
-    // =========================
-    // SPOT
-    // =========================
-    public sealed class SpotConfig
-    {
+        public bool Enabled { get; set; } = false;
         public string QuoteAsset { get; set; } = "FDUSD";
-        public SpotCoinConfig[] Coins { get; set; } = Array.Empty<SpotCoinConfig>();
+
+        /// <summary>
+        /// Total capital cap the Spot bot is allowed to use (in QuoteAsset terms).
+        /// Used with AllocationPercent per coin (Option A).
+        /// </summary>
+        public decimal WalletCapUsd { get; set; } = 50m;
+
+        /// <summary>
+        /// Default risk% applied per trade on the per-coin allocated cap.
+        /// If a coin has RiskPerTradePercent set, it overrides this.
+        /// </summary>
+        public decimal DefaultRiskPerTradePercent { get; set; } = 20m;
+
+        public CoinInfo[] Coins { get; set; } = [];
+
         public SpotOmsConfig Oms { get; set; } = new();
-        public SpotUrls Urls { get; set; } = new();
+
+        /// <summary>Daily report enabled for spot.</summary>
+        public bool DailyReportEnabled { get; set; } = true;
+        /// <summary>VN time (HH:mm) to send daily report. Default: 23:59.</summary>
+        public string DailyReportTimeLocal { get; set; } = "23:59";
     }
 
-    public sealed class SpotCoinConfig
+    public sealed class FuturesSettings
     {
-        public int Id { get; set; }
-        public string Symbol { get; set; } = "";
+        public bool Enabled { get; set; } = true;
 
-        // percent of quote balance to use (MAX entry style)
-        public decimal RiskPerTradePercent { get; set; } = 1m;
+        /// <summary>
+        /// Total capital cap the Futures bot is allowed to use (in margin terms, typically USDT).
+        /// Used with AllocationPercent per coin (Option A).
+        /// </summary>
+        public decimal WalletCapUsd { get; set; } = 30m;
 
-        public string MainTimeFrame { get; set; } = "1m";
-        public string TrendTimeFrame { get; set; } = "5m";
+        public decimal DefaultRiskPerTradePercent { get; set; } = 1m;
+
+        public CoinInfo[] Coins { get; set; } = [];
     }
 
-    // =========================
-    // FUTURES
-    // =========================
-    public sealed class FuturesConfig
-    {
-        public FuturesCoinConfig[] Coins { get; set; } = Array.Empty<FuturesCoinConfig>();
-        public FuturesUrls Urls { get; set; } = new();
-    }
-
-    public sealed class FuturesCoinConfig
-    {
-        public int Id { get; set; }
-        public string Symbol { get; set; } = "";
-
-        public int Leverage { get; set; } = 20;
-        public bool IsMajor { get; set; }
-
-        public decimal RiskPerTradePercent { get; set; } = 1m;
-
-        public string MainTimeFrame { get; set; } = "5m";
-        public string TrendTimeFrame { get; set; } = "30m";
-
-        public decimal MinVolumeUsdTrend { get; set; } = 600_000m;
-    }
-
-    // =========================
-    // SPOT OMS CONFIG
-    // =========================
     public sealed class SpotOmsConfig
     {
+        public decimal MinHoldingNotionalUsd { get; set; } = 10m;
+        public decimal DefaultTakeProfitPercent { get; set; } = 0.004m;
+        public decimal DefaultStopLossPercent { get; set; } = 0.003m;
+        public decimal StopLimitBufferPercent { get; set; } = 0.001m;
         public decimal MinEntryNotionalUsd { get; set; } = 10m;
         public decimal EntryQuoteBufferPercent { get; set; } = 0.02m;
         public decimal EntryMakerOffsetPercent { get; set; } = 0.0003m;
-
-        public decimal MinHoldingNotionalUsd { get; set; } = 10m;
-
-        public decimal DefaultTakeProfitPercent { get; set; } = 0.004m;
-        public decimal DefaultStopLossPercent { get; set; } = 0.003m;
-
-        public decimal StopLimitBufferPercent { get; set; } = 0.001m;
-
-        // OCO legacy (should be false in V2+)
-        public bool UseOcoExitOrders { get; set; } = false;
-
-        // TP manager (1 TP only)
-        public bool MaintainMakerTakeProfit { get; set; } = true;
-        public decimal TpMinDistancePercent { get; set; } = 0.0015m;
-        public decimal TpMaxDistancePercent { get; set; } = 0.006m;
-        public int TpRecheckSeconds { get; set; } = 5;
-
-        // Soft SL maker-first
-        public decimal SoftSlInsideSpreadRatio { get; set; } = 0.2m;
-        public int SoftSlWaitSeconds { get; set; } = 10;
-        public decimal SoftSlMakerOffsetPercent { get; set; } = 0.0001m;
-        public decimal SoftSlSkipIfWorseThanStopByPercent { get; set; } = 0.001m;
-
-        // optional time-stop
-        public int TimeStopSeconds { get; set; } = 0;
-
-        public int PostExitCooldownSeconds { get; set; } = 5;
-        public int MinSecondsBetweenActions { get; set; } = 5;
-
-        // Entry maker reprice timeout
+        public decimal SlMakerBufferPercent { get; set; } = 0.0003m;
         public int EntryRepriceSeconds { get; set; } = 60;
+        public int MinSecondsBetweenActions { get; set; } = 5;
     }
 
-    // =========================
-    // URL MODELS
-    // =========================
-    public sealed class SpotUrls
+    public sealed class CoinInfo
     {
-        public string BaseUrl { get; set; } = "";
-        public string AccountUrl { get; set; } = "";
-        public string OrderUrl { get; set; } = "";
-        public string OcoOrderUrl { get; set; } = "";
-        public string KlinesUrl { get; set; } = "";
-        public string OpenOrdersUrl { get; set; } = "";
-        public string UserTradesUrl { get; set; } = "";
-        public string TimeUrl { get; set; } = "";
-        public string AllOpenOrdersUrl { get; set; } = "";
-        public string ExchangeInfoUrl { get; set; } = "";
+        public int Id { get; set; }
+        public string Symbol { get; set; } = "";
+        public int Leverage { get; set; } = 50;
+        public bool IsMajor { get; set; }
+
+        /// <summary>
+        /// Risk percent per trade. If 0 or negative, the domain default is used.
+        /// </summary>
+        public decimal RiskPerTradePercent { get; set; } = 0m;
+
+        /// <summary>
+        /// Option A: allocation percent of the domain WalletCapUsd reserved for this coin.
+        /// Sum of allocations should be 100 per domain.
+        /// </summary>
+        public decimal AllocationPercent { get; set; } = 100m;
+
+        public string MainTimeFrame { get; set; } = "15m";
+        public string TrendTimeFrame { get; set; } = "1h";
+        public decimal MinVolumeUsdTrend { get; set; } = 600_000m;
     }
 
-    public sealed class FuturesUrls
+    public sealed class Urls
     {
-        public string BaseUrl { get; set; } = "";
-        public string AlgoOrderUrl { get; set; } = "";
-        public string OrderUrl { get; set; } = "";
-        public string KlinesUrl { get; set; } = "";
-        public string PositionRiskUrl { get; set; } = "";
-        public string OpenOrdersUrl { get; set; } = "";
-        public string UserTradesUrl { get; set; } = "";
-        public string TimeUrl { get; set; } = "";
-        public string AllOpenOrdersUrl { get; set; } = "";
-        public string LeverageUrl { get; set; } = "";
-        public string IncomeUrl { get; set; } = "";
-        public string ExchangeInfoUrl { get; set; } = "";
-        public string OpenAlgoOrdersUrl { get; set; } = "";
-        public string AlgoOpenOrdersUrl { get; set; } = "";
+        public string BaseUrl { get; set; } = string.Empty;
+
+        // Spot-specific
+        public string AccountUrl { get; set; } = string.Empty;
+        public string OcoOrderUrl { get; set; } = string.Empty;
+
+        // Shared-ish
+        public string AlgoOrderUrl { get; set; } = string.Empty;
+        public string OrderUrl { get; set; } = string.Empty;
+        public string KlinesUrl { get; set; } = string.Empty;
+        public string PositionRiskUrl { get; set; } = string.Empty;
+        public string OpenOrdersUrl { get; set; } = string.Empty;
+        public string UserTradesUrl { get; set; } = string.Empty;
+        public string TimeUrl { get; set; } = string.Empty;
+        public string AllOpenOrdersUrl { get; set; } = string.Empty;
+        public string LeverageUrl { get; set; } = string.Empty;
+        public string IncomeUrl { get; set; } = string.Empty;
+        public string ExchangeInfoUrl { get; set; } = string.Empty;
+
+        // Futures algo endpoints
+        public string OpenAlgoOrdersUrl { get; set; } = string.Empty;
+        public string AlgoOpenOrdersUrl { get; set; } = string.Empty;
     }
 }

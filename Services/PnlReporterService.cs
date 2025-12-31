@@ -24,7 +24,12 @@ namespace FuturesBot.Services
 
         public void SetDailyBaseCapital()
         {
-            _dailyBaseCapital = botConfig.Global.AccountBalance;
+            _dailyBaseCapital = botConfig.AccountBalance;
+        }
+
+        public void SetDailyBaseCapital(decimal baseCapital)
+        {
+            _dailyBaseCapital = baseCapital;
         }
 
         /// <summary>
@@ -153,11 +158,11 @@ PnL   : {trade.PnlUSDT:F2} USDT";
 
             var totalPnl = tradesToday.Sum(t => t.PnlUSDT);
             var pnlPercent = totalPnl / _dailyBaseCapital;
-            var cooldownDuration = TimeSpan.FromHours(botConfig.Global.CooldownDuration);
+            var cooldownDuration = TimeSpan.FromHours(botConfig.CooldownDuration);
             var vnTimeZone = TimeZoneInfo.FindSystemTimeZoneById("Asia/Ho_Chi_Minh");
             var cooldownVnTime = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow.Add(cooldownDuration), vnTimeZone);
             // Thua >= 5% → cooldown dựa vào cooldownDuration
-            if (pnlPercent <= -botConfig.Global.MaxDailyLossPercent)
+            if (pnlPercent <= -botConfig.MaxDailyLossPercent)
             {
                 _cooldownUntil = DateTime.UtcNow.Add(cooldownDuration);
                 
@@ -167,7 +172,7 @@ PnL   : {trade.PnlUSDT:F2} USDT";
             }
 
             // Lãi >= 5% → cooldown dựa vào cooldownDuration
-            if (pnlPercent >= botConfig.Global.MaxDailyLossPercent)
+            if (pnlPercent >= botConfig.MaxDailyLossPercent)
             {
                 _cooldownUntil = DateTime.UtcNow.Add(cooldownDuration);
 

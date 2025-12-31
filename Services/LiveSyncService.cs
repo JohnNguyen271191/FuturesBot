@@ -15,7 +15,7 @@ namespace FuturesBot.Services
 
         private readonly Dictionary<string, PositionState> _states = [];
 
-        public async Task SyncAsync(FuturesCoinConfig[] coinInfos)
+        public async Task SyncAsync(CoinInfo[] coinInfos)
         {
             foreach (var coinInfo in coinInfos)
             {

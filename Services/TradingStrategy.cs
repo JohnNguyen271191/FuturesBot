@@ -257,7 +257,7 @@ namespace FuturesBot.Services
         public TradeSignal GenerateSignal(
             IReadOnlyList<Candle> candlesMain,   // 5m/15m...
             IReadOnlyList<Candle> candlesTrend,  // 30m/1h...
-            FuturesCoinConfig coinInfo)
+            CoinInfo coinInfo)
         {
             if (candlesMain == null || candlesTrend == null ||
                 candlesMain.Count < MinBars || candlesTrend.Count < MinBars ||
@@ -714,7 +714,7 @@ namespace FuturesBot.Services
             decimal rsiNow,
             decimal volUsdTrend,
             decimal medianVolUsd,
-            FuturesCoinConfig coinInfo)
+            CoinInfo coinInfo)
         {
             if (iT < ContinuationLookback + 5) return new TradeSignal();
             if (rsiNow < ContinuationMinRsiForShort) return new TradeSignal();
@@ -771,7 +771,7 @@ namespace FuturesBot.Services
             decimal rsiNow,
             decimal volUsdTrend,
             decimal medianVolUsd,
-            FuturesCoinConfig coinInfo)
+            CoinInfo coinInfo)
         {
             if (iT < ContinuationLookback + 5) return new TradeSignal();
             if (rsiNow > ContinuationMaxRsiForLong) return new TradeSignal();
@@ -877,7 +877,7 @@ namespace FuturesBot.Services
             IReadOnlyList<decimal> macdM,
             IReadOnlyList<decimal> sigM,
             IReadOnlyList<decimal> rsiT,
-            FuturesCoinConfig coinInfo,
+            CoinInfo coinInfo,
             decimal riskRewardTrend,
             bool volumeOkSoft,
             bool trendStrongNow)
@@ -1156,7 +1156,7 @@ namespace FuturesBot.Services
             IReadOnlyList<decimal> macdM,
             IReadOnlyList<decimal> sigM,
             IReadOnlyList<decimal> rsiT,
-            FuturesCoinConfig coinInfo,
+            CoinInfo coinInfo,
             decimal riskRewardTrend,
             bool volumeOkSoft,
             bool trendStrongNow)
@@ -1439,7 +1439,7 @@ namespace FuturesBot.Services
             IReadOnlyList<decimal> rsiT,
             IReadOnlyList<decimal> macdT,
             IReadOnlyList<decimal> sigT,
-            FuturesCoinConfig coinInfo,
+            CoinInfo coinInfo,
             bool trendBiasUp,
             bool trendBiasDown,
             decimal riskRewardSideway)
@@ -1830,7 +1830,7 @@ namespace FuturesBot.Services
             return (list.Count % 2 == 1) ? list[mid] : (list[mid - 1] + list[mid]) / 2m;
         }
 
-        private static bool IsVolumeOkTrend(bool isMajor, decimal volUsdTrend, decimal ratioVsMedian, FuturesCoinConfig coinInfo)
+        private static bool IsVolumeOkTrend(bool isMajor, decimal volUsdTrend, decimal ratioVsMedian, CoinInfo coinInfo)
         {
             if (volUsdTrend <= 0) return false;
 
@@ -1850,7 +1850,7 @@ namespace FuturesBot.Services
             return overrideOk;
         }
 
-        private static bool IsVolumeSoftOkTrend(bool isMajor, decimal volUsdTrend, decimal ratioVsMedian, FuturesCoinConfig coinInfo)
+        private static bool IsVolumeSoftOkTrend(bool isMajor, decimal volUsdTrend, decimal ratioVsMedian, CoinInfo coinInfo)
         {
             if (volUsdTrend <= 0) return false;
 

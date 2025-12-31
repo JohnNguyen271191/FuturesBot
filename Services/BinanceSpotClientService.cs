@@ -5,7 +5,6 @@ using System.Globalization;
 using FuturesBot.Infrastructure.Binance;
 using System.Text.Json;
 using static FuturesBot.Utils.EnumTypesHelper;
-using System.Net.Http;
 
 namespace FuturesBot.Services
 {
@@ -21,7 +20,7 @@ namespace FuturesBot.Services
     {
         private readonly HttpClient _http;
         private readonly BotConfig _config;
-        private readonly SpotUrls _urls;
+        private readonly Urls _urls;
         private readonly SymbolRulesService _rulesService;
         private readonly SlackNotifierService _slack;
 
@@ -34,12 +33,12 @@ namespace FuturesBot.Services
         public BinanceSpotClientService(BotConfig config, SlackNotifierService slack)
         {
             _config = config;
-            _urls = config.Spot.Urls;
+            _urls = !string.IsNullOrWhiteSpace(config.SpotUrls.BaseUrl) ? config.SpotUrls : config.Urls;
             _http = new HttpClient { BaseAddress = new Uri(_urls.BaseUrl) };
             _http.DefaultRequestHeaders.Add("X-MBX-APIKEY", config.ApiKey);
 
             _slack = slack;
-            _rulesService = new SymbolRulesService(_http, _config.Spot.Urls.ExchangeInfoUrl);
+            _rulesService = new SymbolRulesService(_http, _config);
             _signer = new BinanceSigner(_config.ApiSecret);
             _time = new BinanceTimeProvider(_http, _urls.TimeUrl, _slack);
         }
@@ -172,18 +171,6 @@ namespace FuturesBot.Services
             return decimal.Parse(doc.RootElement.GetProperty("price").GetString()!, CultureInfo.InvariantCulture);
         }
 
-        public async Task<(decimal bid, decimal ask)> GetBestBidAskAsync(string symbol)
-        {
-            symbol = NormalizeSymbol(symbol);
-            var resp = await _http.GetAsync($"/api/v3/ticker/bookTicker?symbol={Uri.EscapeDataString(symbol)}");
-            resp.EnsureSuccessStatusCode();
-            var json = await resp.Content.ReadAsStringAsync();
-            using var doc = JsonDocument.Parse(json);
-            var bid = decimal.Parse(doc.RootElement.GetProperty("bidPrice").GetString()!, CultureInfo.InvariantCulture);
-            var ask = decimal.Parse(doc.RootElement.GetProperty("askPrice").GetString()!, CultureInfo.InvariantCulture);
-            return (bid, ask);
-        }
-
         // =========================
         // Spot account
         // =========================
@@ -273,97 +260,6 @@ namespace FuturesBot.Services
             return result;
         }
 
-        public async Task<SpotOrderResult> PlaceLimitMakerAsync(string symbol, SignalType side, decimal quantity, decimal price)
-        {
-            if (_config.PaperMode)
-            {
-                return new SpotOrderResult { OrderId = "PAPER_LIMIT_MAKER", ExecutedQty = 0m, CummulativeQuoteQty = 0m, RawStatus = "PAPER" };
-            }
-
-            symbol = NormalizeSymbol(symbol);
-            var rules = await _rulesService.GetRulesAsync(symbol);
-
-            var roundedPrice = RoundDown(price, rules.PriceStep);
-            var (roundedQty, _, _) = await RoundAndValidateQtyAsync(symbol, quantity, roundedPrice);
-            if (roundedQty <= 0)
-            {
-                await _slack.SendAsync($"[SPOT] Reject LIMIT_MAKER {symbol} qty too small after rounding (raw={quantity}).");
-                return new SpotOrderResult { OrderId = "REJECTED", ExecutedQty = 0m, CummulativeQuoteQty = 0m, RawStatus = "REJECTED" };
-            }
-
-            var parameters = new Dictionary<string, string>
-            {
-                ["symbol"] = symbol,
-                ["side"] = side == SignalType.Long ? "BUY" : "SELL",
-                ["type"] = "LIMIT_MAKER",
-                ["quantity"] = roundedQty.ToString(CultureInfo.InvariantCulture),
-                ["price"] = roundedPrice.ToString(CultureInfo.InvariantCulture),
-                ["recvWindow"] = "5000",
-            };
-
-            var ts = await _time.GetTimestampMsAsync();
-            parameters["timestamp"] = ts.ToString(CultureInfo.InvariantCulture);
-
-            var json = await SendSignedAsync(HttpMethod.Post, _urls.OrderUrl, parameters);
-            using var doc = JsonDocument.Parse(json);
-            var root = doc.RootElement;
-
-            return new SpotOrderResult
-            {
-                OrderId = root.TryGetProperty("orderId", out var oid)
-                    ? oid.GetInt64().ToString(CultureInfo.InvariantCulture)
-                    : "UNKNOWN",
-                ExecutedQty = root.TryGetProperty("executedQty", out var eq)
-                    ? decimal.Parse(eq.GetString() ?? "0", CultureInfo.InvariantCulture)
-                    : 0m,
-                CummulativeQuoteQty = root.TryGetProperty("cummulativeQuoteQty", out var cq)
-                    ? decimal.Parse(cq.GetString() ?? "0", CultureInfo.InvariantCulture)
-                    : 0m,
-                RawStatus = root.TryGetProperty("status", out var st) ? (st.GetString() ?? "") : ""
-            };
-        }
-
-        public async Task<SpotOrderStatus> GetOrderStatusAsync(string symbol, string orderId)
-        {
-            if (_config.PaperMode)
-            {
-                return new SpotOrderStatus { OrderId = orderId, Status = "PAPER", OrigQty = 0m, ExecutedQty = 0m, Price = 0m, Side = "", Type = "" };
-            }
-
-            symbol = NormalizeSymbol(symbol);
-            var body = await SendSignedAsync(HttpMethod.Get, _urls.OrderUrl, new Dictionary<string, string>
-            {
-                ["symbol"] = symbol,
-                ["orderId"] = orderId,
-            });
-
-            using var doc = JsonDocument.Parse(body);
-            var root = doc.RootElement;
-            return new SpotOrderStatus
-            {
-                OrderId = orderId,
-                Status = root.TryGetProperty("status", out var st) ? (st.GetString() ?? "") : "",
-                OrigQty = root.TryGetProperty("origQty", out var oq) ? decimal.Parse(oq.GetString() ?? "0", CultureInfo.InvariantCulture) : 0m,
-                ExecutedQty = root.TryGetProperty("executedQty", out var eq) ? decimal.Parse(eq.GetString() ?? "0", CultureInfo.InvariantCulture) : 0m,
-                Price = root.TryGetProperty("price", out var px) ? decimal.Parse(px.GetString() ?? "0", CultureInfo.InvariantCulture) : 0m,
-                Side = root.TryGetProperty("side", out var sd) ? (sd.GetString() ?? "") : "",
-                Type = root.TryGetProperty("type", out var tp) ? (tp.GetString() ?? "") : "",
-            };
-        }
-
-        public async Task CancelOrderAsync(string symbol, string orderId)
-        {
-            if (_config.PaperMode)
-                return;
-
-            symbol = NormalizeSymbol(symbol);
-            await SendSignedAsync(HttpMethod.Delete, _urls.OrderUrl, new Dictionary<string, string>
-            {
-                ["symbol"] = symbol,
-                ["orderId"] = orderId,
-            });
-        }
-
         public async Task<SpotOrderResult> PlaceMarketBuyByQuoteAsync(string symbol, decimal quoteOrderQty)
         {
             if (_config.PaperMode)
@@ -382,7 +278,7 @@ namespace FuturesBot.Services
                 ["timestamp"] = _time.GetTimestampMsAsync().GetAwaiter().GetResult().ToString(CultureInfo.InvariantCulture),
             };
 
-            var json = await SendSignedAsync(HttpMethod.Post, _urls.OrderUrl, parameters);
+            var json = await SendSignedAsync(HttpMethod.Post, _config.SpotUrls.OrderUrl, parameters);
             using var doc = JsonDocument.Parse(json);
 
             // For MARKET orders Binance returns: orderId, executedQty, cummulativeQuoteQty, status...
@@ -505,7 +401,7 @@ namespace FuturesBot.Services
             var ts = await _time.GetTimestampMsAsync();
             parameters["timestamp"] = ts.ToString(CultureInfo.InvariantCulture);
 
-            var json = await SendSignedAsync(HttpMethod.Post, _urls.OrderUrl, parameters);
+            var json = await SendSignedAsync(HttpMethod.Post, _config.SpotUrls.OrderUrl, parameters);
 
             using var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;
@@ -580,6 +476,58 @@ namespace FuturesBot.Services
             catch
             {
                 return Array.Empty<OpenOrderInfo>();
+            }
+        }
+
+        public async Task<IReadOnlyList<SpotMyTrade>> GetMyTradesAsync(string symbol, DateTime fromUtc, DateTime toUtc, int limit = 1000)
+        {
+            symbol = NormalizeSymbol(symbol);
+
+            if (_config.PaperMode)
+                return Array.Empty<SpotMyTrade>();
+
+            var startMs = new DateTimeOffset(fromUtc).ToUnixTimeMilliseconds();
+            var endMs = new DateTimeOffset(toUtc).ToUnixTimeMilliseconds();
+
+            var body = await SendSignedAsync(HttpMethod.Get, _urls.UserTradesUrl, new Dictionary<string, string>
+            {
+                ["symbol"] = symbol,
+                ["startTime"] = startMs.ToString(CultureInfo.InvariantCulture),
+                ["endTime"] = endMs.ToString(CultureInfo.InvariantCulture),
+                ["limit"] = Math.Clamp(limit, 1, 1000).ToString(CultureInfo.InvariantCulture)
+            });
+
+            try
+            {
+                using var doc = JsonDocument.Parse(body);
+                if (doc.RootElement.ValueKind != JsonValueKind.Array)
+                    return Array.Empty<SpotMyTrade>();
+
+                var list = new List<SpotMyTrade>();
+                foreach (var t in doc.RootElement.EnumerateArray())
+                {
+                    var timeMs = t.TryGetProperty("time", out var tm) ? tm.GetInt64() : 0L;
+                    list.Add(new SpotMyTrade
+                    {
+                        Symbol = t.TryGetProperty("symbol", out var sy) ? (sy.GetString() ?? symbol) : symbol,
+                        Id = t.TryGetProperty("id", out var id) ? id.GetInt64() : 0L,
+                        OrderId = t.TryGetProperty("orderId", out var oid) ? oid.GetInt64() : 0L,
+                        Price = decimal.Parse(t.GetProperty("price").GetString() ?? "0", CultureInfo.InvariantCulture),
+                        Qty = decimal.Parse(t.GetProperty("qty").GetString() ?? "0", CultureInfo.InvariantCulture),
+                        QuoteQty = decimal.Parse(t.GetProperty("quoteQty").GetString() ?? "0", CultureInfo.InvariantCulture),
+                        Commission = decimal.Parse(t.GetProperty("commission").GetString() ?? "0", CultureInfo.InvariantCulture),
+                        CommissionAsset = t.TryGetProperty("commissionAsset", out var ca) ? (ca.GetString() ?? "") : "",
+                        IsBuyer = t.TryGetProperty("isBuyer", out var ib) && ib.GetBoolean(),
+                        IsMaker = t.TryGetProperty("isMaker", out var im) && im.GetBoolean(),
+                        TimeUtc = timeMs > 0 ? DateTimeOffset.FromUnixTimeMilliseconds(timeMs).UtcDateTime : DateTime.UtcNow
+                    });
+                }
+
+                return list;
+            }
+            catch
+            {
+                return Array.Empty<SpotMyTrade>();
             }
         }
     }

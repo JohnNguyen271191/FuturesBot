@@ -18,7 +18,7 @@ namespace FuturesBot.Services
         private readonly SlackNotifierService _notifier = notifier;
         private readonly OrderManagerService _orderManagerService = orderManagerService;
 
-        public async Task HandleSignalAsync(TradeSignal signal, FuturesCoinConfig coinInfo)
+        public async Task HandleSignalAsync(TradeSignal signal, CoinInfo coinInfo)
         {
             if (signal.Type == SignalType.None) return;
 
@@ -43,7 +43,15 @@ namespace FuturesBot.Services
             var sl = signal.StopLoss.Value;
             var tp = signal.TakeProfit.Value;
 
-            var qty = _risk.CalculatePositionSize(entry, sl, coinInfo.RiskPerTradePercent);
+            var allocation = coinInfo.AllocationPercent > 0 ? coinInfo.AllocationPercent : 100m;
+            var totalCap = _config.Futures.WalletCapUsd > 0 ? _config.Futures.WalletCapUsd : _config.AccountBalance;
+            var coinCap = totalCap * allocation / 100m;
+
+            var riskPct = coinInfo.RiskPerTradePercent > 0
+                ? coinInfo.RiskPerTradePercent
+                : (_config.Futures.DefaultRiskPerTradePercent > 0 ? _config.Futures.DefaultRiskPerTradePercent : 1m);
+
+            var qty = _risk.CalculatePositionSize(entry, sl, coinCap, riskPct);
             if (qty <= 0)
             {
                 return;
@@ -57,6 +65,7 @@ Symbol: {coinInfo.Symbol}
 Entry: {entry}
 SL   : {sl}
 TP   : {tp}
+Cap  : {coinCap:0.####} (alloc={allocation:0.##}%, risk={riskPct:0.##}%)
 Size : {qty:F6} {coinInfo.Symbol.Replace("USDT", "")}
 Reason: {signal.Reason}
 PaperMode: {_config.PaperMode}

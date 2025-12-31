@@ -12,10 +12,5 @@ namespace FuturesBot.Models
         public DateTime Time { get; set; } = DateTime.UtcNow;
         public string Symbol { get; set; } = string.Empty;
         public TradeMode Mode { get; set; } = TradeMode.None;
-
-        // ===== SPOT optional hints (non-breaking) =====
-        public decimal? SpotEntryRefPrice { get; set; }
-        public bool SpotExitNow { get; set; }
-        public decimal? SpotTakeProfitOverride { get; set; }
     }
 }

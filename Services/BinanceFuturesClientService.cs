@@ -14,7 +14,7 @@ namespace FuturesBot.Services
     {
         private readonly HttpClient _http;
         private readonly BotConfig _config;
-        private readonly FuturesUrls _urls;
+        private readonly Urls _urls;
         private readonly IBinanceTimeProvider _time;
         private readonly IBinanceSigner _signer;
         private readonly SymbolRulesService _rulesService;
@@ -23,10 +23,10 @@ namespace FuturesBot.Services
         public BinanceFuturesClientService(BotConfig config, SlackNotifierService slack)
         {
             _config = config;
-            _urls = config.Futures.Urls;
+            _urls = !string.IsNullOrWhiteSpace(config.FuturesUrls.BaseUrl) ? config.FuturesUrls : config.Urls;
             _http = new HttpClient { BaseAddress = new Uri(_urls.BaseUrl) };
             _http.DefaultRequestHeaders.Add("X-MBX-APIKEY", config.ApiKey);
-            _rulesService = new SymbolRulesService(_http, _urls.ExchangeInfoUrl);
+            _rulesService = new SymbolRulesService(_http, _config);
             _slack = slack;
             _signer = new BinanceSigner(_config.ApiSecret);
             _time = new BinanceTimeProvider(_http, _urls.TimeUrl, _slack);

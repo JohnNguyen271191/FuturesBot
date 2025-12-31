@@ -16,14 +16,14 @@ namespace FuturesBot.Services
     public class SymbolRulesService
     {
         private readonly HttpClient _http;
-        private readonly string _exchangeInfoUrl;
+        private readonly BotConfig _config;
         private readonly Dictionary<string, SymbolRules> _cache = new();
         private readonly Dictionary<string, string> _baseAssetCache = new();
 
-        public SymbolRulesService(HttpClient http, string exchangeInfoUrl)
+        public SymbolRulesService(HttpClient http, BotConfig config)
         {
             _http = http;
-            _exchangeInfoUrl = exchangeInfoUrl;
+            _config = config;
         }
 
         
@@ -35,7 +35,7 @@ namespace FuturesBot.Services
             // Best-effort: try exchangeInfo
             try
             {
-                var resp = await _http.GetAsync($"{_exchangeInfoUrl}?symbol={symbol}");
+                var resp = await _http.GetAsync($"{_config.Urls.ExchangeInfoUrl}?symbol={symbol}");
                 resp.EnsureSuccessStatusCode();
                 var json = await resp.Content.ReadAsStringAsync();
                 using var doc = JsonDocument.Parse(json);
@@ -79,7 +79,7 @@ namespace FuturesBot.Services
                 return rules;
 
             // HttpClient already has BaseAddress = config.Urls.BaseUrl in clients.
-            var resp = await _http.GetAsync($"{_exchangeInfoUrl}?symbol={symbol}");
+            var resp = await _http.GetAsync($"{_config.Urls.ExchangeInfoUrl}?symbol={symbol}");
             resp.EnsureSuccessStatusCode();
 
             var json = await resp.Content.ReadAsStringAsync();

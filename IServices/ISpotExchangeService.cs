@@ -35,32 +35,17 @@ namespace FuturesBot.IServices
         Task<SpotOrderResult> PlaceLimitBuyAsync(string symbol, decimal quantity, decimal price);
 
         /// <summary>
-        /// Place a LIMIT_MAKER order (guaranteed maker or rejected).
-        /// Use for maker-only TP or soft-SL attempts.
-        /// </summary>
-        Task<SpotOrderResult> PlaceLimitMakerAsync(string symbol, SignalType side, decimal quantity, decimal price);
-
-        /// <summary>
-        /// Get a specific order status (filled/canceled/partial).
-        /// </summary>
-        Task<SpotOrderStatus> GetOrderStatusAsync(string symbol, string orderId);
-
-        /// <summary>
-        /// Cancel a specific order.
-        /// </summary>
-        Task CancelOrderAsync(string symbol, string orderId);
-
-        /// <summary>
-        /// Best bid/ask (bookTicker). Used to price maker orders safely.
-        /// </summary>
-        Task<(decimal bid, decimal ask)> GetBestBidAskAsync(string symbol);
-
-        /// <summary>
         /// Place an OCO SELL order (take-profit LIMIT + stop-loss STOP_LIMIT).
         /// </summary>
         Task<string> PlaceOcoSellAsync(string symbol, decimal quantity, decimal takeProfitPrice, decimal stopPrice, decimal stopLimitPrice);
 
         Task CancelAllOpenOrdersAsync(string symbol);
         Task<IReadOnlyList<OpenOrderInfo>> GetOpenOrdersAsync(string symbol);
+
+        /// <summary>
+        /// Get spot trades for a symbol in a time window.
+        /// Used by Spot daily PnL report.
+        /// </summary>
+        Task<IReadOnlyList<SpotMyTrade>> GetMyTradesAsync(string symbol, DateTime fromUtc, DateTime toUtc, int limit = 1000);
     }
 }

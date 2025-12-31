@@ -3,13 +3,21 @@ using FuturesBot.Models;
 
 namespace FuturesBot.IServices
 {
-    public interface IFuturesTradingStrategy
+    /// <summary>
+    /// Market-agnostic strategy contract.
+    /// </summary>
+    public interface ITradingStrategy
     {
-        TradeSignal GenerateSignal(IReadOnlyList<Candle> candlesMain, IReadOnlyList<Candle> candlesTrend, FuturesCoinConfig coin);
+        TradeSignal GenerateSignal(IReadOnlyList<Candle> candlesMain, IReadOnlyList<Candle> candlesTrend, CoinInfo coinInfo);
     }
 
-    public interface ISpotTradingStrategy
-    {
-        TradeSignal GenerateSignal(IReadOnlyList<Candle> candlesMain, IReadOnlyList<Candle> candlesTrend, SpotCoinConfig coin);
-    }
+    /// <summary>
+    /// Futures strategy marker.
+    /// </summary>
+    public interface IFuturesTradingStrategy : ITradingStrategy { }
+
+    /// <summary>
+    /// Spot strategy marker.
+    /// </summary>
+    public interface ISpotTradingStrategy : ITradingStrategy { }
 }
