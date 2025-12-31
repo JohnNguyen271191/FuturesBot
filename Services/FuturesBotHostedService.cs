@@ -95,6 +95,8 @@ namespace FuturesBot.Services
             var mainSec = TimeframeHelper.ParseToSeconds(coin.MainTimeFrame);
             var trendSec = TimeframeHelper.ParseToSeconds(coin.TrendTimeFrame);
 
+            DateTime lastProcessedCandleOpenTimeUtc = DateTime.MinValue;
+
             var lastPosCheckUtc = DateTime.MinValue;
             var posCheckInterval = TimeSpan.FromSeconds(8);
             var afterCloseDelay = TimeSpan.FromSeconds(2);
@@ -115,12 +117,7 @@ namespace FuturesBot.Services
                         }
                     }
 
-                    var pos2 = await exchange.GetPositionAsync(coin.Symbol);
-                    await _orderManager.AttachManualPositionAsync(pos2);
-
-                    bool hasPosition = pos2.PositionAmt != 0;
-
-                    if (!hasPosition && _pnl.IsInCooldown())
+                    if (_pnl.IsInCooldown())
                     {
                         await Task.Delay(TimeSpan.FromSeconds(3), ct);
                         continue;
@@ -129,16 +126,30 @@ namespace FuturesBot.Services
                     var candlesMain = await exchange.GetRecentCandlesAsync(coin.Symbol, coin.MainTimeFrame, 210);
                     var candlesTrend = await exchange.GetRecentCandlesAsync(coin.Symbol, coin.TrendTimeFrame, 210);
 
+                    var lastClosed = candlesMain[^2];
+                    if (lastClosed.OpenTime <= lastProcessedCandleOpenTimeUtc)
+                        continue;
+
+                    lastProcessedCandleOpenTimeUtc = lastClosed.OpenTime;
+
                     if (candlesMain.Count < 50 || candlesTrend.Count < 50)
                     {
                         await Task.Delay(TimeSpan.FromSeconds(2), ct);
                         continue;
-                    }                    
+                    }
 
-                    var signal = strategy.GenerateSignal(candlesMain, candlesTrend, coin);
-                    if (signal.Type != EnumTypesHelper.SignalType.None)
+                    var pos2 = await exchange.GetPositionAsync(coin.Symbol);
+                    await _orderManager.AttachManualPositionAsync(pos2);
+
+                    bool hasPosition = pos2.PositionAmt != 0;
+
+                    if (!hasPosition && !_pnl.IsInCooldown())
                     {
-                        await executor.HandleSignalAsync(signal, coin);
+                        var signal = strategy.GenerateSignal(candlesMain, candlesTrend, coin);
+                        if (signal.Type != EnumTypesHelper.SignalType.None)
+                        {
+                            await executor.HandleSignalAsync(signal, coin);
+                        }
                     }
                 }
                 catch (Exception ex)
