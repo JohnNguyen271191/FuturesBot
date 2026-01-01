@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
@@ -88,15 +89,11 @@ namespace FuturesBot.Services
             {
                 try
                 {
-                    // daily summary + cooldown messaging
                     await _pnl.SendQuickDailySummary();
-
-                    // sync positions/orders from exchange for safety
                     await _live.SyncAsync(coins);
                 }
                 catch (Exception ex)
                 {
-                    // backoff if rate limited (avoid tight loop)
                     if (IsRateLimitException(ex))
                     {
                         await NotifyBackoffOnce("[FUTURES][RATE_LIMIT] LiveSync hit rate limit (418/429/-1003). Backoff 120s.", "LIVE_SYNC");
@@ -123,8 +120,8 @@ namespace FuturesBot.Services
             var trendSec = Math.Max(1, TimeframeHelper.ParseToSeconds(coin.TrendTimeFrame));
 
             // Poll klines by schedule (avoid calling every 2 seconds)
-            var mainPoll = ComputePollInterval(mainSec, minSeconds: 10, maxSeconds: 30);    // e.g. 1m -> 10~15s, 5m -> 30s
-            var trendPoll = ComputePollInterval(trendSec, minSeconds: 60, maxSeconds: 120); // e.g. 30m -> 120s
+            var mainPoll = ComputePollInterval(mainSec, minSeconds: 10, maxSeconds: 30);
+            var trendPoll = ComputePollInterval(trendSec, minSeconds: 60, maxSeconds: 120);
 
             // Position check (manual attach) - keep slow
             var posCheckInterval = TimeSpan.FromSeconds(30);
@@ -138,9 +135,9 @@ namespace FuturesBot.Services
             DateTime nextTrendFetchUtc = DateTime.MinValue;
             DateTime nextPosCheckUtc = DateTime.MinValue;
 
-            // Cached data
-            System.Collections.Generic.List<Candle>? cachedMain = null;
-            System.Collections.Generic.List<Candle>? cachedTrend = null;
+            // Cached data (IMPORTANT: match GetRecentCandlesAsync return type)
+            IReadOnlyList<Candle>? cachedMain = null;
+            IReadOnlyList<Candle>? cachedTrend = null;
 
             // Cached position from last check
             FuturesPosition cachedPos = default;
@@ -214,12 +211,13 @@ namespace FuturesBot.Services
                     lastProcessedCandleOpenTimeUtc = lastClosed.OpenTime;
 
                     // ------------------ Determine if has position ------------------
-                    // Use cached position if available; if not, assume no position for now.
                     var hasPosition = hasCachedPos && cachedPos.PositionAmt != 0;
 
                     // If no position => generate signals
                     if (!hasPosition && !_pnl.IsInCooldown())
                     {
+                        // NOTE: IFuturesTradingStrategy.GenerateSignal SHOULD accept IReadOnlyList<Candle>
+                        // If your interface currently requires List<Candle>, change it to IReadOnlyList<Candle>.
                         var signal = strategy.GenerateSignal(cachedMain, cachedTrend, coin);
                         if (signal.Type != EnumTypesHelper.SignalType.None)
                         {
@@ -229,7 +227,6 @@ namespace FuturesBot.Services
                 }
                 catch (Exception ex)
                 {
-                    // If rate limited -> backoff hard
                     if (IsRateLimitException(ex))
                     {
                         await NotifyBackoffOnce(
@@ -238,7 +235,7 @@ namespace FuturesBot.Services
 
                         await SafeDelay(backoffDelay, ct);
 
-                        // Also slow down next polls after backoff
+                        // Slow down next polls after backoff
                         nextMainFetchUtc = DateTime.UtcNow.Add(mainPoll);
                         nextTrendFetchUtc = DateTime.UtcNow.Add(trendPoll);
                         nextPosCheckUtc = DateTime.UtcNow.Add(posCheckInterval);
@@ -301,18 +298,13 @@ namespace FuturesBot.Services
                     if (hre.StatusCode.Value == (HttpStatusCode)429) return true;
                 }
 #endif
-                // sometimes status is only in Message
                 var msg = hre.Message ?? string.Empty;
                 if (msg.Contains("418") || msg.Contains("429")) return true;
             }
 
-            // 2) Wrapped exceptions
+            // 2) Wrapped exceptions / Binance markers
             var text = ex.ToString();
 
-            // Binance ban/rate-limit markers:
-            // - code=-1003 Way too many requests
-            // - banned until ...
-            // - "I'm a teapot"
             if (text.Contains("code=-1003", StringComparison.OrdinalIgnoreCase)) return true;
             if (text.Contains("Way too many requests", StringComparison.OrdinalIgnoreCase)) return true;
             if (text.Contains("banned until", StringComparison.OrdinalIgnoreCase)) return true;
