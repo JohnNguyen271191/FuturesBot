@@ -1,4 +1,9 @@
+using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 using FuturesBot.Config;
 using FuturesBot.IServices;
 using FuturesBot.Models;
@@ -14,8 +19,11 @@ namespace FuturesBot.Services
     /// - Rescue: if holdings exist but no open orders, re-create a default OCO.
     /// - Exit on SHORT signal by canceling orders and selling holdings (long-only spot).
     ///
-    /// NOTE: This is intentionally NOT the same as Futures OMS.
-    /// Spot has holdings + open orders, not futures positions/leverage.
+    /// FIXES:
+    /// 1) Holdings: use Free + Locked (best-effort via reflection) to avoid state bugs with OCO locking.
+    /// 2) Entry maker miss: reprice count + optional fallback to MARKET after too many reprices.
+    /// 3) Safer cancel: only cancel when necessary, and refresh holdings after cancel before selling.
+    /// 4) Add missing usings + null-safe handling for open orders list.
     /// </summary>
     public sealed class SpotOrderManagerService
     {
@@ -25,6 +33,12 @@ namespace FuturesBot.Services
 
         // per-symbol throttle
         private readonly ConcurrentDictionary<string, DateTime> _lastActionUtc = new();
+
+        // entry reprice tracking (to avoid infinite maker miss loop)
+        private readonly ConcurrentDictionary<string, int> _entryRepriceCount = new();
+
+        // If maker keeps missing, after N reprices we fallback to market (or aggressive limit via PlaceSpotOrderAsync)
+        private const int MaxRepriceBeforeMarketFallback = 2;
 
         public SpotOrderManagerService(
             ISpotExchangeService spot,
@@ -56,10 +70,13 @@ namespace FuturesBot.Services
                 if (price <= 0) continue;
 
                 var baseHold = await _spot.GetHoldingAsync(baseAsset);
-                var notional = baseHold.Free * price;
+                var qtyTotal = GetHoldingTotalQty(baseHold);
+                var notional = qtyTotal * price;
+
                 if (notional >= _config.SpotOms.MinHoldingNotionalUsd)
                 {
-                    await _notify.SendAsync($"[SPOT][RESUME] {symbol} holdingQty={baseHold.Free:0.########} notional≈{notional:0.##} quote={quoteAsset}");
+                    await _notify.SendAsync(
+                        $"[SPOT][RESUME] {symbol} holdingQty(total)={qtyTotal:0.########} notional≈{notional:0.##} quote={quoteAsset}");
                 }
             }
         }
@@ -81,10 +98,17 @@ namespace FuturesBot.Services
             var quote = await _spot.GetHoldingAsync(quoteAsset);
             var baseHold = await _spot.GetHoldingAsync(baseAsset);
 
-            var holdingNotional = baseHold.Free * price;
-            var inPosition = holdingNotional >= _config.SpotOms.MinHoldingNotionalUsd;
+            var baseQtyTotal = GetHoldingTotalQty(baseHold);
+            var holdingNotional = baseQtyTotal * price;
 
-            // 1) Rescue OCO if we are holding but have no open orders.
+            // Meaningful holding threshold
+            var minHolding = _config.SpotOms.MinHoldingNotionalUsd;
+            var inPosition = holdingNotional >= minHolding;
+
+            // Treat dust as NOT in position for entry/exit logic
+            var hasDust = holdingNotional > 0m && holdingNotional < minHolding;
+
+            // 1) Rescue OCO if we are holding meaningfully but have no open orders.
             // This protects against losing OCO due to manual cancels, API hiccups, etc.
             if (inPosition)
             {
@@ -98,11 +122,12 @@ namespace FuturesBot.Services
                     var sl = price * (1m - _config.SpotOms.DefaultStopLossPercent);
                     var stopLimit = sl * (1m + _config.SpotOms.SlMakerBufferPercent);
 
+                    // Use FREE qty for OCO placement (locked qty is already tied to other orders, but we have no open orders here)
                     var qty = baseHold.Free;
                     if (qty > 0)
                     {
                         await _spot.PlaceOcoSellAsync(symbol, qty, tp, sl, stopLimit);
-                        await _notify.SendAsync($"[SPOT][OMS] Rescue OCO placed for {symbol}. qty={qty}, tp={tp}, sl={sl}");
+                        await _notify.SendAsync($"[SPOT][OMS] Rescue OCO placed for {symbol}. qty={qty:0.########}, tp={tp:0.##}, sl={sl:0.##}");
                         MarkAction(symbol);
                     }
                 }
@@ -114,6 +139,7 @@ namespace FuturesBot.Services
             // 2) Exit (SHORT signal means sell holdings; long-only spot)
             if (signal.Type == SignalType.Short)
             {
+                // If only dust, ignore exit signal (optional: you can sell dust if you want)
                 if (!inPosition)
                     return;
 
@@ -122,13 +148,19 @@ namespace FuturesBot.Services
 
                 await _spot.CancelAllOpenOrdersAsync(symbol);
 
+                // refresh holding after cancel (OCO locks get released)
+                baseHold = await _spot.GetHoldingAsync(baseAsset);
+
                 var sellQty = baseHold.Free;
                 if (sellQty > 0)
                 {
                     await _spot.PlaceSpotOrderAsync(symbol, SignalType.Short, sellQty);
-                    await _notify.SendAsync($"[SPOT][OMS] Exit SELL {symbol}. qty={sellQty}");
+                    await _notify.SendAsync($"[SPOT][OMS] Exit SELL {symbol}. qty={sellQty:0.########} (reason={signal.Reason})");
                     MarkAction(symbol);
                 }
+
+                // reset entry reprice state after exit
+                _entryRepriceCount.TryRemove(symbol, out _);
 
                 return;
             }
@@ -136,9 +168,12 @@ namespace FuturesBot.Services
             // 3) Entry (LONG signal)
             if (signal.Type == SignalType.Long)
             {
+                // If meaningful position exists -> no new entry
                 if (inPosition)
                     return;
 
+                // If only dust exists, we still allow entry (won't get stuck by dust)
+                // If you want to be stricter: return when hasDust == true.
                 if (IsThrottled(symbol))
                     return;
 
@@ -159,8 +194,12 @@ namespace FuturesBot.Services
                     : (_config.Spot.DefaultRiskPerTradePercent > 0 ? _config.Spot.DefaultRiskPerTradePercent : 10m);
 
                 var usdToUse = Math.Max(0m, coinCap * (riskPct / 100m));
+
                 // apply quote buffer
-                var buffer = _config.SpotOms.EntryQuoteBufferPercent > 0 ? _config.SpotOms.EntryQuoteBufferPercent : _config.Spot.Oms.EntryQuoteBufferPercent;
+                var buffer = _config.SpotOms.EntryQuoteBufferPercent > 0
+                    ? _config.SpotOms.EntryQuoteBufferPercent
+                    : _config.Spot.Oms.EntryQuoteBufferPercent;
+
                 usdToUse = usdToUse * (1m - buffer);
 
                 // Binance spot rejects quoteOrderQty with too much precision. FDUSD uses 2 decimals.
@@ -168,17 +207,25 @@ namespace FuturesBot.Services
                 if (usdToUse <= 0)
                     return;
 
-                var minEntry = _config.SpotOms.MinEntryNotionalUsd > 0 ? _config.SpotOms.MinEntryNotionalUsd : _config.Spot.Oms.MinEntryNotionalUsd;
+                var minEntry = _config.SpotOms.MinEntryNotionalUsd > 0
+                    ? _config.SpotOms.MinEntryNotionalUsd
+                    : _config.Spot.Oms.MinEntryNotionalUsd;
+
                 if (usdToUse < minEntry)
                 {
-                    await _notify.SendAsync($"[SPOT] Skip BUY {symbol}: budget too small {usdToUse} < minEntryNotional {minEntry}. (usableTotal={usableTotal:0.##}, alloc={allocation:0.##}%, risk={riskPct:0.##}%)");
+                    await _notify.SendAsync(
+                        $"[SPOT] Skip BUY {symbol}: budget too small {usdToUse:0.##} < minEntryNotional {minEntry:0.##}. " +
+                        $"(usableTotal={usableTotal:0.##}, alloc={allocation:0.##}%, risk={riskPct:0.##}%, dust={hasDust})");
                     return;
                 }
-                
-                // Maker-only entry: place BUY LIMIT below last price so it does not execute immediately (maker).
-                // If there is already a pending BUY LIMIT, wait up to EntryRepriceSeconds then cancel & reprice.
-                var openOrders = await _spot.GetOpenOrdersAsync(symbol);
-                var pendingBuy = openOrders.FirstOrDefault(o => o.Side == "BUY" && o.Type == "LIMIT");
+
+                // Maker-only entry:
+                // - If a pending BUY LIMIT exists and it's still fresh -> wait
+                // - If it's older than EntryRepriceSeconds -> cancel & reprice
+                // - After too many reprices -> fallback to MARKET (PlaceSpotOrderAsync) so you actually get filled
+                var openOrders = await _spot.GetOpenOrdersAsync(symbol) ?? new List<SpotOrder>();
+                var pendingBuy = openOrders.FirstOrDefault(o => string.Equals(o.Side, "BUY", StringComparison.OrdinalIgnoreCase)
+                                                            && string.Equals(o.Type, "LIMIT", StringComparison.OrdinalIgnoreCase));
 
                 if (pendingBuy != null)
                 {
@@ -190,8 +237,32 @@ namespace FuturesBot.Services
                             return;
                     }
 
+                    // too old -> cancel & reprice
                     await _spot.CancelAllOpenOrdersAsync(symbol);
-                    await _notify.SendAsync($"[SPOT][OMS] Reprice pending entry {symbol} after {_config.SpotOms.EntryRepriceSeconds}s.");
+
+                    var count = _entryRepriceCount.AddOrUpdate(symbol, 1, (_, c) => c + 1);
+
+                    // fallback to market after N reprices
+                    if (count > MaxRepriceBeforeMarketFallback)
+                    {
+                        var marketQty = usdToUse / price;
+                        var m = await _spot.PlaceSpotOrderAsync(symbol, SignalType.Long, marketQty);
+
+                        await _notify.SendAsync(
+                            $"[SPOT][OMS] MARKET fallback BUY {symbol} after {count - 1} reprices. " +
+                            $"spend≈{usdToUse:0.##} {quoteAsset}, qty≈{marketQty:0.########}, lastPrice={price:0.##}, dust={hasDust}");
+
+                        MarkAction(symbol);
+                        _entryRepriceCount.TryRemove(symbol, out _);
+                        return;
+                    }
+
+                    await _notify.SendAsync($"[SPOT][OMS] Reprice pending entry {symbol} after {_config.SpotOms.EntryRepriceSeconds}s. (repriceCount={count})");
+                }
+                else
+                {
+                    // No pending buy -> reset reprice count
+                    _entryRepriceCount.TryRemove(symbol, out _);
                 }
 
                 var entryPrice = price * (1m - _config.SpotOms.EntryMakerOffsetPercent);
@@ -204,11 +275,15 @@ namespace FuturesBot.Services
                     return;
                 }
 
-                await _notify.SendAsync($"[SPOT][OMS] Maker BUY LIMIT {symbol}: spend≈{usdToUse} {quoteAsset}, price={entryPrice}, rawQty={rawQty}, orderId={buy.OrderId}");
+                await _notify.SendAsync(
+                    $"[SPOT][OMS] Maker BUY LIMIT {symbol}: spend≈{usdToUse:0.##} {quoteAsset}, price={entryPrice:0.##}, rawQty={rawQty:0.########}, orderId={buy.OrderId}. " +
+                    $"(offset={_config.SpotOms.EntryMakerOffsetPercent:0.#######}, dust={hasDust}, reason={signal.Reason})");
+
                 MarkAction(symbol);
 
                 // Exits will be placed by the Rescue-OCO block once entry is filled (inPosition becomes true).
-}
+                return;
+            }
         }
 
         private bool IsThrottled(string symbol)
@@ -223,6 +298,23 @@ namespace FuturesBot.Services
         }
 
         private void MarkAction(string symbol) => _lastActionUtc[symbol] = DateTime.UtcNow;
+
+        private static decimal GetHoldingTotalQty(AssetHolding holding)
+        {
+            if (holding == null) return 0m;
+
+            // Best effort: prefer Free + Locked if Locked exists; otherwise Free only.
+            var free = holding.Free;
+
+            var lockedProp = holding.GetType().GetProperty("Locked");
+            if (lockedProp != null && lockedProp.PropertyType == typeof(decimal))
+            {
+                var locked = (decimal)(lockedProp.GetValue(holding) ?? 0m);
+                return free + locked;
+            }
+
+            return free;
+        }
 
         private static string GuessBaseAsset(string symbol)
         {
