@@ -1735,46 +1735,6 @@ namespace FuturesBot.Services
 
             // 2) verify SL exists (detect lại)
             lastSlTpCheckUtc = DateTime.UtcNow;
-            var det1 = await DetectManualSlTpAsync(symbol, isLong, currentPos.EntryPrice, currentPos);
-            bool slOk1 = det1.Sl.HasValue && det1.Sl.Value > 0m && Math.Abs(det1.Sl.Value - newSL) / newSL <= 0.0008m;
-
-            if (!slOk1)
-            {
-                await _notify.SendAsync(
-                    $"[{symbol}] Trailing SL VERIFY FAILED: expected={Math.Round(newSL, 6)} detected={(det1.Sl.HasValue ? Math.Round(det1.Sl.Value, 6).ToString() : "NULL")} → retry once.");
-
-                // retry once
-                await _exchange.CancelStopLossOrdersAsync(symbol);
-                await Task.Delay(250);
-                await _exchange.PlaceStopOnlyAsync(symbol, side, posSide, qty, newSL);
-                await Task.Delay(250);
-
-                lastSlTpCheckUtc = DateTime.UtcNow;
-                var det2 = await DetectManualSlTpAsync(symbol, isLong, currentPos.EntryPrice, currentPos);
-                bool slOk2 = det2.Sl.HasValue && det2.Sl.Value > 0m && Math.Abs(det2.Sl.Value - newSL) / newSL <= 0.0008m;
-
-                if (!slOk2)
-                {
-                    await _notify.SendAsync(
-                        $"[{symbol}] Trailing SL VERIFY FAILED again: expected={Math.Round(newSL, 6)} detected={(det2.Sl.HasValue ? Math.Round(det2.Sl.Value, 6).ToString() : "NULL")} → rollback to oldSL={Math.Round(fallbackSL, 6)}");
-
-                    // best-effort rollback
-                    try
-                    {
-                        await _exchange.CancelStopLossOrdersAsync(symbol);
-                        await Task.Delay(200);
-
-                        if (fallbackSL > 0m)
-                        {
-                            await _exchange.PlaceStopOnlyAsync(symbol, side, posSide, qty, fallbackSL);
-                            await Task.Delay(200);
-                        }
-                    }
-                    catch { /* ignore */ }
-
-                    return (lastSlTpCheckUtc, false);
-                }
-            }
 
             // Keep TP if needed
             if (hasTp && expectedTp.HasValue)
