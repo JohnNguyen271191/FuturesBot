@@ -1,4 +1,8 @@
+using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
 using FuturesBot.Config;
 using FuturesBot.IServices;
 using FuturesBot.Models;
@@ -23,7 +27,12 @@ namespace FuturesBot.Services
     /// NEW PATCH (theo issue thực tế):
     /// - Major (BTC/ETH) Scalp: hạ ngưỡng ROI protect/quick-take để lock sớm hơn (case ETH lời ~1$ rồi quay SL)
     /// - Allow protect when progress-to-TP >= 25% (fee-safe BE) dù ROI chưa đủ
-    /// - Update SL now verifies SL exists on exchange; if not, rollback & log
+    /// - Update SL now verifies SL exists on exchange; if not, retry once, then rollback & log
+    ///
+    /// IMPORTANT FIX (issue "MANUAL ATTACH" dù không deploy):
+    /// - HostService có thể gọi AttachManualPositionAsync từ 1 instance khác (DI scoped/singleton mismatch)
+    /// - => Monitoring state MUST be shared cross-instance
+    /// - Giải pháp: dùng static ConcurrentDictionary cho tracking monitor + throttle attach
     /// </summary>
     public class OrderManagerService
     {
@@ -85,12 +94,9 @@ namespace FuturesBot.Services
         private const decimal NoAtrProtectScalpPlannedRR = 1.10m;
 
         // ===== PROGRESS-TO-TP early protect (NEW) =====
-        // nếu đi được >= 25% quãng đường tới TP thì allow protect BE(+fee) dù ROI gate chưa đủ
         private const decimal AllowProtectIfProgressToTpAtLeast = 0.25m;
 
         // ===== MAJOR SCALP ROI OVERRIDE (NEW) =====
-        // Mục tiêu: với size major nhỏ (ETH/BTC) thì lời ~1$ đã lock được.
-        // ROI = net / margin. Với ETH 20x margin ~ 12-13$, ROI 0.10 => ~1.2-1.3$ net
         private const decimal MajorScalpMinProtectRoiOverride = 0.10m;
         private const decimal MajorScalpMinQuickTakeRoiOverride = 0.18m;
 
@@ -103,6 +109,11 @@ namespace FuturesBot.Services
 
         private static readonly TimeSpan DangerPendingMaxAge = TimeSpan.FromMinutes(10);
 
+        // ===== MANUAL ATTACH THROTTLE (cross-instance) =====
+        private static readonly TimeSpan ManualAttachThrottle = TimeSpan.FromMinutes(2);
+        private static readonly ConcurrentDictionary<string, DateTime> _lastManualAttachUtc
+            = new(StringComparer.OrdinalIgnoreCase);
+
         private sealed class FeeStats
         {
             public decimal EwmaRate { get; set; } = DefaultTakerFeeRate;
@@ -110,23 +121,23 @@ namespace FuturesBot.Services
             public DateTime LastUpdateUtc { get; set; } = DateTime.MinValue;
         }
 
-        private readonly ConcurrentDictionary<string, FeeStats> _feeStatsBySymbol = new(StringComparer.OrdinalIgnoreCase);
+        private static readonly ConcurrentDictionary<string, FeeStats> _feeStatsBySymbol
+            = new(StringComparer.OrdinalIgnoreCase);
 
-        // PATCH: trailing throttle per symbol
-        private readonly ConcurrentDictionary<string, DateTime> _lastTrailingUpdateUtc = new();
-        private readonly ConcurrentDictionary<string, decimal> _lastTrailingSl = new();
+        // PATCH: trailing throttle per symbol (cross-instance)
+        private static readonly ConcurrentDictionary<string, DateTime> _lastTrailingUpdateUtc = new(StringComparer.OrdinalIgnoreCase);
+        private static readonly ConcurrentDictionary<string, decimal> _lastTrailingSl = new(StringComparer.OrdinalIgnoreCase);
 
-        // ===== pending danger confirm (THEO TREND TF) =====
-        private readonly ConcurrentDictionary<string, DateTime> _pendingDangerSinceUtc = new(StringComparer.OrdinalIgnoreCase);
-        private readonly ConcurrentDictionary<string, int> _pendingDangerBars = new(StringComparer.OrdinalIgnoreCase);
-        private readonly ConcurrentDictionary<string, DateTime> _pendingDangerLastClosedOpenTime = new(StringComparer.OrdinalIgnoreCase);
+        // ===== pending danger confirm (THEO TREND TF) (cross-instance) =====
+        private static readonly ConcurrentDictionary<string, DateTime> _pendingDangerSinceUtc = new(StringComparer.OrdinalIgnoreCase);
+        private static readonly ConcurrentDictionary<string, int> _pendingDangerBars = new(StringComparer.OrdinalIgnoreCase);
+        private static readonly ConcurrentDictionary<string, DateTime> _pendingDangerLastClosedOpenTime = new(StringComparer.OrdinalIgnoreCase);
 
         // ============================================================
-        // TRACK SYMBOL ĐANG ĐƯỢC GIÁM SÁT
+        // TRACK SYMBOL ĐANG ĐƯỢC GIÁM SÁT (MUST be cross-instance) ✅
         // ============================================================
-
-        private readonly ConcurrentDictionary<string, bool> _monitoringLimit = new();
-        private readonly ConcurrentDictionary<string, bool> _monitoringPosition = new();
+        private static readonly ConcurrentDictionary<string, bool> _monitoringLimit = new(StringComparer.OrdinalIgnoreCase);
+        private static readonly ConcurrentDictionary<string, bool> _monitoringPosition = new(StringComparer.OrdinalIgnoreCase);
 
         private bool IsMonitoringLimit(string symbol) => _monitoringLimit.ContainsKey(symbol);
         private bool IsMonitoringPosition(string symbol) => _monitoringPosition.ContainsKey(symbol);
@@ -713,21 +724,22 @@ namespace FuturesBot.Services
                                             && CanUpdateTrailing(symbol, sl, targetSL, atr))
                                         {
                                             var oldSl = sl;
-                                            sl = targetSL;
 
                                             var (newLastCheck, slDetected) = await UpdateStopLossAsync(
                                                 symbol,
-                                                targetSL,
-                                                isLongPosition,
-                                                hasTP,
-                                                tp,
-                                                pos,
-                                                lastSlTpCheckUtc);
+                                                newSL: targetSL,
+                                                fallbackSL: oldSl,
+                                                isLong: isLongPosition,
+                                                hasTp: hasTP,
+                                                expectedTp: tp,
+                                                currentPos: pos,
+                                                lastSlTpCheckUtc: lastSlTpCheckUtc);
 
                                             lastSlTpCheckUtc = newLastCheck;
 
                                             if (slDetected)
                                             {
+                                                sl = targetSL;
                                                 CommitTrailing(symbol, targetSL);
                                                 await _notify.SendAsync(
                                                     $"[{symbol}] MICRO LOCK (R): net={netPnlUsd:F4} lockAt={(netPnlUsd >= microTakeUsd ? "0.50R(no-kill)" : "0.25R")} baseRisk={baseRiskUsd:F4} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
@@ -793,7 +805,6 @@ namespace FuturesBot.Services
                         }
 
                         // ===== Profit protect (ATR-based) - ROI gate =====
-                        // NEW: allowProtectByProgress => có thể protect BE(+fee) dù ROI gate chưa đủ
                         bool roiOkForProtect = (initialMarginUsd <= 0m) || (roi >= effMinProtectRoi) || allowProtectByProgress;
 
                         if (netRr >= effProtectAtRR
@@ -814,21 +825,22 @@ namespace FuturesBot.Services
                                         && CanUpdateTrailing(symbol, sl, targetSL, atr))
                                     {
                                         var oldSl = sl;
-                                        sl = targetSL;
 
                                         var (newLastCheck, slDetected) = await UpdateStopLossAsync(
                                             symbol,
-                                            targetSL,
-                                            isLongPosition,
-                                            hasTP,
-                                            tp,
-                                            pos,
-                                            lastSlTpCheckUtc);
+                                            newSL: targetSL,
+                                            fallbackSL: oldSl,
+                                            isLong: isLongPosition,
+                                            hasTp: hasTP,
+                                            expectedTp: tp,
+                                            currentPos: pos,
+                                            lastSlTpCheckUtc: lastSlTpCheckUtc);
 
                                         lastSlTpCheckUtc = newLastCheck;
 
                                         if (slDetected)
                                         {
+                                            sl = targetSL;
                                             CommitTrailing(symbol, targetSL);
                                             await _notify.SendAsync(
                                                 $"[{symbol}] PROTECT BE(+FEE) (ANTI-KILL): plannedRR={plannedRR:F2} scalp forbid ATR lock. netRr={netRr:F2} roi={(initialMarginUsd > 0 ? (roi * 100m).ToString("F1") + "%" : "NA")} prog={(progressToTp * 100m):F0}% net={netPnlUsd:F4} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
@@ -870,21 +882,22 @@ namespace FuturesBot.Services
                                             && CanUpdateTrailing(symbol, sl, beSl, atr))
                                         {
                                             var oldSl = sl;
-                                            sl = beSl;
 
                                             var (newLastCheck, slDetected) = await UpdateStopLossAsync(
                                                 symbol,
-                                                beSl,
-                                                isLongPosition,
-                                                hasTP,
-                                                tp,
-                                                pos,
-                                                lastSlTpCheckUtc);
+                                                newSL: beSl,
+                                                fallbackSL: oldSl,
+                                                isLong: isLongPosition,
+                                                hasTp: hasTP,
+                                                expectedTp: tp,
+                                                currentPos: pos,
+                                                lastSlTpCheckUtc: lastSlTpCheckUtc);
 
                                             lastSlTpCheckUtc = newLastCheck;
 
                                             if (slDetected)
                                             {
+                                                sl = beSl;
                                                 CommitTrailing(symbol, beSl);
                                                 await _notify.SendAsync(
                                                     $"[{symbol}] PROTECT BE(+FEE) (SCALP wait continuation): netRr={netRr:F2} roi={(initialMarginUsd > 0 ? (roi * 100m).ToString("F1") + "%" : "NA")} prog={(progressToTp * 100m):F0}% net={netPnlUsd:F4} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
@@ -938,21 +951,22 @@ namespace FuturesBot.Services
                                 if (IsBetterStopLoss(targetSL, sl, isLongPosition) && CanUpdateTrailing(symbol, sl, targetSL, atr))
                                 {
                                     var oldSl = sl;
-                                    sl = targetSL;
 
                                     var (newLastCheck, slDetected) = await UpdateStopLossAsync(
                                         symbol,
-                                        targetSL,
-                                        isLongPosition,
-                                        hasTP,
-                                        tp,
-                                        pos,
-                                        lastSlTpCheckUtc);
+                                        newSL: targetSL,
+                                        fallbackSL: oldSl,
+                                        isLong: isLongPosition,
+                                        hasTp: hasTP,
+                                        expectedTp: tp,
+                                        currentPos: pos,
+                                        lastSlTpCheckUtc: lastSlTpCheckUtc);
 
                                     lastSlTpCheckUtc = newLastCheck;
 
                                     if (slDetected)
                                     {
+                                        sl = targetSL;
                                         CommitTrailing(symbol, targetSL);
                                         await _notify.SendAsync(
                                             $"[{symbol}] PROTECT ATR (ROI+FEE): netRr={netRr:F2} roi={(initialMarginUsd > 0 ? (roi * 100m).ToString("F1") + "%" : "NA")} prog={(progressToTp * 100m):F0}% " +
@@ -988,21 +1002,22 @@ namespace FuturesBot.Services
                                 if (IsBetterStopLoss(targetSL, sl, isLongPosition) && CanUpdateTrailing(symbol, sl, targetSL, 0m))
                                 {
                                     var oldSl = sl;
-                                    sl = targetSL;
 
                                     var (newLastCheck, slDetected) = await UpdateStopLossAsync(
                                         symbol,
-                                        targetSL,
-                                        isLongPosition,
-                                        hasTP,
-                                        tp,
-                                        pos,
-                                        lastSlTpCheckUtc);
+                                        newSL: targetSL,
+                                        fallbackSL: oldSl,
+                                        isLong: isLongPosition,
+                                        hasTp: hasTP,
+                                        expectedTp: tp,
+                                        currentPos: pos,
+                                        lastSlTpCheckUtc: lastSlTpCheckUtc);
 
                                     lastSlTpCheckUtc = newLastCheck;
 
                                     if (slDetected)
                                     {
+                                        sl = targetSL;
                                         CommitTrailing(symbol, targetSL);
                                         await _notify.SendAsync(
                                             $"[{symbol}] PROTECT (fallback ROI+FEE): netRr={netRr:F2} roi={(initialMarginUsd > 0 ? (roi * 100m).ToString("F1") + "%" : "NA")} prog={(progressToTp * 100m):F0}% net={netPnlUsd:F4} " +
@@ -1127,17 +1142,28 @@ namespace FuturesBot.Services
             if (pos == null || pos.PositionAmt == 0)
                 return;
 
-            if (IsMonitoringPosition(pos.Symbol))
+            var symbol = pos.Symbol;
+
+            // ✅ Cross-instance guard
+            if (IsMonitoringPosition(symbol) || IsMonitoringLimit(symbol))
                 return;
 
-            ClearMonitoringLimit(pos.Symbol);
+            // ✅ Throttle attach to avoid spam / race
+            var now = DateTime.UtcNow;
+            var last = _lastManualAttachUtc.GetOrAdd(symbol, _ => DateTime.MinValue);
+            if (now - last < ManualAttachThrottle)
+                return;
+            _lastManualAttachUtc[symbol] = now;
+
+            // Clear limit monitoring (global)
+            ClearMonitoringLimit(symbol);
 
             decimal qty = pos.PositionAmt;
             bool isLong = qty > 0;
 
             decimal entry = pos.EntryPrice;
 
-            var det = await DetectManualSlTpAsync(pos.Symbol, isLong, entry, pos);
+            var det = await DetectManualSlTpAsync(symbol, isLong, entry, pos);
 
             decimal? sl = det.Sl;
             decimal? tp = det.Tp;
@@ -1155,18 +1181,18 @@ namespace FuturesBot.Services
 
                     tp = safetyTp;
 
-                    await _notify.SendAsync($"[{pos.Symbol}] MANUAL ATTACH: thiếu TP → đặt SAFETY-TP={Math.Round(safetyTp, 6)}");
-                    var ok = await _exchange.PlaceTakeProfitAsync(pos.Symbol, isLong ? "LONG" : "SHORT", Math.Abs(qty), safetyTp);
-                    if (!ok) await _notify.SendAsync($"[{pos.Symbol}] SAFETY-TP FAILED (manual attach).");
+                    await _notify.SendAsync($"[{symbol}] MANUAL ATTACH: thiếu TP → đặt SAFETY-TP={Math.Round(safetyTp, 6)}");
+                    var ok = await _exchange.PlaceTakeProfitAsync(symbol, isLong ? "LONG" : "SHORT", Math.Abs(qty), safetyTp);
+                    if (!ok) await _notify.SendAsync($"[{symbol}] SAFETY-TP FAILED (manual attach).");
                 }
             }
 
             await _notify.SendAsync(
-                $"[{pos.Symbol}] MANUAL ATTACH → side={(isLong ? "LONG" : "SHORT")} entry={entry}, SL={sl}, TP={tp}");
+                $"[{symbol}] MANUAL ATTACH → side={(isLong ? "LONG" : "SHORT")} entry={entry}, SL={sl}, TP={tp}");
 
             var signal = new TradeSignal
             {
-                Symbol = pos.Symbol,
+                Symbol = symbol,
                 Type = isLong ? SignalType.Long : SignalType.Short,
                 EntryPrice = entry,
                 StopLoss = sl,
@@ -1176,10 +1202,10 @@ namespace FuturesBot.Services
                 Mode = TradeMode.Trend
             };
 
-            var coinInfo = _botConfig.Futures.Coins.FirstOrDefault(i => i.Symbol.Equals(pos.Symbol));
+            var coinInfo = _botConfig.Futures.Coins.FirstOrDefault(i => i.Symbol.Equals(symbol));
             if (coinInfo == null)
             {
-                await _notify.SendAsync($"[{pos.Symbol}] không tìm thấy trong setting.");
+                await _notify.SendAsync($"[{symbol}] không tìm thấy trong setting.");
                 return;
             }
 
@@ -1670,6 +1696,7 @@ namespace FuturesBot.Services
         private async Task<(DateTime lastSlTpCheckUtc, bool slDetected)> UpdateStopLossAsync(
             string symbol,
             decimal newSL,
+            decimal fallbackSL,
             bool isLong,
             bool hasTp,
             decimal? expectedTp,
@@ -1678,8 +1705,9 @@ namespace FuturesBot.Services
         {
             await _notify.SendAsync($"[{symbol}] Trailing SL update → {Math.Round(newSL, 6)}");
 
+            // Cancel old SLs first
             await _exchange.CancelStopLossOrdersAsync(symbol);
-            await Task.Delay(400);
+            await Task.Delay(350);
 
             currentPos ??= await _exchange.GetPositionAsync(symbol);
 
@@ -1701,22 +1729,52 @@ namespace FuturesBot.Services
 
             string side = isLong ? "SELL" : "BUY";
 
-            // Place SL
+            // 1) place SL
             await _exchange.PlaceStopOnlyAsync(symbol, side, posSide, qty, newSL);
-
             await Task.Delay(250);
 
-            // Verify SL exists (detect lại)
-            //var detSL = await DetectManualSlTpAsync(symbol, isLong, currentPos.EntryPrice, currentPos);
+            // 2) verify SL exists (detect lại)
             lastSlTpCheckUtc = DateTime.UtcNow;
+            var det1 = await DetectManualSlTpAsync(symbol, isLong, currentPos.EntryPrice, currentPos);
+            bool slOk1 = det1.Sl.HasValue && det1.Sl.Value > 0m && Math.Abs(det1.Sl.Value - newSL) / newSL <= 0.0008m;
 
-            //bool slOk = detSL.Sl.HasValue && detSL.Sl.Value > 0m && Math.Abs(detSL.Sl.Value - newSL) / newSL <= 0.0008m;
+            if (!slOk1)
+            {
+                await _notify.SendAsync(
+                    $"[{symbol}] Trailing SL VERIFY FAILED: expected={Math.Round(newSL, 6)} detected={(det1.Sl.HasValue ? Math.Round(det1.Sl.Value, 6).ToString() : "NULL")} → retry once.");
 
-            //if (!slOk)
-            //{
-                //await _notify.SendAsync($"[{symbol}] Trailing SL VERIFY FAILED: expected={Math.Round(newSL, 6)} detected={(detSL.Sl.HasValue ? Math.Round(detSL.Sl.Value, 6).ToString() : "NULL")} → rollback (no commit).");
-                //return (lastSlTpCheckUtc, false);
-            //}
+                // retry once
+                await _exchange.CancelStopLossOrdersAsync(symbol);
+                await Task.Delay(250);
+                await _exchange.PlaceStopOnlyAsync(symbol, side, posSide, qty, newSL);
+                await Task.Delay(250);
+
+                lastSlTpCheckUtc = DateTime.UtcNow;
+                var det2 = await DetectManualSlTpAsync(symbol, isLong, currentPos.EntryPrice, currentPos);
+                bool slOk2 = det2.Sl.HasValue && det2.Sl.Value > 0m && Math.Abs(det2.Sl.Value - newSL) / newSL <= 0.0008m;
+
+                if (!slOk2)
+                {
+                    await _notify.SendAsync(
+                        $"[{symbol}] Trailing SL VERIFY FAILED again: expected={Math.Round(newSL, 6)} detected={(det2.Sl.HasValue ? Math.Round(det2.Sl.Value, 6).ToString() : "NULL")} → rollback to oldSL={Math.Round(fallbackSL, 6)}");
+
+                    // best-effort rollback
+                    try
+                    {
+                        await _exchange.CancelStopLossOrdersAsync(symbol);
+                        await Task.Delay(200);
+
+                        if (fallbackSL > 0m)
+                        {
+                            await _exchange.PlaceStopOnlyAsync(symbol, side, posSide, qty, fallbackSL);
+                            await Task.Delay(200);
+                        }
+                    }
+                    catch { /* ignore */ }
+
+                    return (lastSlTpCheckUtc, false);
+                }
+            }
 
             // Keep TP if needed
             if (hasTp && expectedTp.HasValue)
