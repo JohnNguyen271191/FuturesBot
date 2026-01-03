@@ -1,3 +1,5 @@
+using System;
+using System.Collections.Generic;
 using FuturesBot.Config;
 using FuturesBot.IServices;
 using FuturesBot.Models;
@@ -9,13 +11,15 @@ namespace FuturesBot.Strategies
     /// <summary>
     /// Spot 1m scalp strategy (BTC/ETH majors by default).
     ///
-    /// Design goals:
+    /// UPDATED (Retest-based, not hard cross):
     /// - Long-only entries (SignalType.Long)
-    /// - Exit signal via SignalType.Short (Spot OMS interprets as SELL / exit)
-    /// - Simple, fast, low-latency logic suitable for 1m noise
-    /// - TP/SL small; winrate-oriented
+    /// - Entry uses "nearest retest" of EMA34 within recent lookback + reclaim confirmation
+    /// - Optional light trend bias using EMA34 vs EMA89 to avoid dirty chop
+    /// - Exit via SignalType.Short (Spot OMS interprets as SELL / exit)
     ///
-    /// NOTE: This intentionally does NOT share Futures assumptions (leverage, positionSide, trend confirmations).
+    /// NOTES:
+    /// - Uses last CLOSED candle (Count - 2)
+    /// - Designed for 1m noise: tolerant retest band + softer RSI gate
     /// </summary>
     public sealed class SpotScalpStrategy1m : ISpotTradingStrategy
     {
@@ -28,11 +32,19 @@ namespace FuturesBot.Strategies
 
         // --- Tuneables (keep conservative; OMS also has defaults/rescue) ---
         private const int MinBars = 120;
-        private const int EmaPeriod = 34;
+
+        // Core indicators
+        private const int EmaFastPeriod = 34;
+        private const int EmaSlowPeriod = 89;
         private const int RsiPeriod = 14;
 
-        // Signal gates
-        private const decimal RsiLongMin = 52m;
+        // Retest logic
+        private const int RetestLookbackBars = 6;          // search retest in last N bars
+        private const decimal RetestBandPercent = 0.0010m; // 0.10% band around EMA34
+        private const decimal ReclaimBufferPercent = 0.0002m; // 0.02% reclaim buffer
+
+        // Signal gates (softened to reduce missed trades)
+        private const decimal RsiLongMin = 50m;
         private const decimal RsiExitMax = 48m;
 
         // Default TP/SL for 1m spot (ratio)
@@ -41,32 +53,78 @@ namespace FuturesBot.Strategies
 
         public TradeSignal GenerateSignal(IReadOnlyList<Candle> candlesMain, IReadOnlyList<Candle> candlesTrend, CoinInfo coinInfo)
         {
-            // Spot 1m is noisy; we operate purely on main TF.
+            // Spot 1m is noisy; operate purely on main TF.
             if (candlesMain == null || candlesMain.Count < MinBars)
                 return new TradeSignal { Type = SignalType.None, Symbol = coinInfo.Symbol, Reason = "Not enough bars" };
 
             // Use last CLOSED candle.
             int i = candlesMain.Count - 2;
-            int iPrev = i - 1;
-            if (iPrev <= 0)
+            if (i <= 2)
                 return new TradeSignal { Type = SignalType.None, Symbol = coinInfo.Symbol, Reason = "Not enough closed bars" };
 
-            var ema = _indicators.Ema(candlesMain, EmaPeriod);
+            int iPrev = i - 1;
+
+            // Indicators
+            var emaFast = _indicators.Ema(candlesMain, EmaFastPeriod);
+            var emaSlow = _indicators.Ema(candlesMain, EmaSlowPeriod);
             var rsi = _indicators.Rsi(candlesMain, RsiPeriod);
 
-            var close = candlesMain[i].Close;
-            var closePrev = candlesMain[iPrev].Close;
-            var emaNow = ema[i];
-            var emaPrev = ema[iPrev];
+            var c = candlesMain[i];
+            var cPrev = candlesMain[iPrev];
+
+            var close = c.Close;
+            var open = c.Open;
+            var low = c.Low;
+
+            var emaFastNow = emaFast[i];
+            var emaSlowNow = emaSlow[i];
             var rsiNow = rsi[i];
 
-            // Basic cross logic:
-            bool crossUp = closePrev <= emaPrev && close > emaNow;
-            bool crossDown = closePrev >= emaPrev && close < emaNow;
+            // -------------------------------
+            // 1) Light trend bias (avoid nasty chop)
+            // -------------------------------
+            // Keep it simple for 1m: require EMA34 not below EMA89.
+            bool trendOk = emaFastNow >= emaSlowNow;
 
-            if (crossUp && rsiNow >= RsiLongMin)
+            // -------------------------------
+            // 2) Nearest retest in last N bars
+            //    "Retest" means price touched/undercut EMA34 band recently.
+            // -------------------------------
+            int start = Math.Max(1, i - RetestLookbackBars);
+            bool hadRetest = false;
+            int retestIndex = -1;
+
+            for (int k = i; k >= start; k--)
+            {
+                var emaK = emaFast[k];
+                var lowK = candlesMain[k].Low;
+
+                // Touch/undercut into EMA band (allow noise)
+                if (lowK <= emaK * (1m + RetestBandPercent))
+                {
+                    hadRetest = true;
+                    retestIndex = k;
+                    break; // nearest retest
+                }
+            }
+
+            // -------------------------------
+            // 3) Reclaim/confirm
+            // -------------------------------
+            bool reclaim = close > emaFastNow * (1m + ReclaimBufferPercent);
+            bool bullishCandle = close > open;
+
+            // Also allow "reclaim after a down candle" as long as it's closing above EMA
+            // by keeping bullishCandle as a soft condition:
+            bool confirmOk = reclaim && (bullishCandle || (close > cPrev.Close));
+
+            // -------------------------------
+            // ENTRY: Long on retest + reclaim + RSI
+            // -------------------------------
+            if (trendOk && hadRetest && confirmOk && rsiNow >= RsiLongMin)
             {
                 var entry = close;
+
                 return new TradeSignal
                 {
                     Symbol = coinInfo.Symbol,
@@ -75,19 +133,29 @@ namespace FuturesBot.Strategies
                     EntryPrice = entry,
                     StopLoss = entry * (1m - DefaultSl),
                     TakeProfit = entry * (1m + DefaultTp),
-                    Reason = $"Spot1m: CrossUp EMA{EmaPeriod} + RSI{RsiPeriod}={rsiNow:F1}"
+                    Reason = $"Spot1m: Retest EMA{EmaFastPeriod} (idx={retestIndex}) + reclaim + RSI{RsiPeriod}={rsiNow:F1}"
                 };
             }
 
-            // For spot OMS, treat Short as an EXIT hint when momentum flips.
-            if (crossDown && rsiNow <= RsiExitMax)
+            // -------------------------------
+            // EXIT: soften exit (avoid whipsaw)
+            // - Close below EMA34 + RSI weak, OR
+            // - Two consecutive closes below EMA34 (structure lost)
+            // -------------------------------
+            bool closeBelowFast = c.Close < emaFastNow;
+            bool closeBelowFastPrev = cPrev.Close < emaFast[iPrev];
+            bool twoClosesBelow = closeBelowFast && closeBelowFastPrev;
+
+            if ((closeBelowFast && rsiNow <= RsiExitMax) || twoClosesBelow)
             {
                 return new TradeSignal
                 {
                     Symbol = coinInfo.Symbol,
                     Time = DateTime.UtcNow,
                     Type = SignalType.Short,
-                    Reason = $"Spot1m: CrossDown EMA{EmaPeriod} + RSI{RsiPeriod}={rsiNow:F1} (exit)"
+                    Reason = twoClosesBelow
+                        ? $"Spot1m: 2 closes below EMA{EmaFastPeriod} (exit)"
+                        : $"Spot1m: Close<EMA{EmaFastPeriod} + RSI{RsiPeriod}={rsiNow:F1} (exit)"
                 };
             }
 
