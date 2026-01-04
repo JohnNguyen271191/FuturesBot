@@ -14,10 +14,13 @@ namespace FuturesBot.Services
     /// - Rescue: if holdings exist but no open orders, re-create a default OCO.
     /// - Exit on SHORT signal by canceling orders and selling holdings (long-only spot).
     ///
-    /// FIX:
-    /// 1) Holding calc uses Free + Locked (SpotHolding) to avoid state bugs when OCO locks coins.
-    /// 2) Maker miss fill: reprice loop + MARKET fallback using PlaceMarketBuyByQuoteAsync after too many reprices.
-    /// 3) Exit: cancel orders first, refresh holding, then sell.
+    /// FIX (OMS v2):
+    /// 1) "inPosition" không chỉ dựa vào holdingNotional >= minHolding (tránh chặn oan vì dust / OCO lock).
+    ///    - Nếu có SELL open orders => coi như inPosition.
+    ///    - Nếu chỉ dust < minHolding => vẫn cho phép entry (tùy config, mặc định allow).
+    /// 2) Pending BUY TTL: tránh kẹt maker limit nhiều ngày.
+    /// 3) Log WHY-NOT-TRADE có throttle: biết chính xác vì sao không vào.
+    /// 4) Reject qty/minNotional/rounding: log rõ và không cooldown oan.
     /// </summary>
     public sealed class SpotOrderManagerService
     {
@@ -25,8 +28,11 @@ namespace FuturesBot.Services
         private readonly SlackNotifierService _notify;
         private readonly BotConfig _config;
 
-        // per-symbol throttle
+        // per-symbol throttle action
         private readonly ConcurrentDictionary<string, DateTime> _lastActionUtc = new();
+
+        // per-symbol throttle WHY log
+        private readonly ConcurrentDictionary<string, DateTime> _lastWhyLogUtc = new();
 
         // track reprice count to avoid infinite maker loop
         private readonly ConcurrentDictionary<string, int> _entryRepriceCount = new();
@@ -85,6 +91,7 @@ namespace FuturesBot.Services
             var price = await _spot.GetLastPriceAsync(symbol);
             if (price <= 0) return;
 
+            // Fetch holdings
             var quoteHold = await _spot.GetHoldingAsync(quoteAsset);
             var baseHold = await _spot.GetHoldingAsync(baseAsset);
 
@@ -92,25 +99,42 @@ namespace FuturesBot.Services
             var holdingNotional = baseQtyTotal * price;
 
             var minHolding = _config.SpotOms.MinHoldingNotionalUsd;
-            var inPosition = holdingNotional >= minHolding;
             var hasDust = holdingNotional > 0m && holdingNotional < minHolding;
+
+            // Fetch open orders once per tick (OMS decisions depend on it)
+            var openOrders = await _spot.GetOpenOrdersAsync(symbol) ?? Array.Empty<OpenOrderInfo>();
+
+            // ============ Determine inPosition more robust ============
+            // If we have SELL open orders (OCO/TP/SL), treat as "inPosition" even if Free=0 because Locked.
+            bool hasAnySellExit = openOrders.Any(o =>
+                string.Equals(o.Side, "SELL", StringComparison.OrdinalIgnoreCase));
+
+            // If base holding is meaningful (>= minHolding notional), treat as inPosition.
+            bool meaningfulHolding = holdingNotional >= minHolding;
+
+            // If base qty is "tradeable size" even when notional < minHolding (some exchanges filter), treat as position.
+            // (Simple heuristic: if baseQtyTotal is non-trivial and there are SELL exits -> inPosition already)
+            bool inPosition = meaningfulHolding || hasAnySellExit;
 
             // ============================================================
             // 1) Rescue OCO: holding but no open orders
             // ============================================================
             if (inPosition)
             {
-                var open = await _spot.GetOpenOrdersAsync(symbol);
-                if (open == null || open.Count == 0)
+                if (openOrders.Count == 0)
                 {
                     if (IsThrottled(symbol))
+                    {
+                        LogWhyThrottled(symbol, "RescueOCO throttled");
                         return;
+                    }
 
+                    // Default OCO based on current price
                     var tp = price * (1m + _config.SpotOms.DefaultTakeProfitPercent);
                     var sl = price * (1m - _config.SpotOms.DefaultStopLossPercent);
                     var stopLimit = sl * (1m + _config.SpotOms.SlMakerBufferPercent);
 
-                    // No open orders -> Free is safe to use
+                    // No open orders -> Free is safe to use (locked should be 0 here)
                     var qty = baseHold.Free;
                     if (qty > 0)
                     {
@@ -119,19 +143,34 @@ namespace FuturesBot.Services
                             $"[SPOT][OMS] Rescue OCO placed {symbol}. qty={qty:0.########}, tp={tp:0.##}, sl={sl:0.##}");
                         MarkAction(symbol);
                     }
+                    else
+                    {
+                        LogWhy(symbol, $"RescueOCO skipped: baseFree=0 but inPosition inferred. holdingNotional≈{holdingNotional:0.##} dust={hasDust}");
+                    }
                 }
             }
 
             if (signal == null || signal.Type == SignalType.None)
+            {
+                // Optional: debug why not trade (only if you want)
                 return;
+            }
 
             // ============================================================
-            // 2) Exit (SHORT signal)
+            // 2) Exit (SHORT signal) - long-only spot
             // ============================================================
             if (signal.Type == SignalType.Short)
             {
-                if (!inPosition) return;
-                if (IsThrottled(symbol)) return;
+                if (!inPosition)
+                {
+                    LogWhy(symbol, $"Exit skipped: not inPosition. (reason={signal.Reason})");
+                    return;
+                }
+                if (IsThrottled(symbol))
+                {
+                    LogWhyThrottled(symbol, $"Exit throttled. (reason={signal.Reason})");
+                    return;
+                }
 
                 await _spot.CancelAllOpenOrdersAsync(symbol);
 
@@ -146,6 +185,10 @@ namespace FuturesBot.Services
                         $"[SPOT][OMS] Exit SELL {symbol}. qty={sellQty:0.########} (reason={signal.Reason})");
                     MarkAction(symbol);
                 }
+                else
+                {
+                    LogWhy(symbol, $"Exit skipped: baseFree=0 after cancel. (reason={signal.Reason})");
+                }
 
                 _entryRepriceCount.TryRemove(symbol, out _);
                 return;
@@ -156,10 +199,38 @@ namespace FuturesBot.Services
             // ============================================================
             if (signal.Type == SignalType.Long)
             {
-                if (inPosition) return;
-                if (IsThrottled(symbol)) return;
+                // If meaningful holding or has exit orders => do not re-enter
+                // BUT if it's just dust (and NO sell exits), allow entry (don't block for days).
+                if (inPosition)
+                {
+                    // allow entry if only dust AND no sell exits
+                    if (!(hasDust && !hasAnySellExit))
+                    {
+                        LogWhy(symbol, $"Entry skipped: inPosition. holdingNotional≈{holdingNotional:0.##} minHolding={minHolding:0.##} hasSellExit={hasAnySellExit} dust={hasDust} (reason={signal.Reason})");
+                        return;
+                    }
 
-                // Sizing
+                    // dust but inPosition inferred by sell exits shouldn't happen due to condition above
+                    // still safe
+                }
+
+                if (IsThrottled(symbol))
+                {
+                    LogWhyThrottled(symbol, $"Entry throttled. (reason={signal.Reason})");
+                    return;
+                }
+
+                // If dust exists + there are any sell exits, cancel them to avoid locking + conflicts
+                // (rare, but prevents "dust + exit orders" causing perpetual inPosition)
+                if (hasDust && hasAnySellExit)
+                {
+                    await _spot.CancelAllOpenOrdersAsync(symbol);
+                    await _notify.SendAsync($"[SPOT][OMS] Dust cleanup: canceled exits for {symbol} before new entry. dustNotional≈{holdingNotional:0.##}");
+                    // refresh
+                    openOrders = await _spot.GetOpenOrdersAsync(symbol) ?? Array.Empty<OpenOrderInfo>();
+                }
+
+                // --------------- Sizing ---------------
                 var totalCap = _config.Spot.WalletCapUsd > 0 ? _config.Spot.WalletCapUsd : quoteHold.Free;
                 var usableTotal = Math.Min(quoteHold.Free, totalCap);
 
@@ -178,7 +249,11 @@ namespace FuturesBot.Services
 
                 // FDUSD 2 decimals
                 usdToUse = Math.Floor(usdToUse * 100m) / 100m;
-                if (usdToUse <= 0) return;
+                if (usdToUse <= 0)
+                {
+                    LogWhy(symbol, $"Entry skipped: usdToUse<=0 (usableTotal={usableTotal:0.##}, alloc={allocation:0.##}%, risk={riskPct:0.##}%)");
+                    return;
+                }
 
                 var minEntry = _config.SpotOms.MinEntryNotionalUsd;
                 if (usdToUse < minEntry)
@@ -189,22 +264,28 @@ namespace FuturesBot.Services
                     return;
                 }
 
-                // pending maker buy?
-                var openOrders = await _spot.GetOpenOrdersAsync(symbol) ?? Array.Empty<OpenOrderInfo>();
+                // --------------- Pending maker buy TTL ---------------
                 var pendingBuy = openOrders.FirstOrDefault(o =>
                     string.Equals(o.Side, "BUY", StringComparison.OrdinalIgnoreCase) &&
                     string.Equals(o.Type, "LIMIT", StringComparison.OrdinalIgnoreCase));
 
                 if (pendingBuy != null)
                 {
+                    // If still fresh, don't spam cancel/replace
                     var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                    var ageSec = 0L;
+
                     if (pendingBuy.TimeMs > 0)
+                        ageSec = (nowMs - pendingBuy.TimeMs) / 1000;
+
+                    // If too young -> skip
+                    if (ageSec > 0 && ageSec < _config.SpotOms.EntryRepriceSeconds)
                     {
-                        var ageSec = (nowMs - pendingBuy.TimeMs) / 1000;
-                        if (ageSec < _config.SpotOms.EntryRepriceSeconds)
-                            return;
+                        LogWhy(symbol, $"Entry skipped: pending BUY age={ageSec}s < repriceSec={_config.SpotOms.EntryRepriceSeconds}s (reason={signal.Reason})");
+                        return;
                     }
 
+                    // Cancel stale pending
                     await _spot.CancelAllOpenOrdersAsync(symbol);
 
                     var count = _entryRepriceCount.AddOrUpdate(symbol, 1, (_, c) => c + 1);
@@ -231,13 +312,24 @@ namespace FuturesBot.Services
                     _entryRepriceCount.TryRemove(symbol, out _);
                 }
 
-                // place maker limit buy
+                // --------------- Place maker limit buy ---------------
                 var entryPrice = price * (1m - _config.SpotOms.EntryMakerOffsetPercent);
                 var rawQty = usdToUse / entryPrice;
 
+                // Optional preflight sanity (avoid silent reject spam)
+                if (rawQty <= 0m)
+                {
+                    LogWhy(symbol, $"Entry skipped: rawQty<=0. usdToUse={usdToUse:0.##} entryPrice={entryPrice:0.##}");
+                    return;
+                }
+
                 var buy = await _spot.PlaceLimitBuyAsync(symbol, rawQty, entryPrice);
                 if (buy.OrderId == "REJECTED" || buy.OrderId == "UNKNOWN")
+                {
+                    // Important: do NOT MarkAction -> avoid cooldown on reject
+                    LogWhy(symbol, $"Entry REJECTED: {symbol} rawQty={rawQty:0.########} price={entryPrice:0.##} spend≈{usdToUse:0.##} (reason={signal.Reason})");
                     return;
+                }
 
                 await _notify.SendAsync(
                     $"[SPOT][OMS] Maker BUY LIMIT {symbol}: spend≈{usdToUse:0.##} {quoteAsset}, price={entryPrice:0.##}, rawQty={rawQty:0.########}, orderId={buy.OrderId}, dust={hasDust}. (reason={signal.Reason})");
@@ -259,6 +351,39 @@ namespace FuturesBot.Services
         }
 
         private void MarkAction(string symbol) => _lastActionUtc[symbol] = DateTime.UtcNow;
+
+        private void LogWhyThrottled(string symbol, string msg)
+        {
+            // throttle why logs to avoid spam
+            var everySec = Math.Max(10, _config.SpotOms.MinSecondsBetweenActions);
+            if (_lastWhyLogUtc.TryGetValue(symbol, out var last))
+            {
+                if ((DateTime.UtcNow - last) < TimeSpan.FromSeconds(everySec))
+                    return;
+            }
+            _lastWhyLogUtc[symbol] = DateTime.UtcNow;
+
+            _ = SafeNotifyAsync($"[SPOT][WHY] {symbol} {msg}");
+        }
+
+        private void LogWhy(string symbol, string msg)
+        {
+            // throttle why logs (fixed 30s)
+            const int whyEverySec = 30;
+            if (_lastWhyLogUtc.TryGetValue(symbol, out var last))
+            {
+                if ((DateTime.UtcNow - last) < TimeSpan.FromSeconds(whyEverySec))
+                    return;
+            }
+            _lastWhyLogUtc[symbol] = DateTime.UtcNow;
+
+            _ = SafeNotifyAsync($"[SPOT][WHY] {symbol} {msg}");
+        }
+
+        private async Task SafeNotifyAsync(string msg)
+        {
+            try { await _notify.SendAsync(msg); } catch { /* ignore */ }
+        }
 
         private static decimal GetTotalQty(SpotHolding h)
         {
