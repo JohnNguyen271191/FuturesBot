@@ -136,7 +136,7 @@ namespace FuturesBot.Services
             // ============================================================
             if (inPosition)
             {
-                if (openOrders.Length == 0)
+                if (openOrders.Count == 0)
                 {
                     if (IsThrottled(symbol))
                     {
