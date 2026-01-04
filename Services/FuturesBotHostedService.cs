@@ -1,11 +1,5 @@
-using System;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.Linq;
 using System.Net;
-using System.Net.Http;
-using System.Threading;
-using System.Threading.Tasks;
 using FuturesBot.Config;
 using FuturesBot.IServices;
 using FuturesBot.Models;
@@ -32,7 +26,6 @@ namespace FuturesBot.Services
         private readonly SlackNotifierService _notify;
         private readonly PnlReporterService _pnl;
         private readonly LiveSyncService _live;
-        private readonly OrderManagerService _orderManager;
 
         // backoff throttles (avoid Slack spam)
         private readonly ConcurrentDictionary<string, DateTime> _lastBackoffNotifyUtc = new();
@@ -42,15 +35,13 @@ namespace FuturesBot.Services
             BotConfig config,
             SlackNotifierService notify,
             PnlReporterService pnl,
-            LiveSyncService live,
-            OrderManagerService orderManager)
+            LiveSyncService live)
         {
             _sp = sp;
             _config = config;
             _notify = notify;
             _pnl = pnl;
             _live = live;
-            _orderManager = orderManager;
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -140,7 +131,7 @@ namespace FuturesBot.Services
             IReadOnlyList<Candle>? cachedTrend = null;
 
             // Cached position from last check
-            FuturesPosition cachedPos = default;
+            FuturesPosition? cachedPos = default;
             bool hasCachedPos = false;
 
             // Small loop sleep (doesn't call REST unless due)
@@ -163,7 +154,8 @@ namespace FuturesBot.Services
 
                         if (pos.PositionAmt != 0)
                         {
-                            await _orderManager.AttachManualPositionAsync(pos);
+                            var orderManager = scope.ServiceProvider.GetRequiredService<OrderManagerService>();
+                            await orderManager.AttachManualPositionAsync(pos);
                         }
                     }
 
@@ -211,7 +203,7 @@ namespace FuturesBot.Services
                     lastProcessedCandleOpenTimeUtc = lastClosed.OpenTime;
 
                     // ------------------ Determine if has position ------------------
-                    var hasPosition = hasCachedPos && cachedPos.PositionAmt != 0;
+                    var hasPosition = hasCachedPos && cachedPos?.PositionAmt != 0;
 
                     // If no position => generate signals
                     if (!hasPosition && !_pnl.IsInCooldown())
@@ -291,15 +283,11 @@ namespace FuturesBot.Services
             // 1) HttpRequestException StatusCode 418/429
             if (ex is HttpRequestException hre)
             {
-#if NET6_0_OR_GREATER
                 if (hre.StatusCode.HasValue)
                 {
                     if (hre.StatusCode.Value == (HttpStatusCode)418) return true;
                     if (hre.StatusCode.Value == (HttpStatusCode)429) return true;
                 }
-#endif
-                var msg = hre.Message ?? string.Empty;
-                if (msg.Contains("418") || msg.Contains("429")) return true;
             }
 
             // 2) Wrapped exceptions / Binance markers
