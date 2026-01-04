@@ -30,6 +30,36 @@ namespace FuturesBot.Models
         public decimal EmaBreakTolerance { get; init; }
         public TimeSpan LimitTimeout { get; init; }
 
+        // =====================================================================
+        // NEW: Dynamic Fee Gates (thay cho hardcode trong OMS)
+        // =====================================================================
+        public decimal ProtectMinNetProfitVsFeeMult { get; init; }
+        public decimal QuickMinNetProfitVsFeeMult { get; init; }
+        public decimal EarlyExitMinNetProfitVsFeeMult { get; init; }
+        public decimal BoundaryExitMinNetProfitVsFeeMult { get; init; }
+
+        // NEW: Fee-safe breakeven buffer (price buffer = feeUsd*mult/qty)
+        public decimal FeeBreakevenBufferMult { get; init; }
+
+        // NEW: Trailing safety
+        public decimal MinSlDistanceAtrFrac { get; init; }
+        public int TrailingMinUpdateIntervalSec { get; init; }
+        public decimal TrailingMinStepAtrFrac { get; init; }
+
+        // =====================================================================
+        // NEW: AllowTrailing gate (để tránh vừa lời nhỏ đã kéo ATR rồi bị cắn)
+        // =====================================================================
+        public decimal MinTrailStartRoi { get; init; }
+        public decimal MinTrailStartRR { get; init; }
+        public decimal TrailMinNetProfitVsFeeMult { get; init; }
+
+        // =====================================================================
+        // NEW: “Chốt luôn nếu không ổn” gate (dynamic)
+        // =====================================================================
+        public decimal QuickTakeNotOkMinRoi { get; init; }
+        public decimal QuickTakeNotOkMinRR { get; init; }
+        public decimal QuickTakeNotOkMinNetProfitVsFeeMult { get; init; }
+
         public string Tag => Mode.ToString();
 
         public static ModeProfile For(TradeMode mode)
@@ -53,16 +83,38 @@ namespace FuturesBot.Models
                     EarlyExitMinRR = 0.10m,
 
                     // ROI-based
-                    // NOTE: HẠ để phù hợp scalp major/fees -> lock sớm hơn, ít bỏ kèo
-                    MinProtectRoi = 0.12m,         // cũ 0.20
-                    MinQuickTakeRoi = 0.22m,       // cũ 0.30
-                    EarlyExitMinRoi = 0.14m,       // cũ 0.18
-                    MinBoundaryExitRoi = 0.10m,    // cũ 0.12
-                    MinDangerCutAbsLossRoi = 0.15m,// giữ
+                    MinProtectRoi = 0.12m,
+                    MinQuickTakeRoi = 0.22m,
+                    EarlyExitMinRoi = 0.14m,
+                    MinBoundaryExitRoi = 0.10m,
+                    MinDangerCutAbsLossRoi = 0.15m,
 
                     SafetyTpRR = 1.30m,
                     EmaBreakTolerance = 0.0012m,
                     LimitTimeout = TimeSpan.FromMinutes(15),
+
+                    // ===== Fee gates (scalp: cần fee-safe mạnh hơn) =====
+                    ProtectMinNetProfitVsFeeMult = 3.0m,
+                    QuickMinNetProfitVsFeeMult = 3.0m,
+                    EarlyExitMinNetProfitVsFeeMult = 1.2m,
+                    BoundaryExitMinNetProfitVsFeeMult = 3.0m,
+
+                    FeeBreakevenBufferMult = 1.25m,
+
+                    // ===== Trailing safety =====
+                    MinSlDistanceAtrFrac = 0.35m,
+                    TrailingMinUpdateIntervalSec = 45,
+                    TrailingMinStepAtrFrac = 0.15m,
+
+                    // ===== AllowTrailing gate (scalp: cho BE sớm, ATR lock trễ hơn) =====
+                    MinTrailStartRoi = 0.18m,
+                    MinTrailStartRR = 0.30m,
+                    TrailMinNetProfitVsFeeMult = 3.0m,
+
+                    // ===== QuickTakeIfNotOk (scalp: chốt nhanh khi yếu) =====
+                    QuickTakeNotOkMinRoi = 0.16m,
+                    QuickTakeNotOkMinRR = 0.28m,
+                    QuickTakeNotOkMinNetProfitVsFeeMult = 2.2m,
                 },
 
                 TradeMode.Mode2_Continuation => new ModeProfile
@@ -91,6 +143,26 @@ namespace FuturesBot.Models
                     SafetyTpRR = 1.60m,
                     EmaBreakTolerance = 0.0010m,
                     LimitTimeout = TimeSpan.FromMinutes(10),
+
+                    // Fee gates
+                    ProtectMinNetProfitVsFeeMult = 2.6m,
+                    QuickMinNetProfitVsFeeMult = 2.8m,
+                    EarlyExitMinNetProfitVsFeeMult = 1.2m,
+                    BoundaryExitMinNetProfitVsFeeMult = 1.8m,
+
+                    FeeBreakevenBufferMult = 1.20m,
+
+                    MinSlDistanceAtrFrac = 0.35m,
+                    TrailingMinUpdateIntervalSec = 45,
+                    TrailingMinStepAtrFrac = 0.15m,
+
+                    MinTrailStartRoi = 0.26m,
+                    MinTrailStartRR = 0.35m,
+                    TrailMinNetProfitVsFeeMult = 2.4m,
+
+                    QuickTakeNotOkMinRoi = 0.22m,
+                    QuickTakeNotOkMinRR = 0.34m,
+                    QuickTakeNotOkMinNetProfitVsFeeMult = 2.0m,
                 },
 
                 _ => new ModeProfile
@@ -119,6 +191,26 @@ namespace FuturesBot.Models
                     SafetyTpRR = 2.0m,
                     EmaBreakTolerance = 0.001m,
                     LimitTimeout = TimeSpan.FromMinutes(40),
+
+                    // Fee gates (trend: ít “micro”, vẫn fee-safe)
+                    ProtectMinNetProfitVsFeeMult = 2.4m,
+                    QuickMinNetProfitVsFeeMult = 2.4m,
+                    EarlyExitMinNetProfitVsFeeMult = 1.2m,
+                    BoundaryExitMinNetProfitVsFeeMult = 1.8m,
+
+                    FeeBreakevenBufferMult = 1.15m,
+
+                    MinSlDistanceAtrFrac = 0.35m,
+                    TrailingMinUpdateIntervalSec = 60,
+                    TrailingMinStepAtrFrac = 0.15m,
+
+                    MinTrailStartRoi = 0.36m,
+                    MinTrailStartRR = 0.45m,
+                    TrailMinNetProfitVsFeeMult = 2.0m,
+
+                    QuickTakeNotOkMinRoi = 0.32m,
+                    QuickTakeNotOkMinRR = 0.42m,
+                    QuickTakeNotOkMinNetProfitVsFeeMult = 1.8m,
                 }
             };
         }

@@ -567,6 +567,7 @@ namespace FuturesBot.Services
                     OrigQty = decimal.Parse(el.GetProperty("origQty").GetString() ?? "0", CultureInfo.InvariantCulture),
                     ExecutedQty = decimal.Parse(el.GetProperty("executedQty").GetString() ?? "0", CultureInfo.InvariantCulture),
                     StopPrice = decimal.Parse(el.GetProperty("stopPrice").GetString() ?? "0", CultureInfo.InvariantCulture),
+                    TriggerPrice = decimal.Parse(el.GetProperty("triggerPrice").GetString() ?? "0", CultureInfo.InvariantCulture)
                 });
             }
 
@@ -778,6 +779,7 @@ namespace FuturesBot.Services
                     OrigQty = decimal.Parse(el.GetProperty("quantity").GetString() ?? "0", CultureInfo.InvariantCulture),
                     ExecutedQty = 0m,
                     StopPrice = decimal.Parse(el.GetProperty("triggerPrice").GetString() ?? "0", CultureInfo.InvariantCulture),
+                    TriggerPrice = decimal.Parse(el.GetProperty("triggerPrice").GetString() ?? "0", CultureInfo.InvariantCulture)
                 });
             }
 
