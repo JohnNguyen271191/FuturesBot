@@ -1,4 +1,9 @@
+using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 using FuturesBot.Config;
 using FuturesBot.IServices;
 using FuturesBot.Models;
@@ -21,6 +26,10 @@ namespace FuturesBot.Services
     /// 2) Pending BUY TTL: tránh kẹt maker limit nhiều ngày.
     /// 3) Log WHY-NOT-TRADE có throttle: biết chính xác vì sao không vào.
     /// 4) Reject qty/minNotional/rounding: log rõ và không cooldown oan.
+    ///
+    /// PATCH (requested):
+    /// - Patch 1: EXIT signal khi NOT inPosition => silent skip (không spam WHY).
+    /// - Patch 2: Nếu NOT inPosition => ignore mọi SHORT/EXIT signal ngay từ đầu Tick (chỉ quan tâm ENTRY).
     /// </summary>
     public sealed class SpotOrderManagerService
     {
@@ -112,16 +121,22 @@ namespace FuturesBot.Services
             // If base holding is meaningful (>= minHolding notional), treat as inPosition.
             bool meaningfulHolding = holdingNotional >= minHolding;
 
-            // If base qty is "tradeable size" even when notional < minHolding (some exchanges filter), treat as position.
-            // (Simple heuristic: if baseQtyTotal is non-trivial and there are SELL exits -> inPosition already)
+            // Final inPosition
             bool inPosition = meaningfulHolding || hasAnySellExit;
+
+            // ============================================================
+            // PATCH 2: Nếu NOT inPosition => ignore mọi SHORT/EXIT signal
+            // (tránh spam từ strategy kiểu "EXIT soft" khi chưa có position)
+            // ============================================================
+            if (!inPosition && signal != null && signal.Type == SignalType.Short)
+                return;
 
             // ============================================================
             // 1) Rescue OCO: holding but no open orders
             // ============================================================
             if (inPosition)
             {
-                if (openOrders.Count == 0)
+                if (openOrders.Length == 0)
                 {
                     if (IsThrottled(symbol))
                     {
@@ -161,11 +176,9 @@ namespace FuturesBot.Services
             // ============================================================
             if (signal.Type == SignalType.Short)
             {
-                if (!inPosition)
-                {
-                    LogWhy(symbol, $"Exit skipped: not inPosition. (reason={signal.Reason})");
-                    return;
-                }
+                // PATCH 1: EXIT signal khi NOT inPosition => silent skip (không spam WHY)
+                if (!inPosition) return;
+
                 if (IsThrottled(symbol))
                 {
                     LogWhyThrottled(symbol, $"Exit throttled. (reason={signal.Reason})");
@@ -209,9 +222,6 @@ namespace FuturesBot.Services
                         LogWhy(symbol, $"Entry skipped: inPosition. holdingNotional≈{holdingNotional:0.##} minHolding={minHolding:0.##} hasSellExit={hasAnySellExit} dust={hasDust} (reason={signal.Reason})");
                         return;
                     }
-
-                    // dust but inPosition inferred by sell exits shouldn't happen due to condition above
-                    // still safe
                 }
 
                 if (IsThrottled(symbol))
@@ -221,7 +231,6 @@ namespace FuturesBot.Services
                 }
 
                 // If dust exists + there are any sell exits, cancel them to avoid locking + conflicts
-                // (rare, but prevents "dust + exit orders" causing perpetual inPosition)
                 if (hasDust && hasAnySellExit)
                 {
                     await _spot.CancelAllOpenOrdersAsync(symbol);
