@@ -654,8 +654,6 @@ namespace FuturesBot.Services
                                             symbol,
                                             newSL: targetSL,
                                             isLong: isLongPosition,
-                                            hasTp: hasTP,
-                                            expectedTp: tp,
                                             currentPos: pos,
                                             lastSlTpCheckUtc: lastSlTpCheckUtc);
 
@@ -757,8 +755,6 @@ namespace FuturesBot.Services
                                         symbol,
                                         newSL: beSl,
                                         isLong: isLongPosition,
-                                        hasTp: hasTP,
-                                        expectedTp: tp,
                                         currentPos: pos,
                                         lastSlTpCheckUtc: lastSlTpCheckUtc);
 
@@ -820,8 +816,6 @@ namespace FuturesBot.Services
                                         symbol,
                                         newSL: targetSL,
                                         isLong: isLongPosition,
-                                        hasTp: hasTP,
-                                        expectedTp: tp,
                                         currentPos: pos,
                                         lastSlTpCheckUtc: lastSlTpCheckUtc);
 
@@ -859,8 +853,6 @@ namespace FuturesBot.Services
                                         symbol,
                                         newSL: targetSL,
                                         isLong: isLongPosition,
-                                        hasTp: hasTP,
-                                        expectedTp: tp,
                                         currentPos: pos,
                                         lastSlTpCheckUtc: lastSlTpCheckUtc);
 
@@ -1187,8 +1179,6 @@ namespace FuturesBot.Services
             string symbol,
             decimal newSL,
             bool isLong,
-            bool hasTp,
-            decimal? expectedTp,
             FuturesPosition currentPos,
             DateTime lastSlTpCheckUtc)
         {
@@ -1211,37 +1201,11 @@ namespace FuturesBot.Services
                     await _notify.SendAsync($"[{symbol}] Cannot find position when updating SL.");
                     return (lastSlTpCheckUtc, false);
                 }
-                currentPos = pos;
             }
 
             string side = isLong ? "SELL" : "BUY";
 
             await _exchange.PlaceStopOnlyAsync(symbol, side, posSide, qty, newSL);
-            await Task.Delay(250);
-
-            // verify (detect lại)
-            var det = await DetectManualSlTpAsync(symbol, isLong, currentPos.EntryPrice, currentPos);
-            lastSlTpCheckUtc = DateTime.UtcNow;
-
-            if (!det.Sl.HasValue)
-            {
-                await _notify.SendAsync($"[{symbol}] SL not detected after update → rollback refused (manual).");
-                return (lastSlTpCheckUtc, false);
-            }
-
-            // Keep TP if missing
-            if (hasTp && expectedTp.HasValue)
-            {
-                if (!det.Tp.HasValue)
-                {
-                    decimal tpVal = expectedTp.Value;
-                    await _notify.SendAsync($"[{symbol}] Keep TP → re-place TP {Math.Round(tpVal, 6)}");
-
-                    var ok = await _exchange.PlaceTakeProfitAsync(symbol, posSide, qty, tpVal);
-                    if (!ok)
-                        await _notify.SendAsync($"[{symbol}] Keep TP FAILED → tp={Math.Round(tpVal, 6)}");
-                }
-            }
 
             return (lastSlTpCheckUtc, true);
         }

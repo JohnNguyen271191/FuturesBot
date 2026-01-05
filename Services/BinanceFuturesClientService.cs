@@ -566,8 +566,7 @@ namespace FuturesBot.Services
                     Price = decimal.Parse(el.GetProperty("price").GetString() ?? "0", CultureInfo.InvariantCulture),
                     OrigQty = decimal.Parse(el.GetProperty("origQty").GetString() ?? "0", CultureInfo.InvariantCulture),
                     ExecutedQty = decimal.Parse(el.GetProperty("executedQty").GetString() ?? "0", CultureInfo.InvariantCulture),
-                    StopPrice = decimal.Parse(el.GetProperty("stopPrice").GetString() ?? "0", CultureInfo.InvariantCulture),
-                    TriggerPrice = decimal.Parse(el.GetProperty("triggerPrice").GetString() ?? "0", CultureInfo.InvariantCulture)
+                    StopPrice = decimal.Parse(el.GetProperty("stopPrice").GetString() ?? "0", CultureInfo.InvariantCulture)
                 });
             }
 
@@ -609,6 +608,7 @@ namespace FuturesBot.Services
                 return false;
             }
 
+            await _slack.SendAsync($"[PlaceStopOnly RESP] {resp}");
             return true;
         }
 
@@ -778,8 +778,7 @@ namespace FuturesBot.Services
                     Price = decimal.Parse(el.GetProperty("price").GetString() ?? "0", CultureInfo.InvariantCulture),
                     OrigQty = decimal.Parse(el.GetProperty("quantity").GetString() ?? "0", CultureInfo.InvariantCulture),
                     ExecutedQty = 0m,
-                    StopPrice = decimal.Parse(el.GetProperty("triggerPrice").GetString() ?? "0", CultureInfo.InvariantCulture),
-                    TriggerPrice = decimal.Parse(el.GetProperty("triggerPrice").GetString() ?? "0", CultureInfo.InvariantCulture)
+                    StopPrice = decimal.Parse(el.GetProperty("triggerPrice").GetString() ?? "0", CultureInfo.InvariantCulture)
                 });
             }
 
