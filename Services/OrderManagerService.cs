@@ -20,6 +20,15 @@ namespace FuturesBot.Services
     /// - Trailing ATR chỉ cho phép khi đạt "AllowTrailing gate" (MinTrailStartRoi/MinTrailStartRR + fee-safe net).
     /// - "Chốt luôn nếu không ổn" dùng QuickTakeNotOk (dynamic).
     ///
+    /// PATCH (NEW - anti "ăn non bị cắn pullback"):
+    /// - Tách 2 giai đoạn rõ ràng:
+    ///   (1) PROTECT BE(+fee) sớm khi đạt ProtectAtRR (không kéo sát theo giá)
+    ///   (2) ATR TRAIL chỉ bật khi:
+    ///       + đạt HardTrailStartRR (derive từ profile + plannedRR) HOẶC
+    ///       + có ContinuationConfirmed (pullback->resume) trên MAIN TF
+    ///     => tránh case chạm +0.6R rồi pullback quét SL -> còn +0.05R
+    /// - ATR mult dynamic theo TF: TF càng nhỏ -> trail càng rộng (đỡ bị quét)
+    ///
     /// PATCH (NEW):
     /// - "Không ổn thì chốt sớm" áp dụng cả khi ĐANG THUA:
     ///   + Nếu NotOkConfirm (weakening/stall/nearBoundary/dangerCandidate/dangerConfirmed)
@@ -581,7 +590,7 @@ namespace FuturesBot.Services
                             coinInfo);
 
                         // ======================================================================
-                        // (A) QUICK TAKE IF NOT OK ✅ (dynamic) — “đã lời đủ rồi mà thấy yếu thì chốt”
+                        // (A) QUICK TAKE IF NOT OK ✅
                         // ======================================================================
                         bool quickNotOkProfitOk =
                             netPnlUsd >= estFeeUsd * profile.QuickTakeNotOkMinNetProfitVsFeeMult &&
@@ -603,25 +612,21 @@ namespace FuturesBot.Services
                         }
 
                         // ======================================================================
-                        // (A2) CUT LOSS IF NOT OK ✅ (NEW) — “đang thua mà thấy không ổn thì chốt sớm”
-                        // - Không bắt buộc dangerConfirmed (chỉ cần notOkConfirm)
-                        // - Threshold derive từ profile.DangerCutIfRRBelow & profile.MinDangerCutAbsLossRoi (dynamic, không add field mới)
+                        // (A2) CUT LOSS IF NOT OK ✅
                         // ======================================================================
                         int barsSinceAnchor = timeStopAnchorUtc.HasValue
                             ? CountClosedBarsSince(timeStopAnchorUtc.Value, c0.OpenTime, tfMinutes)
                             : 0;
 
-                        // Derive: NotOkCutLoss nhẹ hơn DangerCut (để chốt sớm), nhưng vẫn theo profile
-                        // Ví dụ DangerCut=-0.80R => NotOkCut≈-0.48R (60%)
                         decimal notOkCutNetRr = Clamp(profile.DangerCutIfRRBelow * 0.60m, -0.60m, -0.12m);
                         decimal notOkCutAbsLossRoi = Clamp(profile.MinDangerCutAbsLossRoi * 0.60m, 0.02m, profile.MinDangerCutAbsLossRoi);
 
                         bool notOkLossGate =
                             notOkConfirm &&
-                            (barsSinceAnchor >= 1) && // tránh vừa fill 1 cái đã cắt
+                            (barsSinceAnchor >= 1) &&
                             (netRr <= notOkCutNetRr) &&
                             (
-                                initialMarginUsd <= 0m // không có ROI thì chỉ dùng netRr
+                                initialMarginUsd <= 0m
                                 || absLossRoi >= notOkCutAbsLossRoi
                             );
 
@@ -640,7 +645,7 @@ namespace FuturesBot.Services
                         }
 
                         // ======================================================================
-                        // (B) MICRO PROFIT (SCALP ONLY) - giữ (đã dynamic risk theo position)
+                        // (B) MICRO PROFIT (SCALP ONLY)
                         // ======================================================================
                         if (enableMicro && hasEntry && canUseRR)
                         {
@@ -723,7 +728,7 @@ namespace FuturesBot.Services
                         }
 
                         // ======================================================================
-                        // (C) TIME-STOP (dynamic by profile)
+                        // (C) TIME-STOP
                         // ======================================================================
                         if (timeStopAnchorUtc.HasValue)
                         {
@@ -746,7 +751,7 @@ namespace FuturesBot.Services
                         }
 
                         // ======================================================================
-                        // (D) EARLY EXIT (dynamic) — dùng profile.EarlyExitBars/EarlyExitMinRR/EarlyExitMinRoi
+                        // (D) EARLY EXIT
                         // ======================================================================
                         if (!inNoKillZone
                             && timeStopAnchorUtc.HasValue
@@ -772,13 +777,26 @@ namespace FuturesBot.Services
                         }
 
                         // ======================================================================
-                        // (E) PROFIT PROTECT (BE / ATR trailing) — dynamic AllowTrailing gate ✅
+                        // (E) PROFIT PROTECT (BE / ATR trailing) — anti "ăn non bị cắn pullback"
                         // ======================================================================
                         bool roiOkForProtect = (initialMarginUsd <= 0m) || (roi >= effMinProtectRoi) || allowProtectByProgress;
 
-                        bool allowAtrTrailing =
+                        // Gate 1 (profile-based)
+                        bool allowAtrTrailingGate =
                             (initialMarginUsd <= 0m || roi >= profile.MinTrailStartRoi || netRr >= profile.MinTrailStartRR) &&
                             (netPnlUsd >= estFeeUsd * profile.TrailMinNetProfitVsFeeMult);
+
+                        // Gate 2 (hard start RR derived, no new config)
+                        // - Trend: thường cần >= ~1R mới trail
+                        // - Scalp: cho sớm hơn nhưng vẫn tránh bị quét pullback => >= ~0.8R
+                        decimal derivedHardStart = DeriveHardTrailStartRR(profile, plannedRR, isScalp);
+
+                        bool reachedHardTrailStart = netRr >= derivedHardStart;
+
+                        // Gate 3 (pattern-based continuation on MAIN TF): pullback -> resume
+                        bool continuationConfirmed = IsPullbackResumeContinuation(cachedCandles, isLongPosition, atr);
+
+                        bool allowAtrTrailingFinal = allowAtrTrailingGate && (reachedHardTrailStart || continuationConfirmed);
 
                         if (netRr >= effProtectAtRR
                             && netPnlUsd >= minProtectNetProfitUsd
@@ -786,8 +804,8 @@ namespace FuturesBot.Services
                             && hasSL
                             && IsValidStopLoss(sl, isLongPosition, entry))
                         {
-                            // Nếu chưa đủ điều kiện trailing ATR → chỉ BE(+fee) để tránh bị cắn trailing
-                            if (!allowAtrTrailing)
+                            // If not allowed to trail => BE(+fee) only
+                            if (!allowAtrTrailingFinal)
                             {
                                 decimal feeBeBuffer = GetFeeBreakevenBufferPrice(estFeeUsd, absQty, profile.FeeBreakevenBufferMult);
                                 decimal beSl = isLongPosition ? (entry + feeBeBuffer) : (entry - feeBeBuffer);
@@ -812,8 +830,8 @@ namespace FuturesBot.Services
                                         sl = beSl;
                                         CommitTrailing(symbol, beSl);
                                         await _notify.SendAsync(
-                                            $"[{symbol}] PROTECT BE(+FEE) (WAIT TRAIL): netRr={netRr:F2} roi={(initialMarginUsd > 0 ? (roi * 100m).ToString("F1") + "%" : "NA")} " +
-                                            $"net={netPnlUsd:F4} allowTrail=N (need roi>={profile.MinTrailStartRoi:P0} or rr>={profile.MinTrailStartRR:F2}) → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
+                                            $"[{symbol}] PROTECT BE(+FEE) (WAIT TRAIL): netRr={netRr:F2} hardStart={derivedHardStart:F2} cont={(continuationConfirmed ? "Y" : "N")} " +
+                                            $"net={netPnlUsd:F4} allowTrail=N → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
                                     }
                                     else sl = oldSl;
                                 }
@@ -821,10 +839,11 @@ namespace FuturesBot.Services
                                 goto AFTER_PROTECT;
                             }
 
-                            // ATR trailing allowed
+                            // ATR trailing allowed (final)
                             if (atr > 0m)
                             {
-                                decimal atrMult = isScalp ? ScalpAtrMult : TrendAtrMult;
+                                decimal atrMultBase = isScalp ? ScalpAtrMult : TrendAtrMult;
+                                decimal atrMult = GetAtrTrailMultByTfMinutes(tfMinutes, atrMultBase);
 
                                 bool movedEnoughForProfitLock =
                                     isLongPosition
@@ -835,7 +854,6 @@ namespace FuturesBot.Services
 
                                 if (!movedEnoughForProfitLock)
                                 {
-                                    // nếu chưa move đủ, đừng kéo sát -> giữ quanh BE(+fee)
                                     decimal feeBeBuffer = GetFeeBreakevenBufferPrice(estFeeUsd, absQty, profile.FeeBreakevenBufferMult);
                                     targetSL = isLongPosition ? (entry + feeBeBuffer) : (entry - feeBeBuffer);
                                 }
@@ -873,15 +891,14 @@ namespace FuturesBot.Services
                                         sl = targetSL;
                                         CommitTrailing(symbol, targetSL);
                                         await _notify.SendAsync(
-                                            $"[{symbol}] PROTECT ATR: netRr={netRr:F2} roi={(initialMarginUsd > 0 ? (roi * 100m).ToString("F1") + "%" : "NA")} " +
-                                            $"net={netPnlUsd:F4} fee~{estFeeUsd:F4} minNet={minProtectNetProfitUsd:F4} atr={atr:F4} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
+                                            $"[{symbol}] PROTECT ATR: netRr={netRr:F2} hardStart={derivedHardStart:F2} cont={(continuationConfirmed ? "Y" : "N")} " +
+                                            $"net={netPnlUsd:F4} fee~{estFeeUsd:F4} atr={atr:F4} mult={atrMult:F2} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
                                     }
                                     else sl = oldSl;
                                 }
                             }
                             else
                             {
-                                // ATR not available -> BE buffer by R + fee
                                 decimal targetSL = GetBreakEvenLockSL(entry, sl, riskPrice, isLongPosition, profile.BreakEvenBufferR);
 
                                 decimal feeBeBuffer = GetFeeBreakevenBufferPrice(estFeeUsd, absQty, profile.FeeBreakevenBufferMult);
@@ -910,8 +927,7 @@ namespace FuturesBot.Services
                                         sl = targetSL;
                                         CommitTrailing(symbol, targetSL);
                                         await _notify.SendAsync(
-                                            $"[{symbol}] PROTECT (fallback): netRr={netRr:F2} roi={(initialMarginUsd > 0 ? (roi * 100m).ToString("F1") + "%" : "NA")} " +
-                                            $"net={netPnlUsd:F4} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
+                                            $"[{symbol}] PROTECT (fallback): netRr={netRr:F2} → SL={Math.Round(sl, 6)} | mode={profile.Tag}");
                                     }
                                     else sl = oldSl;
                                 }
@@ -946,7 +962,7 @@ namespace FuturesBot.Services
                         }
 
                         // ======================================================================
-                        // (G) DANGER CUT (dynamic absLossRoi gate)
+                        // (G) DANGER CUT
                         // ======================================================================
                         if (netRr <= profile.DangerCutIfRRBelow && dangerConfirmed)
                         {
@@ -963,7 +979,7 @@ namespace FuturesBot.Services
                         }
 
                         // ======================================================================
-                        // (H) EXIT ON BOUNDARY BREAK (dynamic)
+                        // (H) EXIT ON BOUNDARY BREAK
                         // ======================================================================
                         if (dangerConfirmed
                             && netRr >= 0.10m
@@ -1723,6 +1739,81 @@ namespace FuturesBot.Services
             if (atr <= 0m || price <= 0m || sl <= 0m) return false;
             var frac = minSlDistanceAtrFrac <= 0m ? 0.35m : minSlDistanceAtrFrac;
             return Math.Abs(price - sl) < atr * frac;
+        }
+
+        // ============================================================
+        // NEW: Anti "ăn non bị cắn pullback" helpers
+        // ============================================================
+
+        private static decimal DeriveHardTrailStartRR(ModeProfile profile, decimal plannedRR, bool isScalp)
+        {
+            // Base: lấy từ profile.MinTrailStartRR nhưng nâng lên để tránh trailing quá sớm.
+            // - Trend: aim ~1.0R (hoặc 60% plannedRR nếu plannedRR nhỏ)
+            // - Scalp: aim ~0.8R (nhưng vẫn >= profile.MinTrailStartRR)
+            decimal baseMin = Math.Max(0.20m, profile.MinTrailStartRR);
+
+            decimal target = isScalp ? 0.80m : 1.00m;
+
+            if (plannedRR > 0.20m)
+            {
+                decimal byPlanned = plannedRR * 0.60m;
+                target = Math.Min(target, Clamp(byPlanned, isScalp ? 0.55m : 0.70m, 1.10m));
+            }
+
+            return Math.Max(baseMin, target);
+        }
+
+        private static decimal GetAtrTrailMultByTfMinutes(int tfMinutes, decimal baseMult)
+        {
+            // TF càng nhỏ -> noise càng lớn -> trail rộng hơn (mult tăng)
+            // 1m: x1.35, 3m: x1.20, 5m: x1.10, 15m+: x1.00
+            if (tfMinutes <= 1) return baseMult * 1.35m;
+            if (tfMinutes <= 3) return baseMult * 1.20m;
+            if (tfMinutes <= 5) return baseMult * 1.10m;
+            return baseMult;
+        }
+
+        private static bool IsPullbackResumeContinuation(IReadOnlyList<Candle>? candles, bool isLong, decimal atr)
+        {
+            if (candles == null || candles.Count < 6) return false;
+
+            // Use last 3 CLOSED candles: c2 (older), c1 (pullback), c0 (resume)
+            var c0 = candles[^2];
+            var c1 = candles[^3];
+            var c2 = candles[^4];
+
+            if (atr <= 0m)
+            {
+                // fallback simple structure check without ATR
+                if (isLong)
+                    return c1.Close < c1.Open && c0.Close > c0.Open && c0.Close > c1.High;
+                else
+                    return c1.Close > c1.Open && c0.Close < c0.Open && c0.Close < c1.Low;
+            }
+
+            // Require pullback not too deep (avoid "reversal"): pullback size <= 1.2*ATR
+            decimal pullbackRange = c1.High - c1.Low;
+            bool pullbackReasonable = pullbackRange <= atr * 1.20m;
+
+            // Resume candle strong: close breaks pullback extremum by a small margin
+            decimal margin = atr * 0.05m;
+
+            if (isLong)
+            {
+                bool pullback = c1.Close < c1.Open;          // red
+                bool resume = c0.Close > c0.Open;            // green
+                bool breakHigh = c0.Close >= c1.High + margin;
+                bool stillHigherLow = c1.Low >= c2.Low - atr * 0.30m; // avoid deep dump
+                return pullback && resume && breakHigh && pullbackReasonable && stillHigherLow;
+            }
+            else
+            {
+                bool pullback = c1.Close > c1.Open;          // green
+                bool resume = c0.Close < c0.Open;            // red
+                bool breakLow = c0.Close <= c1.Low - margin;
+                bool stillLowerHigh = c1.High <= c2.High + atr * 0.30m;
+                return pullback && resume && breakLow && pullbackReasonable && stillLowerHigh;
+            }
         }
 
         // ============================================================
