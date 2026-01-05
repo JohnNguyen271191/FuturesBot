@@ -79,7 +79,7 @@ namespace FuturesBot.Services
                     Console.WriteLine($"[ERROR] Spot worker {coin.Symbol}: {ex}");
                 }
 
-                await Task.Delay(TimeSpan.FromSeconds(2), ct);
+                await Task.Delay(TimeSpan.FromSeconds(60), ct);
             }
         }
     }
