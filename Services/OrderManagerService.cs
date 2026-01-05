@@ -1,4 +1,8 @@
+using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
 using FuturesBot.Config;
 using FuturesBot.IServices;
 using FuturesBot.Models;
@@ -15,6 +19,12 @@ namespace FuturesBot.Services
     /// - Micro profit protect chỉ chạy cho Scalp (đỡ đóng sớm trend).
     /// - Trailing ATR chỉ cho phép khi đạt "AllowTrailing gate" (MinTrailStartRoi/MinTrailStartRR + fee-safe net).
     /// - "Chốt luôn nếu không ổn" dùng QuickTakeNotOk (dynamic).
+    ///
+    /// PATCH (NEW):
+    /// - "Không ổn thì chốt sớm" áp dụng cả khi ĐANG THUA:
+    ///   + Nếu NotOkConfirm (weakening/stall/nearBoundary/dangerCandidate/dangerConfirmed)
+    ///   + Và lỗ đã vượt ngưỡng "NotOkCutLoss" (derive từ DangerCutIfRRBelow + MinDangerCutAbsLossRoi)
+    ///   => close sớm để tránh lỗ phình / bị kéo dài vô nghĩa.
     /// </summary>
     public class OrderManagerService
     {
@@ -585,6 +595,43 @@ namespace FuturesBot.Services
                             await _notify.SendAsync(
                                 $"[{symbol}] QUICK TAKE IF NOT OK: netRr={netRr:F2} roi={(initialMarginUsd > 0 ? (roi * 100m).ToString("F1") + "%" : "NA")} " +
                                 $"net={netPnlUsd:F4} fee~{estFeeUsd:F4} weak={(weakening ? "Y" : "N")} stall={(stall ? "Y" : "N")} nearB={(nearBoundary ? "Y" : "N")} danger={(dangerConfirmed ? "Y" : "N")} → close | mode={profile.Tag}");
+
+                            await _exchange.ClosePositionAsync(symbol, qty);
+                            await _exchange.CancelAllOpenOrdersAsync(symbol);
+                            ClearDangerPending(symbol);
+                            return;
+                        }
+
+                        // ======================================================================
+                        // (A2) CUT LOSS IF NOT OK ✅ (NEW) — “đang thua mà thấy không ổn thì chốt sớm”
+                        // - Không bắt buộc dangerConfirmed (chỉ cần notOkConfirm)
+                        // - Threshold derive từ profile.DangerCutIfRRBelow & profile.MinDangerCutAbsLossRoi (dynamic, không add field mới)
+                        // ======================================================================
+                        int barsSinceAnchor = timeStopAnchorUtc.HasValue
+                            ? CountClosedBarsSince(timeStopAnchorUtc.Value, c0.OpenTime, tfMinutes)
+                            : 0;
+
+                        // Derive: NotOkCutLoss nhẹ hơn DangerCut (để chốt sớm), nhưng vẫn theo profile
+                        // Ví dụ DangerCut=-0.80R => NotOkCut≈-0.48R (60%)
+                        decimal notOkCutNetRr = Clamp(profile.DangerCutIfRRBelow * 0.60m, -0.60m, -0.12m);
+                        decimal notOkCutAbsLossRoi = Clamp(profile.MinDangerCutAbsLossRoi * 0.60m, 0.02m, profile.MinDangerCutAbsLossRoi);
+
+                        bool notOkLossGate =
+                            notOkConfirm &&
+                            (barsSinceAnchor >= 1) && // tránh vừa fill 1 cái đã cắt
+                            (netRr <= notOkCutNetRr) &&
+                            (
+                                initialMarginUsd <= 0m // không có ROI thì chỉ dùng netRr
+                                || absLossRoi >= notOkCutAbsLossRoi
+                            );
+
+                        if (!inNoKillZone && notOkLossGate)
+                        {
+                            await _notify.SendAsync(
+                                $"[{symbol}] CUT LOSS IF NOT OK: netRr={netRr:F2} <= {notOkCutNetRr:F2} " +
+                                $"lossRoi={(initialMarginUsd > 0 ? (absLossRoi * 100m).ToString("F1") + "%" : "NA")} >= {(initialMarginUsd > 0 ? (notOkCutAbsLossRoi * 100m).ToString("F1") + "%" : "NA")} " +
+                                $"bars={barsSinceAnchor} weak={(weakening ? "Y" : "N")} stall={(stall ? "Y" : "N")} nearB={(nearBoundary ? "Y" : "N")} dangerCand={(dangerCandidate ? "Y" : "N")} dangerConf={(dangerConfirmed ? "Y" : "N")} " +
+                                $"net={netPnlUsd:F4} fee~{estFeeUsd:F4} → close | mode={profile.Tag}");
 
                             await _exchange.ClosePositionAsync(symbol, qty);
                             await _exchange.CancelAllOpenOrdersAsync(symbol);
