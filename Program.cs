@@ -40,7 +40,7 @@ var host = Host.CreateDefaultBuilder(args)
         services.AddSingleton<ISpotExchangeService, BinanceSpotClientService>();
         services.AddScoped<SpotOrderManagerService>();
         // Spot Strategy V2 (3 entry types, rule rõ ràng)
-        services.AddScoped<ISpotTradingStrategy, SpotStrategyV2>();
+        services.AddScoped<ISpotTradingStrategy, SpotStrategyV2Dynamic>();
 
         // Hosted services (run in parallel)
         services.AddHostedService<FuturesBotHostedService>();

@@ -15,14 +15,9 @@ namespace FuturesBot.Strategies
     /// - Long = Entry
     /// - Short = Exit suggestion (OMS may ignore if not in position)
     /// </summary>
-    public sealed class SpotStrategyV2Dynamic : ISpotTradingStrategy
+    public sealed class SpotStrategyV2Dynamic(IndicatorService indicators) : ISpotTradingStrategy
     {
-        private readonly IndicatorService _indicators;
-
-        public SpotStrategyV2Dynamic(IndicatorService indicators)
-        {
-            _indicators = indicators;
-        }
+        private readonly IndicatorService _indicators = indicators;
 
         // Base reference TF = 5m (từ bản cũ)
         private const int BaseTfMin = 5;
