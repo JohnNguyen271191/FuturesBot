@@ -35,18 +35,6 @@ namespace FuturesBot.Services
 
             await _notify.SendAsync($"[SPOT] HostedService started. coins={coins.Length}, quote={_config.Spot.QuoteAsset}, cap={_config.Spot.WalletCapUsd}, paper={_config.PaperMode}");
 
-            // Resume holdings (prevent accidental re-entry after restart)
-            try
-            {
-                using var scope0 = _sp.CreateScope();
-                var oms0 = scope0.ServiceProvider.GetRequiredService<SpotOrderManagerService>();
-                await oms0.RecoverAsync(coins, stoppingToken);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[WARN] Spot RecoverAsync failed: {ex}");
-            }
-
             var workers = coins.Select(c => RunSymbolAsync(c, stoppingToken)).ToArray();
             await Task.WhenAll(workers);
         }
@@ -72,7 +60,8 @@ namespace FuturesBot.Services
                     }
 
                     var signal = strategy.GenerateSignal(candlesMain, candlesTrend, coin);
-                    await oms.TickAsync(signal, coin, ct);
+                    await oms.TickAsync(signal, coin, candlesMain, ct);
+
                 }
                 catch (Exception ex)
                 {

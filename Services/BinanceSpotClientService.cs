@@ -530,5 +530,64 @@ namespace FuturesBot.Services
                 return Array.Empty<SpotMyTrade>();
             }
         }
+
+        public async Task<SpotOrderResult> PlaceLimitSellAsync(string symbol, decimal quantity, decimal price)
+        {
+            if (_config.PaperMode)
+            {
+                return new SpotOrderResult
+                {
+                    OrderId = "PAPER_LIMIT_BUY",
+                    ExecutedQty = 0m,
+                    CummulativeQuoteQty = 0m,
+                    RawStatus = "PAPER"
+                };
+            }
+
+            var rules = await _rulesService.GetRulesAsync(symbol);
+
+            // Round price/qty to exchange rules
+            var roundedPrice = RoundDown(price, rules.PriceStep);
+            var (roundedQty, _, _) = await RoundAndValidateQtyAsync(symbol, quantity, roundedPrice);
+
+            if (roundedQty <= 0)
+            {
+                await _slack.SendAsync($"[SPOT] Reject order {symbol} qty too small after rounding (raw={quantity}).");
+                return new SpotOrderResult { OrderId = "REJECTED", ExecutedQty = 0m, CummulativeQuoteQty = 0m, RawStatus = "REJECTED" };
+            }
+
+            var parameters = new Dictionary<string, string>
+            {
+                ["symbol"] = symbol,
+                ["side"] = "SELL",
+                ["type"] = "LIMIT",
+                ["timeInForce"] = "GTC",
+                ["quantity"] = roundedQty.ToString(CultureInfo.InvariantCulture),
+                ["price"] = roundedPrice.ToString(CultureInfo.InvariantCulture),
+                ["recvWindow"] = "5000",
+            };
+
+            var ts = await _time.GetTimestampMsAsync();
+            parameters["timestamp"] = ts.ToString(CultureInfo.InvariantCulture);
+
+            var json = await SendSignedAsync(HttpMethod.Post, _config.SpotUrls.OrderUrl, parameters);
+
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            return new SpotOrderResult
+            {
+                OrderId = root.TryGetProperty("orderId", out var oid)
+                    ? oid.GetInt64().ToString(CultureInfo.InvariantCulture)
+                    : "UNKNOWN",
+                ExecutedQty = root.TryGetProperty("executedQty", out var eq)
+                    ? decimal.Parse(eq.GetString() ?? "0", CultureInfo.InvariantCulture)
+                    : 0m,
+                CummulativeQuoteQty = root.TryGetProperty("cummulativeQuoteQty", out var cq)
+                    ? decimal.Parse(cq.GetString() ?? "0", CultureInfo.InvariantCulture)
+                    : 0m,
+                RawStatus = root.TryGetProperty("status", out var st) ? (st.GetString() ?? "") : ""
+            };
+        }
     }
 }

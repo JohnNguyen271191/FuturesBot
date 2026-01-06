@@ -670,9 +670,6 @@ namespace FuturesBot.Services
             decimal ema89,
             bool isScalpMode)
         {
-            if (!EnableAutoEntryOffset)
-                return isScalpMode ? AutoScalpOffset_MidGap : AutoTrendOffset_MidGap;
-
             if (price <= 0 || ema34 <= 0 || ema89 <= 0)
                 return isScalpMode ? AutoScalpOffset_MidGap : AutoTrendOffset_MidGap;
 

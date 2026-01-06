@@ -47,5 +47,7 @@ namespace FuturesBot.IServices
         /// Used by Spot daily PnL report.
         /// </summary>
         Task<IReadOnlyList<SpotMyTrade>> GetMyTradesAsync(string symbol, DateTime fromUtc, DateTime toUtc, int limit = 1000);
+
+        Task<SpotOrderResult> PlaceLimitSellAsync(string symbol, decimal quantity, decimal price);
     }
 }
