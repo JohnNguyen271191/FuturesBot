@@ -12,9 +12,14 @@ namespace FuturesBot.Services
 {
     /// <summary>
     /// Spot OMS - NO OCO + Monitor exits (maker-first)
-    /// - Entry: maker BUY limit
-    /// - Exit: maker SELL limit, reprice TTL
-    /// - Monitor: EMA34/89 + RSI + ATR trail
+    /// - Entry: maker BUY limit, TTL reprice (cancel & wait next signal)
+    /// - Exit: maker SELL limit, TTL reprice
+    /// - Monitor: EMA34/89 + RSI + ATR trailing (ALL dynamic by timeframe)
+    ///
+    /// IMPORTANT:
+    /// - Spot has NO short. SignalType.Short is treated as EXIT SUGGESTION only.
+    /// - When placing SELL, ALWAYS use FREE quantity (avoid Free+Locked reject).
+    /// - Partial fills (dust) are handled: if baseQtyTotal > 0 => treat as inPosition.
     /// </summary>
     public sealed class SpotOrderManagerService
     {
@@ -23,9 +28,9 @@ namespace FuturesBot.Services
         private readonly BotConfig _config;
         private readonly IndicatorService _indicators;
 
-        private readonly ConcurrentDictionary<string, DateTime> _lastActionUtc = new();
-        private readonly ConcurrentDictionary<string, DateTime> _lastWhyLogUtc = new();
-        private readonly ConcurrentDictionary<string, int> _entryRepriceCount = new();
+        private readonly ConcurrentDictionary<string, DateTime> _lastActionUtc = new(StringComparer.OrdinalIgnoreCase);
+        private readonly ConcurrentDictionary<string, DateTime> _lastWhyLogUtc = new(StringComparer.OrdinalIgnoreCase);
+        private readonly ConcurrentDictionary<string, int> _entryRepriceCount = new(StringComparer.OrdinalIgnoreCase);
 
         // ===== Exit monitor state =====
         private sealed class PosState
@@ -39,23 +44,24 @@ namespace FuturesBot.Services
 
         private readonly ConcurrentDictionary<string, PosState> _state = new(StringComparer.OrdinalIgnoreCase);
 
-        // ===== Tunables (safe defaults) =====
-        private const int BarsForMonitorMin = 120;
+        // ===== Base tunables (for 5m) =====
+        private const int BaseTfMin = 5;
 
-        // maker placement offsets
-        private const decimal MakerSellOffset = 0.0006m;   // +0.06% from last price
-        private const decimal MakerBuyOffset = 0.0006m;    // use config EntryMakerOffsetPercent for buy
+        private const int BarsForMonitorMinBase = 120;
 
-        // trailing logic (ATR-based)
-        private const decimal AtrTrailMult = 1.2m;         // trail = peak - ATR*mult
-        private const decimal AtrSoftStopMult = 1.6m;      // soft stop from anchor
+        // maker placement offsets (base)
+        private const decimal MakerSellOffsetBase = 0.0006m; // +0.06% from last price (maker-first)
 
-        // RSI/EMA exit
-        private const decimal ExitRsiWeak = 43m;
-        private const decimal EmaBreakTol = 0.0006m;
+        // trailing logic (ATR-based) base
+        private const decimal AtrTrailMultBase = 1.20m;      // trail = peak - ATR*mult
+        private const decimal AtrSoftStopMultBase = 1.60m;   // soft stop from anchor
+
+        // RSI/EMA exit base
+        private const decimal ExitRsiWeakBase = 43m;
+        private const decimal EmaBreakTolBase = 0.0006m;
 
         // pending TTL seconds (reuse config EntryRepriceSeconds)
-        private const int MaxEntryRepriceBeforeMarketFallback = 2; // if you want maker-only, set high
+        private const int MaxEntryRepriceBeforeStopBase = 2; // maker-only: keep low; can scale dynamically
 
         public SpotOrderManagerService(
             ISpotExchangeService spot,
@@ -84,8 +90,24 @@ namespace FuturesBot.Services
 
             var baseAsset = GuessBaseAsset(symbol);
 
+            var tfMin = ParseTimeFrameMinutes(coinInfo.MainTimeFrame);
+            var factorTf = GetFactorTf(tfMin);
+
+            // ===== Dynamic tunables =====
+            int barsForMonitorMin = ClampInt((int)Math.Round(BarsForMonitorMinBase * factorTf), 80, 320);
+
+            decimal makerSellOffset = ClampDec(MakerSellOffsetBase * factorTf, 0.00020m, 0.00180m);
+
+            decimal atrTrailMult = ClampDec(AtrTrailMultBase + (factorTf - 1m) * 0.10m, 1.05m, 1.60m);
+            decimal atrSoftStopMult = ClampDec(AtrSoftStopMultBase + (factorTf - 1m) * 0.12m, 1.20m, 2.20m);
+
+            decimal exitRsiWeak = ClampDec(ExitRsiWeakBase + (factorTf - 1m) * 1.0m, 38m, 55m);
+            decimal emaBreakTol = ClampDec(EmaBreakTolBase * factorTf, 0.00025m, 0.00150m);
+
+            int maxEntryRepriceBeforeStop = ClampInt((int)Math.Round(MaxEntryRepriceBeforeStopBase + (factorTf - 1m) * 1.0m), 1, 6);
+
             var price = await _spot.GetLastPriceAsync(symbol);
-            if (price <= 0) return;
+            if (price <= 0m) return;
 
             var quoteHold = await _spot.GetHoldingAsync(quoteAsset);
             var baseHold = await _spot.GetHoldingAsync(baseAsset);
@@ -93,8 +115,10 @@ namespace FuturesBot.Services
             var baseQtyTotal = baseHold.Free + baseHold.Locked;
             var holdingNotional = baseQtyTotal * price;
 
+            // IMPORTANT: handle partial fills (dust)
+            // - If you have ANY base qty, treat as inPosition so exit logic can clean up.
             var minHolding = _config.SpotOms.MinHoldingNotionalUsd;
-            bool inPosition = holdingNotional >= minHolding;
+            bool inPosition = holdingNotional >= minHolding || baseQtyTotal > 0m;
 
             var openOrders = await _spot.GetOpenOrdersAsync(symbol) ?? Array.Empty<OpenOrderInfo>();
 
@@ -109,7 +133,22 @@ namespace FuturesBot.Services
             // ===== 1) If inPosition -> monitor exits (ignore entry signals) =====
             if (inPosition)
             {
-                await MonitorExitAsync(symbol, coinInfo, candlesMain, price, baseHold, pendingSell, signal, ct);
+                await MonitorExitAsync(
+                    symbol,
+                    coinInfo,
+                    candlesMain,
+                    price,
+                    baseHold,
+                    pendingSell,
+                    signal,
+                    barsForMonitorMin,
+                    atrTrailMult,
+                    atrSoftStopMult,
+                    exitRsiWeak,
+                    emaBreakTol,
+                    makerSellOffset,
+                    ct);
+
                 return;
             }
 
@@ -119,11 +158,11 @@ namespace FuturesBot.Services
             // ===== 2) If pending buy exists -> manage TTL =====
             if (pendingBuy != null)
             {
-                await HandlePendingBuyAsync(symbol, quoteAsset, pendingBuy, quoteHold.Free, price, ct);
+                await HandlePendingBuyAsync(symbol, pendingBuy, ct, maxEntryRepriceBeforeStop);
                 return;
             }
 
-            // ignore SHORT when no position
+            // ignore SHORT when no position (spot has no short)
             if (signal != null && signal.Type == SignalType.Short)
                 return;
 
@@ -166,6 +205,7 @@ namespace FuturesBot.Services
                 return;
             }
 
+            // maker buy offset comes from config (already)
             var entryPrice = price * (1m - _config.SpotOms.EntryMakerOffsetPercent);
             var rawQty = usdToUse / entryPrice;
 
@@ -197,6 +237,12 @@ namespace FuturesBot.Services
             SpotHolding baseHold,
             OpenOrderInfo? pendingSell,
             TradeSignal? signal,
+            int barsForMonitorMin,
+            decimal atrTrailMult,
+            decimal atrSoftStopMult,
+            decimal exitRsiWeak,
+            decimal emaBreakTol,
+            decimal makerSellOffset,
             CancellationToken ct)
         {
             ct.ThrowIfCancellationRequested();
@@ -204,11 +250,13 @@ namespace FuturesBot.Services
             var qtyTotal = baseHold.Free + baseHold.Locked;
             if (qtyTotal <= 0m) return;
 
-            if (candlesMain == null || candlesMain.Count < BarsForMonitorMin)
+            // IMPORTANT: sell MUST use FREE qty to avoid insufficient balance / locked rejection
+            var freeQty = baseHold.Free;
+
+            if (candlesMain == null || candlesMain.Count < barsForMonitorMin)
             {
-                // if no candles, still can exit on strategy Short
-                if (signal != null && signal.Type == SignalType.Short)
-                    await EnsureMakerSellAsync(symbol, qtyTotal, lastPrice, pendingSell, "SIG_SHORT(noCandles)", ct);
+                if (signal != null && signal.Type == SignalType.Short && freeQty > 0m)
+                    await EnsureMakerSellAsync(symbol, freeQty, lastPrice, pendingSell, makerSellOffset, "SIG_SHORT(noCandles)", ct);
 
                 return;
             }
@@ -236,7 +284,7 @@ namespace FuturesBot.Services
                 st.Active = true;
                 st.Anchor = lastPrice; // best-effort
                 st.Peak = lastPrice;
-                st.Trail = atr > 0 ? (st.Peak - atr * AtrTrailMult) : lastPrice * (1m - 0.0075m);
+                st.Trail = atr > 0m ? (st.Peak - atr * atrTrailMult) : lastPrice * (1m - 0.0075m);
                 st.SellRepriceCount = 0;
 
                 await _notify.SendAsync($"[SPOT][MON] attach {symbol} qty={qtyTotal:0.########} anchor≈{st.Anchor:0.##}");
@@ -247,23 +295,23 @@ namespace FuturesBot.Services
             // ATR trail (dynamic)
             if (atr > 0m)
             {
-                var newTrail = st.Peak - atr * AtrTrailMult;
+                var newTrail = st.Peak - atr * atrTrailMult;
                 if (newTrail > st.Trail) st.Trail = newTrail;
             }
 
-            // exit rules:
+            // exit rules
             bool exitBySignal = signal != null && signal.Type == SignalType.Short;
 
-            bool closeBelow34 = (e34 > 0m) && (c0.Close < e34 * (1m - EmaBreakTol));
-            bool closeBelow89 = (e89 > 0m) && (c0.Close < e89 * (1m - EmaBreakTol));
-            bool rsiWeak = r <= ExitRsiWeak;
+            bool closeBelow34 = (e34 > 0m) && (c0.Close < e34 * (1m - emaBreakTol));
+            bool closeBelow89 = (e89 > 0m) && (c0.Close < e89 * (1m - emaBreakTol));
+            bool rsiWeak = r <= exitRsiWeak;
 
             bool exitByEmaRsi = (closeBelow34 && rsiWeak) || closeBelow89;
             bool exitByTrail = lastPrice <= st.Trail;
 
             bool softStop = false;
             if (atr > 0m && st.Anchor > 0m)
-                softStop = lastPrice <= (st.Anchor - atr * AtrSoftStopMult);
+                softStop = lastPrice <= (st.Anchor - atr * atrSoftStopMult);
 
             bool shouldExit = exitBySignal || exitByEmaRsi || exitByTrail || softStop;
 
@@ -272,17 +320,35 @@ namespace FuturesBot.Services
 
             var reason = BuildExitReason(exitBySignal, exitByEmaRsi, exitByTrail, softStop, r, e34, e89, st.Trail, signal);
 
-            await EnsureMakerSellAsync(symbol, qtyTotal, lastPrice, pendingSell, reason, ct);
+            if (freeQty <= 0m)
+            {
+                // If everything is locked by an existing sell, just keep repricing that sell.
+                if (pendingSell != null)
+                    await HandlePendingSellAsync(symbol, lastPrice, pendingSell, makerSellOffset, reason, ct);
+                else
+                    LogWhy(symbol, $"Exit wanted but freeQty=0 (locked={baseHold.Locked:0.########}) reason={reason}");
+
+                return;
+            }
+
+            await EnsureMakerSellAsync(symbol, freeQty, lastPrice, pendingSell, makerSellOffset, reason, ct);
         }
 
-        private async Task EnsureMakerSellAsync(string symbol, decimal qtyTotal, decimal lastPrice, OpenOrderInfo? pendingSell, string reason, CancellationToken ct)
+        private async Task EnsureMakerSellAsync(
+            string symbol,
+            decimal freeQty,
+            decimal lastPrice,
+            OpenOrderInfo? pendingSell,
+            decimal makerSellOffset,
+            string reason,
+            CancellationToken ct)
         {
             ct.ThrowIfCancellationRequested();
 
             // if pending sell exists -> TTL reprice
             if (pendingSell != null)
             {
-                await HandlePendingSellAsync(symbol, qtyTotal, lastPrice, pendingSell, reason, ct);
+                await HandlePendingSellAsync(symbol, lastPrice, pendingSell, makerSellOffset, reason, ct);
                 return;
             }
 
@@ -292,20 +358,28 @@ namespace FuturesBot.Services
                 return;
             }
 
-            var sellPrice = lastPrice * (1m + MakerSellOffset);
+            if (freeQty <= 0m) return;
 
-            var sell = await _spot.PlaceLimitSellAsync(symbol, qtyTotal, sellPrice);
+            var sellPrice = lastPrice * (1m + makerSellOffset);
+
+            var sell = await _spot.PlaceLimitSellAsync(symbol, freeQty, sellPrice);
             if (sell.OrderId == "REJECTED" || sell.OrderId == "UNKNOWN")
             {
-                LogWhy(symbol, $"Exit SELL REJECTED: qty={qtyTotal:0.########} price={sellPrice:0.##} reason={reason}");
+                LogWhy(symbol, $"Exit SELL REJECTED: qty={freeQty:0.########} price={sellPrice:0.##} reason={reason}");
                 return;
             }
 
-            await _notify.SendAsync($"[SPOT][EXIT] Maker SELL {symbol}: qty={qtyTotal:0.########} price={sellPrice:0.##} reason={reason}");
+            await _notify.SendAsync($"[SPOT][EXIT] Maker SELL {symbol}: qty={freeQty:0.########} price={sellPrice:0.##} reason={reason}");
             MarkAction(symbol);
         }
 
-        private async Task HandlePendingSellAsync(string symbol, decimal qtyTotal, decimal lastPrice, OpenOrderInfo pendingSell, string reason, CancellationToken ct)
+        private async Task HandlePendingSellAsync(
+            string symbol,
+            decimal lastPrice,
+            OpenOrderInfo pendingSell,
+            decimal makerSellOffset,
+            string reason,
+            CancellationToken ct)
         {
             ct.ThrowIfCancellationRequested();
 
@@ -333,20 +407,31 @@ namespace FuturesBot.Services
                 return;
             }
 
-            var sellPrice = lastPrice * (1m + MakerSellOffset);
-            var sell = await _spot.PlaceLimitSellAsync(symbol, qtyTotal, sellPrice);
+            // best-effort: use lastPrice offset again
+            var sellPrice = lastPrice * (1m + makerSellOffset);
 
-            if (sell.OrderId == "REJECTED" || sell.OrderId == "UNKNOWN")
+            // after cancel, balance should be free again, but we don't fetch holding here (keep light)
+            // place sell with "pendingSell.Quantity" if available else keep same notional via original qty
+            var qty = pendingSell.Quantity > 0m ? pendingSell.Quantity : 0m;
+            if (qty <= 0m)
             {
-                LogWhy(symbol, $"Reprice SELL REJECTED: qty={qtyTotal:0.########} price={sellPrice:0.##} reason={reason}");
+                LogWhy(symbol, $"Reprice SELL skipped: qty<=0 reason={reason}");
                 return;
             }
 
-            await _notify.SendAsync($"[SPOT][EXIT] Reprice maker SELL {symbol}: qty={qtyTotal:0.########} price={sellPrice:0.##} age={ageSec}s count={st.SellRepriceCount} reason={reason}");
+            var sell = await _spot.PlaceLimitSellAsync(symbol, qty, sellPrice);
+
+            if (sell.OrderId == "REJECTED" || sell.OrderId == "UNKNOWN")
+            {
+                LogWhy(symbol, $"Reprice SELL REJECTED: qty={qty:0.########} price={sellPrice:0.##} reason={reason}");
+                return;
+            }
+
+            await _notify.SendAsync($"[SPOT][EXIT] Reprice maker SELL {symbol}: qty={qty:0.########} price={sellPrice:0.##} age={ageSec}s count={st.SellRepriceCount} reason={reason}");
             MarkAction(symbol);
         }
 
-        private async Task HandlePendingBuyAsync(string symbol, string quoteAsset, OpenOrderInfo pendingBuy, decimal quoteFree, decimal lastPrice, CancellationToken ct)
+        private async Task HandlePendingBuyAsync(string symbol, OpenOrderInfo pendingBuy, CancellationToken ct, int maxEntryRepriceBeforeStop)
         {
             ct.ThrowIfCancellationRequested();
 
@@ -366,11 +451,10 @@ namespace FuturesBot.Services
 
             var count = _entryRepriceCount.AddOrUpdate(symbol, 1, (_, c) => c + 1);
 
-            // optional market fallback (mày muốn maker-only thì set MaxEntryRepriceBeforeMarketFallback rất lớn hoặc bỏ đoạn này)
-            if (count > MaxEntryRepriceBeforeMarketFallback)
+            // maker-only: cancel & wait next signal (avoid spamming reprices without cached budget)
+            if (count > maxEntryRepriceBeforeStop)
             {
-                // can't know budget here without cached, so just stop repricing to avoid spam
-                await _notify.SendAsync($"[SPOT][OMS] {symbol} pending BUY stale canceled (no cached budget). count={count}");
+                await _notify.SendAsync($"[SPOT][OMS] {symbol} pending BUY stale canceled, stop repricing. age={ageSec}s count={count}");
                 _entryRepriceCount.TryRemove(symbol, out _);
                 return;
             }
@@ -469,5 +553,39 @@ namespace FuturesBot.Services
             }
             return symbol;
         }
+
+        private static int ParseTimeFrameMinutes(string? tf)
+        {
+            if (string.IsNullOrWhiteSpace(tf)) return BaseTfMin;
+            tf = tf.Trim().ToLowerInvariant();
+
+            if (tf.EndsWith("m") && int.TryParse(tf[..^1], out var m)) return Math.Max(1, m);
+            if (tf.EndsWith("h") && int.TryParse(tf[..^1], out var h)) return Math.Max(1, h * 60);
+
+            return BaseTfMin;
+        }
+
+        /// <summary>
+        /// factorTF: sqrt(tfMin / BaseTfMin) clamped
+        /// - 1m  => ~0.447 -> clamp to >=0.75
+        /// - 5m  => 1.0
+        /// - 15m => ~1.732
+        /// - 1h  => ~3.464 -> clamp to <=2.50
+        /// </summary>
+        private static decimal GetFactorTf(int tfMin)
+        {
+            if (tfMin <= 0) tfMin = BaseTfMin;
+            var raw = SqrtDec((decimal)tfMin / BaseTfMin);
+            return ClampDec(raw, 0.75m, 2.50m);
+        }
+
+        private static decimal SqrtDec(decimal x)
+        {
+            if (x <= 0m) return 0m;
+            return (decimal)Math.Sqrt((double)x);
+        }
+
+        private static int ClampInt(int v, int min, int max) => Math.Min(max, Math.Max(min, v));
+        private static decimal ClampDec(decimal v, decimal min, decimal max) => Math.Min(max, Math.Max(min, v));
     }
 }
