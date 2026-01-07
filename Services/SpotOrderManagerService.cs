@@ -412,12 +412,12 @@ namespace FuturesBot.Services
 
             // after cancel, balance should be free again, but we don't fetch holding here (keep light)
             // place sell with "pendingSell.Quantity" if available else keep same notional via original qty
-            var qty = pendingSell.Quantity > 0m ? pendingSell.Quantity : 0m;
-            if (qty <= 0m)
-            {
-                LogWhy(symbol, $"Reprice SELL skipped: qty<=0 reason={reason}");
-                return;
-            }
+            var qty = Math.Max(0m, pendingSell.OrigQty - pendingSell.ExecutedQty);
+if (qty <= 0m)
+{
+    LogWhy(symbol, $"Reprice SELL skipped: remainQty<=0 reason={reason}");
+    return;
+}
 
             var sell = await _spot.PlaceLimitSellAsync(symbol, qty, sellPrice);
 
