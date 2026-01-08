@@ -20,16 +20,12 @@ var host = Host.CreateDefaultBuilder(args)
         if (string.IsNullOrWhiteSpace(config.Urls.BaseUrl) && !string.IsNullOrWhiteSpace(config.FuturesUrls.BaseUrl))
             config.Urls = config.FuturesUrls;
 
-        // Back-compat: legacy SpotOms is still used by SpotOrderManagerService and Spot client.
-        // Prefer new schema Spot.Oms.
-        if (config.Spot != null && config.Spot.Oms != null)
-            config.SpotOms = config.Spot.Oms;
-
         services.AddSingleton(config);
 
         // shared
         services.AddSingleton<SlackNotifierService>();
         services.AddSingleton<IndicatorService>();
+        services.AddSingleton<IModeProfileProvider, ModeProfileProvider>();
 
         // Futures services
         services.AddSingleton<IFuturesExchangeService, BinanceFuturesClientService>();
@@ -45,7 +41,7 @@ var host = Host.CreateDefaultBuilder(args)
         services.AddSingleton<ISpotExchangeService, BinanceSpotClientService>();
         services.AddScoped<SpotOrderManagerService>();
         // Spot Strategy V2 (3 entry types, rule rõ ràng)
-        services.AddScoped<ISpotTradingStrategy, SpotStrategy>();
+        services.AddScoped<ISpotTradingStrategy, SpotStrategyV2Dynamic>();
 
         // Hosted services (run in parallel)
         services.AddHostedService<FuturesBotHostedService>();

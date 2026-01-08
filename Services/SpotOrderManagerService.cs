@@ -27,21 +27,6 @@ namespace FuturesBot.Services
         private readonly ConcurrentDictionary<string, DateTime> _lastWhyLogUtc = new();
         private readonly ConcurrentDictionary<string, int> _entryRepriceCount = new();
 
-        // Cache "entry intent" so maker-chasing (cancel/replace) can continue without needing the strategy
-        // to re-signal every time.
-        private sealed class EntryIntent
-        {
-            public string QuoteAsset = "";
-            public decimal UsdToUse;
-            public decimal RawQty;
-            public decimal FirstPrice;
-            public decimal LastPrice;
-            public DateTime CreatedUtc;
-            public string Reason = "";
-        }
-
-        private readonly ConcurrentDictionary<string, EntryIntent> _entryIntent = new(StringComparer.OrdinalIgnoreCase);
-
         // ===== Exit monitor state =====
         private sealed class PosState
         {
@@ -57,12 +42,9 @@ namespace FuturesBot.Services
         // ===== Tunables (safe defaults) =====
         private const int BarsForMonitorMin = 120;
 
-        // maker placement offsets (fallback if config is missing)
-        private const decimal MakerSellOffsetFallback = 0.0006m;   // +0.06% from last price
-        // resolved from config (dynamic), fallback if not set
-        private decimal MakerSellOffset => (_config?.SpotOms?.EntryMakerOffsetPercent > 0m
-            ? _config.SpotOms.EntryMakerOffsetPercent
-            : MakerSellOffsetFallback);
+        // maker placement offsets
+        private const decimal MakerSellOffset = 0.0006m;   // +0.06% from last price
+        private const decimal MakerBuyOffset = 0.0006m;    // use config EntryMakerOffsetPercent for buy
 
         // trailing logic (ATR-based)
         private const decimal AtrTrailMult = 1.2m;         // trail = peak - ATR*mult
@@ -73,7 +55,7 @@ namespace FuturesBot.Services
         private const decimal EmaBreakTol = 0.0006m;
 
         // pending TTL seconds (reuse config EntryRepriceSeconds)
-        // NOTE: Spot is maker-only by design. No market fallback.
+        private const int MaxEntryRepriceBeforeMarketFallback = 2; // if you want maker-only, set high
 
         public SpotOrderManagerService(
             ISpotExchangeService spot,
@@ -96,11 +78,9 @@ namespace FuturesBot.Services
 
             var symbol = coinInfo.Symbol;
 
-            var omsCfg = _config.Spot?.Oms ?? _config.SpotOms;
-
-            var quoteAsset = (_config.Spot != null && !string.IsNullOrWhiteSpace(_config.Spot.QuoteAsset))
-    ? _config.Spot.QuoteAsset
-    : _config.SpotQuoteAsset;
+            var quoteAsset = !string.IsNullOrWhiteSpace(_config.Spot.QuoteAsset)
+                ? _config.Spot.QuoteAsset
+                : _config.SpotQuoteAsset;
 
             var baseAsset = GuessBaseAsset(symbol);
 
@@ -113,26 +93,22 @@ namespace FuturesBot.Services
             var baseQtyTotal = baseHold.Free + baseHold.Locked;
             var holdingNotional = baseQtyTotal * price;
 
-            var minHolding = omsCfg.MinHoldingNotionalUsd;
+            var minHolding = _config.SpotOms.MinHoldingNotionalUsd;
             bool inPosition = holdingNotional >= minHolding;
 
             var openOrders = await _spot.GetOpenOrdersAsync(symbol) ?? Array.Empty<OpenOrderInfo>();
 
             var pendingBuy = openOrders.FirstOrDefault(o =>
                 o.Side.Equals("BUY", StringComparison.OrdinalIgnoreCase) &&
-                (o.Type.Equals("LIMIT", StringComparison.OrdinalIgnoreCase) || o.Type.Equals("LIMIT_MAKER", StringComparison.OrdinalIgnoreCase)));
+                o.Type.Equals("LIMIT", StringComparison.OrdinalIgnoreCase));
 
             var pendingSell = openOrders.FirstOrDefault(o =>
                 o.Side.Equals("SELL", StringComparison.OrdinalIgnoreCase) &&
-                (o.Type.Equals("LIMIT", StringComparison.OrdinalIgnoreCase) || o.Type.Equals("LIMIT_MAKER", StringComparison.OrdinalIgnoreCase)));
+                o.Type.Equals("LIMIT", StringComparison.OrdinalIgnoreCase));
 
             // ===== 1) If inPosition -> monitor exits (ignore entry signals) =====
             if (inPosition)
             {
-                // clear cached intent once we are in position
-                _entryIntent.TryRemove(symbol, out _);
-                _entryRepriceCount.TryRemove(symbol, out _);
-
                 await MonitorExitAsync(symbol, coinInfo, candlesMain, price, baseHold, pendingSell, signal, ct);
                 return;
             }
@@ -143,7 +119,7 @@ namespace FuturesBot.Services
             // ===== 2) If pending buy exists -> manage TTL =====
             if (pendingBuy != null)
             {
-                await HandlePendingBuyAsync(symbol, quoteAsset, pendingBuy, quoteHold.Free, price, omsCfg, ct);
+                await HandlePendingBuyAsync(symbol, quoteAsset, pendingBuy, quoteHold.Free, price, ct);
                 return;
             }
 
@@ -175,7 +151,7 @@ namespace FuturesBot.Services
                 : (_config.Spot.DefaultRiskPerTradePercent > 0 ? _config.Spot.DefaultRiskPerTradePercent : 10m);
 
             var usdToUse = Math.Max(0m, coinCap * (riskPct / 100m));
-            usdToUse *= (1m - omsCfg.EntryQuoteBufferPercent);
+            usdToUse *= (1m - _config.SpotOms.EntryQuoteBufferPercent);
             usdToUse = Math.Floor(usdToUse * 100m) / 100m;
 
             if (usdToUse <= 0m)
@@ -184,14 +160,13 @@ namespace FuturesBot.Services
                 return;
             }
 
-            if (usdToUse < omsCfg.MinEntryNotionalUsd)
+            if (usdToUse < _config.SpotOms.MinEntryNotionalUsd)
             {
-                await _notify.SendAsync($"[SPOT] Skip BUY {symbol}: budget {usdToUse:0.##} < minEntry {omsCfg.MinEntryNotionalUsd:0.##}");
+                await _notify.SendAsync($"[SPOT] Skip BUY {symbol}: budget {usdToUse:0.##} < minEntry {_config.SpotOms.MinEntryNotionalUsd:0.##}");
                 return;
             }
 
-            var baseOffset = omsCfg.EntryMakerOffsetPercent > 0 ? omsCfg.EntryMakerOffsetPercent : 0.0003m;
-            var entryPrice = price * (1m - baseOffset);
+            var entryPrice = price * (1m - _config.SpotOms.EntryMakerOffsetPercent);
             var rawQty = usdToUse / entryPrice;
 
             if (rawQty <= 0m)
@@ -200,49 +175,15 @@ namespace FuturesBot.Services
                 return;
             }
 
-            // cache intent for maker-chasing
-            _entryIntent[symbol] = new EntryIntent
-            {
-                QuoteAsset = quoteAsset,
-                UsdToUse = usdToUse,
-                RawQty = rawQty,
-                FirstPrice = entryPrice,
-                LastPrice = entryPrice,
-                CreatedUtc = DateTime.UtcNow,
-                Reason = signal.Reason ?? ""
-            };
-
-            var buy = await PlaceMakerBuyWithRetriesAsync(symbol, rawQty, entryPrice, omsCfg, ct);
+            var buy = await _spot.PlaceLimitBuyAsync(symbol, rawQty, entryPrice);
             if (buy.OrderId == "REJECTED" || buy.OrderId == "UNKNOWN")
             {
                 LogWhy(symbol, $"Entry REJECTED: rawQty={rawQty:0.########} price={entryPrice:0.##} spend≈{usdToUse:0.##} (reason={signal.Reason})");
-                _entryIntent.TryRemove(symbol, out _);
                 return;
             }
 
             await _notify.SendAsync($"[SPOT][OMS] Maker BUY {symbol}: spend≈{usdToUse:0.##} {quoteAsset}, price={entryPrice:0.##}, qty≈{rawQty:0.########}, id={buy.OrderId}. (reason={signal.Reason})");
             MarkAction(symbol);
-        }
-
-        private async Task<SpotOrderResult> PlaceMakerBuyWithRetriesAsync(string symbol, decimal qty, decimal price, SpotOmsConfig omsCfg, CancellationToken ct)
-        {
-            ct.ThrowIfCancellationRequested();
-
-            // If LIMIT_MAKER rejects (because it would match immediately), step price a bit lower and retry.
-            int maxTry = 3;
-            var p = price;
-            for (int k = 0; k < maxTry; k++)
-            {
-                var res = await _spot.PlaceLimitBuyAsync(symbol, qty, p);
-                if (res.OrderId != "REJECTED" && res.OrderId != "UNKNOWN")
-                    return res;
-
-                // step lower by min offset so it's clearly maker
-                var step = Math.Max(0.00005m, omsCfg.EntryMinMakerOffsetPercent / 2m);
-                p = p * (1m - step);
-            }
-
-            return new SpotOrderResult { OrderId = "REJECTED", RawStatus = "REJECTED" };
         }
 
         // ============================================================
@@ -405,7 +346,7 @@ namespace FuturesBot.Services
             MarkAction(symbol);
         }
 
-        private async Task HandlePendingBuyAsync(string symbol, string quoteAsset, OpenOrderInfo pendingBuy, decimal quoteFree, decimal lastPrice, SpotOmsConfig omsCfg, CancellationToken ct)
+        private async Task HandlePendingBuyAsync(string symbol, string quoteAsset, OpenOrderInfo pendingBuy, decimal quoteFree, decimal lastPrice, CancellationToken ct)
         {
             ct.ThrowIfCancellationRequested();
 
@@ -421,56 +362,20 @@ namespace FuturesBot.Services
                 return;
             }
 
-            var count = _entryRepriceCount.AddOrUpdate(symbol, 1, (_, c) => c + 1);
-
-            if (!_entryIntent.TryGetValue(symbol, out var intent))
-            {
-                // No cached intent -> safest is cancel and wait.
-                await _spot.CancelAllOpenOrdersAsync(symbol);
-                await _notify.SendAsync($"[SPOT][OMS] {symbol} pending BUY stale canceled (no cached intent). age={ageSec}s");
-                _entryRepriceCount.TryRemove(symbol, out _);
-                MarkAction(symbol);
-                return;
-            }
-
-            if (count > Math.Max(1, omsCfg.EntryMaxReprices))
-            {
-                await _spot.CancelAllOpenOrdersAsync(symbol);
-                await _notify.SendAsync($"[SPOT][OMS] {symbol} maker-chase STOP (maxReprices={omsCfg.EntryMaxReprices}). Canceled pending BUY. age={ageSec}s");
-                _entryIntent.TryRemove(symbol, out _);
-                _entryRepriceCount.TryRemove(symbol, out _);
-                MarkAction(symbol);
-                return;
-            }
-
-            // cancel current pending and re-place a slightly more aggressive maker price
             await _spot.CancelAllOpenOrdersAsync(symbol);
 
-            var baseOffset = omsCfg.EntryMakerOffsetPercent > 0 ? omsCfg.EntryMakerOffsetPercent : 0.0003m;
-            var minOffset = omsCfg.EntryMinMakerOffsetPercent > 0 ? omsCfg.EntryMinMakerOffsetPercent : 0.00010m;
+            var count = _entryRepriceCount.AddOrUpdate(symbol, 1, (_, c) => c + 1);
 
-            // chase: gradually reduce offset towards minOffset
-            var t = Math.Min(1m, (decimal)count / Math.Max(1, omsCfg.EntryMaxReprices));
-            var offset = baseOffset - (baseOffset - minOffset) * t;
-            offset = Math.Max(minOffset, offset);
-
-            var newPrice = lastPrice * (1m - offset);
-
-            // clamp by max chase distance from the first maker price
-            var maxUp = intent.FirstPrice * (1m + Math.Max(0m, omsCfg.EntryMaxChaseDistancePercent));
-            if (newPrice > maxUp) newPrice = maxUp;
-
-            intent.LastPrice = newPrice;
-            _entryIntent[symbol] = intent;
-
-            var res = await PlaceMakerBuyWithRetriesAsync(symbol, intent.RawQty, newPrice, omsCfg, ct);
-            if (res.OrderId == "REJECTED" || res.OrderId == "UNKNOWN")
+            // optional market fallback (mày muốn maker-only thì set MaxEntryRepriceBeforeMarketFallback rất lớn hoặc bỏ đoạn này)
+            if (count > MaxEntryRepriceBeforeMarketFallback)
             {
-                await _notify.SendAsync($"[SPOT][OMS] {symbol} maker-chase REJECTED on reprice. count={count} newPrice={newPrice:0.##}");
+                // can't know budget here without cached, so just stop repricing to avoid spam
+                await _notify.SendAsync($"[SPOT][OMS] {symbol} pending BUY stale canceled (no cached budget). count={count}");
+                _entryRepriceCount.TryRemove(symbol, out _);
                 return;
             }
 
-            await _notify.SendAsync($"[SPOT][OMS] {symbol} maker-chase reprice#{count}/{omsCfg.EntryMaxReprices}: price={newPrice:0.##}, qty≈{intent.RawQty:0.########}");
+            await _notify.SendAsync($"[SPOT][OMS] {symbol} pending BUY stale canceled, wait next signal. age={ageSec}s count={count}");
             MarkAction(symbol);
         }
 

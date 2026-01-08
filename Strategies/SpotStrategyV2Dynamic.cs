@@ -1,0 +1,481 @@
+﻿using FuturesBot.Config;
+using FuturesBot.IServices;
+using FuturesBot.Models;
+using FuturesBot.Services;
+using static FuturesBot.Utils.EnumTypesHelper;
+
+namespace FuturesBot.Strategies
+{
+    /// <summary>
+    /// SpotStrategy V2 Dynamic (TF-agnostic) - long-only.
+    /// - 3 entry types: A Retest, B Continuation, C Break&Hold
+    /// - Dynamic parameters scale with MainTF minutes (1m/3m/5m/15m...)
+    /// - Use last CLOSED candle (Count-2)
+    /// Returns:
+    /// - Long = Entry
+    /// - Short = Exit suggestion (OMS may ignore if not in position)
+    /// </summary>
+    public sealed class SpotStrategyV2Dynamic(IndicatorService indicators, BotConfig config) : ISpotTradingStrategy
+    {
+        private readonly IndicatorService _indicators = indicators;
+        private readonly SpotStrategySettings _s = (config?.Spot?.Strategy) ?? new SpotStrategySettings();
+
+        // Map settings to the old constant names (so the rest of the strategy logic stays intact)
+        private int BaseTfMin => _s.BaseTfMin;
+        private int EmaFast => _s.EmaFast;
+        private int EmaSlow => _s.EmaSlow;
+        private int EmaLong => _s.EmaLong;
+        private int RsiPeriod => _s.RsiPeriod;
+        private int AtrPeriod => _s.AtrPeriod;
+        private int VolMaPeriod => _s.VolMaPeriod;
+
+        private int MinBarsEntryBase => _s.MinBarsEntryBase;
+        private int MinBarsTrendBase => _s.MinBarsTrendBase;
+        private decimal MaxDistanceFromEma34Base => _s.MaxDistanceFromEma34Base;
+        private decimal ImpulseBodyToRangeMaxBase => _s.ImpulseBodyToRangeMaxBase;
+        private decimal ImpulseRangeAtrMultBase => _s.ImpulseRangeAtrMultBase;
+        private decimal EntryVolMinFactorBase => _s.EntryVolMinFactorBase;
+        private decimal BreakVolMinFactorBase => _s.BreakVolMinFactorBase;
+
+        private int RetestLookbackBarsBase => _s.RetestLookbackBarsBase;
+        private decimal RetestTouchBandBase => _s.RetestTouchBandBase;
+        private decimal RetestReclaimBufBase => _s.RetestReclaimBufBase;
+        private decimal RsiMinTypeABase => _s.RsiMinTypeABase;
+
+        private int BaseLookbackBarsBase => _s.BaseLookbackBarsBase;
+        private decimal BaseMaxRangeAtrBase => _s.BaseMaxRangeAtrBase;
+        private decimal BaseMinLowAboveEma34Base => _s.BaseMinLowAboveEma34Base;
+        private decimal RsiMinTypeBBase => _s.RsiMinTypeBBase;
+
+        private int SwingHighLookbackBarsBase => _s.SwingHighLookbackBarsBase;
+        private int HoldConfirmBarsMaxBase => _s.HoldConfirmBarsMaxBase;
+        private decimal BreakBufferBase => _s.BreakBufferBase;
+        private decimal HoldBelowBufferBase => _s.HoldBelowBufferBase;
+        private decimal RsiMinTypeCBase => _s.RsiMinTypeCBase;
+
+        private decimal ExitRsiWeakBase => _s.ExitRsiWeakBase;
+        private decimal ExitEmaBreakTolBase => _s.ExitEmaBreakTolBase;
+
+        public TradeSignal GenerateSignal(IReadOnlyList<Candle> candlesMain, IReadOnlyList<Candle> candlesTrend, CoinInfo coinInfo)
+        {
+            var symbol = coinInfo.Symbol;
+
+            var tfMin = ParseTimeFrameMinutes(coinInfo.MainTimeFrame);
+            var trendTfMin = ParseTimeFrameMinutes(coinInfo.TrendTimeFrame);
+
+            // scale: nhỏ TF => scale > 1 (1m => 5x)
+            var scale = GetScale(tfMin);
+
+            // dynamic params
+            int minBarsEntry = ClampInt((int)Math.Round(MinBarsEntryBase * scale), 120, 260); // giữ <= 210-260 để không fail vì fetch 210
+            int minBarsTrend = ClampInt((int)Math.Round(MinBarsTrendBase * GetScale(trendTfMin)), 80, 200);
+
+            int retestLookback = ClampInt((int)Math.Round(RetestLookbackBarsBase * scale), 8, 60);
+            int baseLookback = ClampInt((int)Math.Round(BaseLookbackBarsBase * scale), 4, 50);
+            int swingLookback = ClampInt((int)Math.Round(SwingHighLookbackBarsBase * scale), 30, 200);
+            int holdBarsMax = ClampInt((int)Math.Round(HoldConfirmBarsMaxBase * scale), 2, 10);
+
+            // allow more distance/looser volume on 1m
+            decimal maxDistFromEma34 = ClampDec(MaxDistanceFromEma34Base * SqrtDec(scale), 0.0035m, 0.0100m);
+            decimal impulseBodyToRangeMax = tfMin <= 1 ? 0.80m : ImpulseBodyToRangeMaxBase;
+            decimal impulseRangeAtrMult = tfMin <= 1 ? 1.35m : ImpulseRangeAtrMultBase;
+
+            decimal entryVolMinFactor = tfMin <= 1 ? 0.45m : EntryVolMinFactorBase;
+            decimal breakVolMinFactor = tfMin <= 1 ? 0.75m : BreakVolMinFactorBase;
+
+            decimal rsiMinA = tfMin <= 1 ? 43m : RsiMinTypeABase;
+            decimal rsiMinB = tfMin <= 1 ? 40m : RsiMinTypeBBase;
+            decimal rsiMinC = tfMin <= 1 ? 46m : RsiMinTypeCBase;
+
+            decimal exitRsiWeak = tfMin <= 1 ? 42m : ExitRsiWeakBase;
+            decimal exitEmaBreakTol = tfMin <= 1 ? 0.0006m : ExitEmaBreakTolBase;
+
+            if (candlesMain == null || candlesMain.Count < minBarsEntry)
+                return new TradeSignal { Type = SignalType.None, Symbol = symbol, Reason = $"SpotV2D: not enough entry bars ({candlesMain?.Count ?? 0}<{minBarsEntry})" };
+
+            if (candlesTrend == null || candlesTrend.Count < minBarsTrend)
+                return new TradeSignal { Type = SignalType.None, Symbol = symbol, Reason = $"SpotV2D: not enough trend bars ({candlesTrend?.Count ?? 0}<{minBarsTrend})" };
+
+            int iE = candlesMain.Count - 2;
+            int iE1 = iE - 1;
+            if (iE1 < 2)
+                return new TradeSignal { Type = SignalType.None, Symbol = symbol, Reason = "SpotV2D: not enough closed entry bars" };
+
+            int iT = candlesTrend.Count - 2;
+            int iT1 = iT - 1;
+            if (iT1 < 2)
+                return new TradeSignal { Type = SignalType.None, Symbol = symbol, Reason = "SpotV2D: not enough closed trend bars" };
+
+            var ema34E = _indicators.Ema(candlesMain, EmaFast);
+            var ema89E = _indicators.Ema(candlesMain, EmaSlow);
+            var ema200E = _indicators.Ema(candlesMain, EmaLong);
+            var rsiE = _indicators.Rsi(candlesMain, RsiPeriod);
+
+            var ema34T = _indicators.Ema(candlesTrend, EmaFast);
+            var ema89T = _indicators.Ema(candlesTrend, EmaSlow);
+
+            var cE = candlesMain[iE];
+            var cEPrev = candlesMain[iE1];
+            var cT = candlesTrend[iT];
+
+            var close = cE.Close;
+            var open = cE.Open;
+            var high = cE.High;
+            var low = cE.Low;
+
+            var e34 = ema34E[iE];
+            var e89 = ema89E[iE];
+            var e200 = ema200E[iE];
+            var rsi = rsiE[iE];
+
+            var t34 = ema34T[iT];
+            var t89 = ema89T[iT];
+            var t34Prev = ema34T[iT1];
+
+            decimal atr = ComputeAtr(candlesMain, AtrPeriod);
+            decimal volMa = ComputeVolUsdMa(candlesMain, VolMaPeriod);
+            decimal lastVolUsd = cE.Volume * close;
+            decimal lastBodyToRange = GetBodyToRange(cE);
+
+            // =============== 0) Common gates ===============
+            // Trend up: allow very slight slope down on 1m (noise)
+            decimal slopeTol = tfMin <= 1 ? 0.0002m : 0m;
+            bool trendUp = (t34 > t89) && (t34 >= t34Prev * (1m - slopeTol));
+            bool entryBiasOk = e34 >= e89;
+            bool trendOk = trendUp && entryBiasOk;
+
+            if (!trendOk)
+            {
+                if (ShouldExitOnTrendBreak(cE, cEPrev, e34, e89, rsi, t34, t89, exitRsiWeak, exitEmaBreakTol))
+                {
+                    return new TradeSignal
+                    {
+                        Symbol = symbol,
+                        Time = DateTime.UtcNow,
+                        Type = SignalType.Short,
+                        Reason = $"SpotV2D: EXIT trendBreak | tf={coinInfo.MainTimeFrame} rsi={rsi:F1} e34={e34:0.##} e89={e89:0.##} t34={t34:0.##} t89={t89:0.##}"
+                    };
+                }
+
+                return new TradeSignal { Type = SignalType.None, Symbol = symbol, Reason = "SpotV2D: trend gate" };
+            }
+
+            // anti-chase dist from EMA34 (dynamic)
+            if (e34 > 0m)
+            {
+                var dist = Math.Abs(close - e34) / e34;
+                if (dist > maxDistFromEma34)
+                    return new TradeSignal { Type = SignalType.None, Symbol = symbol, Reason = $"SpotV2D: too far from EMA34 (dist={dist:P3} > {maxDistFromEma34:P3})" };
+            }
+
+            // impulse chase filter (dynamic)
+            if (atr > 0m)
+            {
+                var range = (high - low);
+                if (range > 0m && lastBodyToRange >= impulseBodyToRangeMax && range >= atr * impulseRangeAtrMult)
+                    return new TradeSignal { Type = SignalType.None, Symbol = symbol, Reason = "SpotV2D: impulse chase filter" };
+            }
+
+            // liquidity/volume trend gate
+            if (coinInfo.MinVolumeUsdTrend > 0m)
+            {
+                var trendVolMa = ComputeVolUsdMa(candlesTrend, VolMaPeriod);
+                if (trendVolMa > 0m && trendVolMa < coinInfo.MinVolumeUsdTrend)
+                    return new TradeSignal { Type = SignalType.None, Symbol = symbol, Reason = "SpotV2D: low trend volume" };
+            }
+
+            // entry volume gate (dynamic)
+            if (volMa > 0m && lastVolUsd < volMa * entryVolMinFactor)
+                return new TradeSignal { Type = SignalType.None, Symbol = symbol, Reason = $"SpotV2D: low entry volume ({lastVolUsd:0} < {volMa * entryVolMinFactor:0})" };
+
+            // =============== Entry priority A > B > C ===============
+            if (IsTypeA_Retest(candlesMain, ema34E, iE, rsi, e34, close, open, retestLookback, RetestTouchBandBase, RetestReclaimBufBase, rsiMinA))
+            {
+                return new TradeSignal
+                {
+                    Symbol = symbol,
+                    Time = DateTime.UtcNow,
+                    Type = SignalType.Long,
+                    EntryPrice = close,
+                    Reason = $"SpotV2D[A] EMA Retest+Reclaim | tf={coinInfo.MainTimeFrame} rsi={rsi:F1} volUsd={lastVolUsd:0} volMA={volMa:0}"
+                };
+            }
+
+            if (IsTypeB_Continuation(candlesMain, ema34E, iE, atr, rsi, volMa, baseLookback, BaseMaxRangeAtrBase, BaseMinLowAboveEma34Base, rsiMinB, breakVolMinFactor))
+            {
+                return new TradeSignal
+                {
+                    Symbol = symbol,
+                    Time = DateTime.UtcNow,
+                    Type = SignalType.Long,
+                    EntryPrice = close,
+                    Reason = $"SpotV2D[B] BaseBreak Continuation | tf={coinInfo.MainTimeFrame} rsi={rsi:F1} atr={atr:F6} volUsd={lastVolUsd:0} volMA={volMa:0}"
+                };
+            }
+
+            if (IsTypeC_BreakHold(candlesMain, ema34E, iE, atr, rsi, volMa, swingLookback, holdBarsMax, BreakBufferBase, HoldBelowBufferBase, rsiMinC, breakVolMinFactor))
+            {
+                return new TradeSignal
+                {
+                    Symbol = symbol,
+                    Time = DateTime.UtcNow,
+                    Type = SignalType.Long,
+                    EntryPrice = close,
+                    Reason = $"SpotV2D[C] Break&Hold | tf={coinInfo.MainTimeFrame} rsi={rsi:F1} atr={atr:F6} volUsd={lastVolUsd:0} volMA={volMa:0}"
+                };
+            }
+
+            // Exit soft suggestion
+            if (ShouldExitSoft(cE, cEPrev, e34, e89, rsi, exitRsiWeak, exitEmaBreakTol))
+            {
+                return new TradeSignal
+                {
+                    Symbol = symbol,
+                    Time = DateTime.UtcNow,
+                    Type = SignalType.Short,
+                    Reason = $"SpotV2D: EXIT soft | tf={coinInfo.MainTimeFrame} rsi={rsi:F1} close<EMA34/89"
+                };
+            }
+
+            return new TradeSignal { Type = SignalType.None, Symbol = symbol };
+        }
+
+        // =========================
+        // Entry type implementations (dynamic)
+        // =========================
+
+        private static bool IsTypeA_Retest(
+            IReadOnlyList<Candle> e,
+            decimal[] ema34,
+            int i,
+            decimal rsi,
+            decimal e34,
+            decimal close,
+            decimal open,
+            int lookback,
+            decimal touchBand,
+            decimal reclaimBuf,
+            decimal rsiMin)
+        {
+            if (rsi < rsiMin) return false;
+            if (e34 <= 0m) return false;
+
+            int start = Math.Max(1, i - lookback);
+            bool hadTouch = false;
+
+            for (int k = i; k >= start; k--)
+            {
+                var ek = ema34[k];
+                if (ek <= 0m) continue;
+                if (e[k].Low <= ek * (1m + touchBand)) { hadTouch = true; break; }
+            }
+            if (!hadTouch) return false;
+
+            if (close < e34 * (1m + reclaimBuf)) return false;
+
+            bool bullish = close > open;
+            bool confirm = bullish || close > e[i - 1].Close;
+            return confirm;
+        }
+
+        private static bool IsTypeB_Continuation(
+            IReadOnlyList<Candle> e,
+            decimal[] ema34,
+            int i,
+            decimal atr,
+            decimal rsi,
+            decimal volMaUsd,
+            int baseLookback,
+            decimal baseMaxRangeAtr,
+            decimal minLowAboveEma34,
+            decimal rsiMin,
+            decimal breakVolMinFactor)
+        {
+            if (rsi < rsiMin) return false;
+            if (atr <= 0m) return false;
+
+            int end = i;
+            int start = Math.Max(1, end - baseLookback + 1);
+            if (end - start + 1 < 4) return false;
+
+            decimal maxHigh = decimal.MinValue;
+            decimal minLow = decimal.MaxValue;
+
+            for (int k = start; k <= end; k++)
+            {
+                maxHigh = Math.Max(maxHigh, e[k].High);
+                minLow = Math.Min(minLow, e[k].Low);
+            }
+
+            decimal boxRange = maxHigh - minLow;
+            if (boxRange <= 0m) return false;
+            if (boxRange > atr * baseMaxRangeAtr) return false;
+
+            decimal e34 = ema34[i];
+            if (e34 <= 0m) return false;
+
+            if (minLow < e34 * (1m - minLowAboveEma34)) return false;
+
+            var close = e[i].Close;
+            if (close <= maxHigh) return false;
+
+            var lastVolUsd = e[i].Volume * close;
+            if (volMaUsd > 0m && lastVolUsd < volMaUsd * breakVolMinFactor) return false;
+
+            return true;
+        }
+
+        private static bool IsTypeC_BreakHold(
+            IReadOnlyList<Candle> e,
+            decimal[] ema34,
+            int i,
+            decimal atr,
+            decimal rsi,
+            decimal volMaUsd,
+            int swingLookback,
+            int holdBarsMax,
+            decimal breakBuffer,
+            decimal holdBelowBuffer,
+            decimal rsiMin,
+            decimal breakVolMinFactor)
+        {
+            if (rsi < rsiMin) return false;
+            if (atr <= 0m) return false;
+
+            int endSwing = Math.Max(1, i - 1);
+            int startSwing = Math.Max(1, endSwing - swingLookback);
+
+            decimal swingHigh = decimal.MinValue;
+            for (int k = startSwing; k <= endSwing; k++)
+                swingHigh = Math.Max(swingHigh, e[k].High);
+
+            if (swingHigh <= 0m || swingHigh == decimal.MinValue) return false;
+
+            var close = e[i].Close;
+            if (close <= swingHigh * (1m + breakBuffer)) return false;
+
+            int startHold = Math.Max(1, i - holdBarsMax + 1);
+            for (int k = startHold; k <= i; k++)
+            {
+                if (e[k].Close < swingHigh * (1m - holdBelowBuffer))
+                    return false;
+            }
+
+            var e34 = ema34[i];
+            if (e34 > 0m && close < e34) return false;
+
+            var lastVolUsd = e[i].Volume * close;
+            if (volMaUsd > 0m && lastVolUsd < volMaUsd * breakVolMinFactor) return false;
+
+            return true;
+        }
+
+        // =========================
+        // Exit helpers (dynamic)
+        // =========================
+        private static bool ShouldExitSoft(Candle c0, Candle c1, decimal ema34, decimal ema89, decimal rsi, decimal exitRsiWeak, decimal emaBreakTol)
+        {
+            if (ema34 <= 0m || ema89 <= 0m) return false;
+
+            bool closeBelow34 = c0.Close < ema34 * (1m - emaBreakTol);
+            bool closeBelow89 = c0.Close < ema89 * (1m - emaBreakTol);
+            bool twoClosesBelow34 = (c0.Close < ema34) && (c1.Close < ema34);
+
+            if ((closeBelow34 && rsi <= exitRsiWeak) || closeBelow89 || twoClosesBelow34)
+                return true;
+
+            return false;
+        }
+
+        private static bool ShouldExitOnTrendBreak(Candle cE, Candle cEPrev, decimal e34, decimal e89, decimal rsi, decimal t34, decimal t89, decimal exitRsiWeak, decimal emaBreakTol)
+        {
+            bool trendBroken = (t34 > 0m && t89 > 0m && t34 < t89);
+            if (!trendBroken) return false;
+
+            if (ShouldExitSoft(cE, cEPrev, e34, e89, rsi, exitRsiWeak, emaBreakTol))
+                return true;
+
+            return false;
+        }
+
+        // =========================
+        // Math helpers
+        // =========================
+        private static decimal ComputeAtr(IReadOnlyList<Candle> candles, int period)
+        {
+            if (candles == null || candles.Count < period + 2) return 0m;
+            int end = candles.Count - 2;
+            int start = Math.Max(1, end - period + 1);
+
+            decimal sum = 0m;
+            int n = 0;
+
+            for (int i = start; i <= end; i++)
+            {
+                var c = candles[i];
+                var prev = candles[i - 1];
+                var tr = Math.Max(
+                    c.High - c.Low,
+                    Math.Max(Math.Abs(c.High - prev.Close), Math.Abs(c.Low - prev.Close))
+                );
+                sum += tr;
+                n++;
+            }
+
+            return n > 0 ? sum / n : 0m;
+        }
+
+        private static decimal ComputeVolUsdMa(IReadOnlyList<Candle> candles, int period)
+        {
+            if (candles == null || candles.Count < period + 2) return 0m;
+            int end = candles.Count - 2;
+            int start = Math.Max(0, end - period + 1);
+
+            decimal sum = 0m;
+            int n = 0;
+            for (int i = start; i <= end; i++)
+            {
+                sum += candles[i].Volume * candles[i].Close;
+                n++;
+            }
+
+            return n > 0 ? sum / n : 0m;
+        }
+
+        private static decimal GetBodyToRange(Candle c)
+        {
+            decimal range = c.High - c.Low;
+            if (range <= 0m) return 0m;
+            decimal body = Math.Abs(c.Close - c.Open);
+            return body / range;
+        }
+
+        private static int ParseTimeFrameMinutes(string? tf)
+        {
+            if (string.IsNullOrWhiteSpace(tf)) return 5;
+            tf = tf.Trim().ToLowerInvariant();
+
+            if (tf.EndsWith("m") && int.TryParse(tf[..^1], out var m)) return Math.Max(1, m);
+            if (tf.EndsWith("h") && int.TryParse(tf[..^1], out var h)) return Math.Max(1, h * 60);
+
+            // fallback
+            return 5;
+        }
+
+        private decimal GetScale(int tfMin)
+        {
+            if (tfMin <= 0) tfMin = BaseTfMin;
+            // scale relative to 5m baseline
+            return (decimal)BaseTfMin / tfMin;
+        }
+
+        private static decimal SqrtDec(decimal x)
+        {
+            if (x <= 0m) return 0m;
+            return (decimal)Math.Sqrt((double)x);
+        }
+
+        private static int ClampInt(int v, int min, int max) => Math.Min(max, Math.Max(min, v));
+        private static decimal ClampDec(decimal v, decimal min, decimal max) => Math.Min(max, Math.Max(min, v));
+    }
+}

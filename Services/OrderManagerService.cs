@@ -40,6 +40,7 @@ namespace FuturesBot.Services
         private readonly IFuturesExchangeService _exchange;
         private readonly SlackNotifierService _notify;
         private readonly BotConfig _botConfig;
+        private readonly IModeProfileProvider _profiles;
 
         // ================= Polling / Throttle =====================
         private const int MonitorIntervalMs = 10000; // anti -1003
@@ -110,11 +111,12 @@ namespace FuturesBot.Services
         private static readonly ConcurrentDictionary<string, FeeStats> _feeStatsBySymbol
             = new(StringComparer.OrdinalIgnoreCase);
 
-        public OrderManagerService(IFuturesExchangeService exchange, SlackNotifierService notify, BotConfig config)
+        public OrderManagerService(IFuturesExchangeService exchange, SlackNotifierService notify, BotConfig config, IModeProfileProvider profiles)
         {
             _exchange = exchange;
             _notify = notify;
             _botConfig = config;
+            _profiles = profiles;
         }
 
         public async Task ClearMonitoringTrigger(string symbol)
@@ -137,7 +139,7 @@ namespace FuturesBot.Services
             string symbol = signal.Symbol;
             bool isLong = signal.Type == SignalType.Long;
 
-            var profile = ModeProfile.For(signal.Mode);
+            var profile = _profiles.Get(signal.Mode);
 
             if (_monitoringPosition.ContainsKey(symbol) || !_monitoringLimit.TryAdd(symbol, true))
             {
@@ -241,7 +243,7 @@ namespace FuturesBot.Services
         public async Task MonitorPositionAsync(TradeSignal signal, CoinInfo coinInfo)
         {
             string symbol = signal.Symbol;
-            var profile = ModeProfile.For(signal.Mode);
+            var profile = _profiles.Get(signal.Mode);
 
             if (!_monitoringPosition.TryAdd(symbol, true))
             {
@@ -1076,7 +1078,7 @@ namespace FuturesBot.Services
             decimal? sl = det.Sl;
             decimal? tp = det.Tp;
 
-            var profile = ModeProfile.For(TradeMode.Trend);
+            var profile = _profiles.Get(TradeMode.Trend);
 
             if (!tp.HasValue && sl.HasValue && entry > 0)
             {

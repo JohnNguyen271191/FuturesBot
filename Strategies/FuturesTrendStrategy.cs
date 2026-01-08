@@ -47,77 +47,79 @@ namespace FuturesBot.Strategies
     public class FuturesTrendStrategy : IFuturesTradingStrategy
     {
         private readonly IndicatorService _indicators;
+        private readonly FuturesStrategySettings _s;
 
-        public FuturesTrendStrategy(IndicatorService indicators)
+        public FuturesTrendStrategy(IndicatorService indicators, BotConfig config)
         {
             _indicators = indicators;
+            _s = (config?.Futures?.Strategy) ?? new FuturesStrategySettings();
         }
 
         // ========================= CONFIG ==============================
 
-        private const int MinBars = 120;
+        private int MinBars => _s.MinBars;
 
         // Retest band
-        private const decimal EmaRetestBand = 0.002m;        // ±0.2%
+        private decimal EmaRetestBand => _s.EmaRetestBand;        // ±0.2%
 
         // buffer chung (dùng cho scalp swing)
-        private const decimal StopBufferPercent = 0.005m;    // 0.5%
+        private decimal StopBufferPercent => _s.StopBufferPercent;    // 0.5%
 
         // RR default cho Altcoin (trend)
-        private const decimal RiskReward = 1.5m;
+        private decimal RiskReward => _s.RiskReward;
 
         // RR cho sideway scalp (cơ bản)
-        private const decimal RiskRewardSideway = 1m;
+        private decimal RiskRewardSideway => _s.RiskRewardSideway;
 
         // RR cho Major (BTC/ETH)
-        private const decimal RiskRewardMajor = 2.0m;
-        private const decimal RiskRewardSidewayMajor = 1.0m;
+        private decimal RiskRewardMajor => _s.RiskRewardMajor;
+        private decimal RiskRewardSidewayMajor => _s.RiskRewardSidewayMajor;
 
-        private const decimal RsiBullThreshold = 55m;
-        private const decimal RsiBearThreshold = 45m;
+        private decimal RsiBullThreshold => _s.RsiBullThreshold;
+        private decimal RsiBearThreshold => _s.RsiBearThreshold;
 
-        private const decimal ExtremeRsiHigh = 75m;
-        private const decimal ExtremeRsiLow = 30m;
-        private const decimal ExtremeEmaBoost = 0.01m;       // 1%
+        private decimal ExtremeRsiHigh => _s.ExtremeRsiHigh;
+        private decimal ExtremeRsiLow => _s.ExtremeRsiLow;
+        private decimal ExtremeEmaBoost => _s.ExtremeEmaBoost;       // 1%
 
         // V4: RSI cap cho TREND RETEST (tăng winrate)
-        private const decimal TrendRetestRsiMaxForLong = 68m;
-        private const decimal TrendRetestRsiMinForShort = 32m;
+        private decimal TrendRetestRsiMaxForLong => _s.TrendRetestRsiMaxForLong;
+        private decimal TrendRetestRsiMinForShort => _s.TrendRetestRsiMinForShort;
 
         // ========================= AUTO ENTRY OFFSET (NEW) =========================
         // NOTE: % ở đây dạng ratio: 0.0015m = 0.15%
-        private const bool EnableAutoEntryOffset = true;
+        private bool EnableAutoEntryOffset => _s.EnableAutoEntryOffset;
 
         // EMA gap thresholds (emaGap = |EMA34-EMA89|/price)
-        private const decimal AutoGapSmall = 0.0015m; // 0.15% -> EMA chồng / range
-        private const decimal AutoGapBig = 0.0030m;   // 0.30% -> trend rõ
+        private decimal AutoGapSmall => _s.AutoGapSmall; // 0.15% -> EMA chồng / range
+        private decimal AutoGapBig => _s.AutoGapBig;   // 0.30% -> trend rõ
 
         // TREND offset buckets
-        private const decimal AutoTrendOffset_SmallGap = 0.0020m; // 0.20%
-        private const decimal AutoTrendOffset_MidGap = 0.0015m;   // 0.15%
-        private const decimal AutoTrendOffset_BigGap = 0.0010m;   // 0.10%
+        private decimal AutoTrendOffset_SmallGap => _s.AutoTrendOffset_SmallGap;
+        private decimal AutoTrendOffset_MidGap => _s.AutoTrendOffset_MidGap;
+        private decimal AutoTrendOffset_BigGap => _s.AutoTrendOffset_BigGap;
 
         // SCALP offset buckets (base ~0.10%)
-        private const decimal AutoScalpOffset_SmallGap = 0.0012m; // 0.12%
-        private const decimal AutoScalpOffset_MidGap = 0.0010m;   // 0.10%
-        private const decimal AutoScalpOffset_BigGap = 0.0008m;   // 0.08%
+        private decimal AutoScalpOffset_SmallGap => _s.AutoScalpOffset_SmallGap;
+        private decimal AutoScalpOffset_MidGap => _s.AutoScalpOffset_MidGap;
+        private decimal AutoScalpOffset_BigGap => _s.AutoScalpOffset_BigGap;
 
         // clamp
-        private const decimal AutoOffsetMin = 0.0008m; // 0.08%
-        private const decimal AutoOffsetMax = 0.0022m; // 0.22%
+        private decimal AutoOffsetMin => _s.AutoOffsetMin;
+        private decimal AutoOffsetMax => _s.AutoOffsetMax;
 
         // SL neo EMA cho trend
-        private const decimal AnchorSlBufferPercent = 0.0015m;      // 0.15%
+        private decimal AnchorSlBufferPercent => _s.AnchorSlBufferPercent;
 
         // OPTION: dùng swing để đặt SL "an toàn hơn" (tránh quét EMA)
-        private const bool UseSwingForTrendStop = true;
-        private const int SwingLookback = 5;
-        private const decimal SwingStopExtraBufferPercent = 0.0010m; // +0.10% quanh swing
+        private bool UseSwingForTrendStop => _s.UseSwingForTrendStop;
+        private int SwingLookback => _s.SwingLookback;
+        private decimal SwingStopExtraBufferPercent => _s.SwingStopExtraBufferPercent;
 
         // Nến climax + overextended xa EMA gần nhất (tránh vừa vào là đảo)
-        private const int ClimaxLookback = 20;
-        private const decimal ClimaxBodyMultiplier = 1.8m;
-        private const decimal ClimaxVolumeMultiplier = 1.5m;
+        private int ClimaxLookback => _s.ClimaxLookback;
+        private decimal ClimaxBodyMultiplier => _s.ClimaxBodyMultiplier;
+        private decimal ClimaxVolumeMultiplier => _s.ClimaxVolumeMultiplier;
         private const decimal OverextendedFromEmaPercent = 0.01m; // 1% xa EMA gần nhất
 
         private const int VolumeMedianLookback = 40;
@@ -427,31 +429,6 @@ namespace FuturesBot.Strategies
 
             bool blockLongByStructure = lowerHigh && !higherLow;
             bool blockShortByStructure = higherLow && !lowerHigh;
-
-            // =================== MODE2: CONTINUATION (human-like) ==================
-            // Many hand-traders enter on: impulse -> base/pullback -> continuation.
-            // This block tries to catch those "obvious" continuation entries so the bot
-            // doesn't stand still while price is trending.
-            if (!extremeUp && !extremeDump)
-            {
-                var cont = TryBuildContinuationSignal(
-                    candlesMain,
-                    iM,
-                    ema34_M,
-                    ema89_M,
-                    rsiM,
-                    macdM,
-                    sigM,
-                    upTrend,
-                    downTrend,
-                    blockLongByStructure,
-                    blockShortByStructure,
-                    rrTrendBase,
-                    coinInfo);
-
-                if (cont.Type != SignalType.None)
-                    return cont;
-            }
 
             // =================== SIDEWAY / MEAN-REVERSION (UPDATED: ENTRY BY MAIN TF) ======================
 
@@ -2325,166 +2302,6 @@ namespace FuturesBot.Strategies
             bool lowerRsi = rsi2 < rsi1 - MinRsiDivergenceGap;
 
             return higherHigh && lowerRsi;
-        }
-
-        // =====================================================================
-        // NEW: Continuation pattern (human-like) – applicable to all coins
-        // Idea: trend (EMA34/89 alignment on MAIN TF) + a small pullback/base
-        // then break of the base in the trend direction.
-        // Mode: TradeMode.Mode2_Continuation (OMS uses different exit profile).
-        // =====================================================================
-        private static decimal ComputeAtr(IReadOnlyList<Candle> candles, int period)
-        {
-            if (candles == null || candles.Count < period + 2) return 0m;
-            int end = candles.Count - 2; // last CLOSED
-            int start = Math.Max(1, end - period + 1);
-
-            decimal sum = 0m;
-            int n = 0;
-
-            for (int i = start; i <= end; i++)
-            {
-                var c = candles[i];
-                var prev = candles[i - 1];
-                var tr = Math.Max(
-                    c.High - c.Low,
-                    Math.Max(Math.Abs(c.High - prev.Close), Math.Abs(c.Low - prev.Close))
-                );
-                sum += tr;
-                n++;
-            }
-
-            return n > 0 ? sum / n : 0m;
-        }
-
-        private TradeSignal TryBuildContinuationSignal(
-            IReadOnlyList<Candle> candlesMain,
-            int iM,
-            IReadOnlyList<decimal> ema34_M,
-            IReadOnlyList<decimal> ema89_M,
-            IReadOnlyList<decimal> rsiM,
-            IReadOnlyList<decimal> macdM,
-            IReadOnlyList<decimal> sigM,
-            bool upTrend,
-            bool downTrend,
-            bool blockLongByStructure,
-            bool blockShortByStructure,
-            decimal rrTrendBase,
-            CoinInfo coinInfo)
-        {
-            // Only when we already have trend alignment ("hand-trader style")
-            if (!upTrend && !downTrend)
-                return new TradeSignal();
-
-            var c0 = candlesMain[iM];     // last CLOSED
-            var c1 = candlesMain[iM - 1];
-
-            var e34 = ema34_M[iM];
-            var e89 = ema89_M[iM];
-            if (e34 <= 0m || e89 <= 0m)
-                return new TradeSignal();
-
-            // Soft momentum confirmation (avoid pure chop)
-            var macdOkUp = macdM[iM] >= sigM[iM];
-            var macdOkDown = macdM[iM] <= sigM[iM];
-
-            // Base/pullback window (closed candles before c0)
-            int baseBars = coinInfo.IsMajor ? 5 : 6;
-            int start = Math.Max(10, iM - 1 - baseBars);
-            int end = iM - 1;
-
-            decimal baseHi = 0m;
-            decimal baseLo = decimal.MaxValue;
-            for (int k = start; k <= end; k++)
-            {
-                baseHi = Math.Max(baseHi, candlesMain[k].High);
-                baseLo = Math.Min(baseLo, candlesMain[k].Low);
-            }
-            if (baseLo == decimal.MaxValue || baseHi <= 0m)
-                return new TradeSignal();
-
-            var baseRange = baseHi - baseLo;
-            var atrM = ComputeAtr(candlesMain, 14);
-            if (atrM <= 0m)
-                return new TradeSignal();
-
-            // Require base to be "tight" vs ATR (otherwise it's just noise)
-            var maxBaseRange = atrM * (coinInfo.IsMajor ? 1.10m : 0.95m);
-            if (baseRange > maxBaseRange)
-                return new TradeSignal();
-
-            // Break buffer + SL buffer
-            var breakBuf = 0.0004m; // 0.04%
-            var slBuf = Math.Max(atrM * 0.25m, c0.Close * 0.0008m);
-
-            // LONG continuation
-            if (upTrend && !blockLongByStructure)
-            {
-                // Pullback should stay above EMA34-ish
-                if (baseLo < e34 * 0.9985m)
-                    return new TradeSignal();
-
-                // Break & close above baseHi
-                bool breakOk = c0.Close > baseHi * (1m + breakBuf) && c0.Close > c0.Open;
-                if (!breakOk) return new TradeSignal();
-
-                // RSI should not be too weak
-                if (rsiM[iM] < (coinInfo.IsMajor ? 48m : 50m))
-                    return new TradeSignal();
-
-                if (!macdOkUp && rsiM[iM] < 55m)
-                    return new TradeSignal();
-
-                var entry = c0.Close;
-                var sl = baseLo - slBuf;
-                var tp = entry + (entry - sl) * Math.Max(1.35m, rrTrendBase);
-
-                return new TradeSignal
-                {
-                    Type = SignalType.Long,
-                    Symbol = coinInfo.Symbol,
-                    Mode = TradeMode.Mode2_Continuation,
-                    EntryPrice = entry,
-                    StopLoss = sl,
-                    TakeProfit = tp,
-                    Reason = $"{coinInfo.Symbol}: MODE2 continuation LONG (baseBars={baseBars}, baseRange≈{baseRange:0.##}, atr≈{atrM:0.##})"
-                };
-            }
-
-            // SHORT continuation
-            if (downTrend && !blockShortByStructure)
-            {
-                // Pullback should stay below EMA34-ish
-                if (baseHi > e34 * 1.0015m)
-                    return new TradeSignal();
-
-                // Break & close below baseLo
-                bool breakOk = c0.Close < baseLo * (1m - breakBuf) && c0.Close < c0.Open;
-                if (!breakOk) return new TradeSignal();
-
-                if (rsiM[iM] > (coinInfo.IsMajor ? 52m : 50m))
-                    return new TradeSignal();
-
-                if (!macdOkDown && rsiM[iM] > 45m)
-                    return new TradeSignal();
-
-                var entry = c0.Close;
-                var sl = baseHi + slBuf;
-                var tp = entry - (sl - entry) * Math.Max(1.35m, rrTrendBase);
-
-                return new TradeSignal
-                {
-                    Type = SignalType.Short,
-                    Symbol = coinInfo.Symbol,
-                    Mode = TradeMode.Mode2_Continuation,
-                    EntryPrice = entry,
-                    StopLoss = sl,
-                    TakeProfit = tp,
-                    Reason = $"{coinInfo.Symbol}: MODE2 continuation SHORT (baseBars={baseBars}, baseRange≈{baseRange:0.##}, atr≈{atrM:0.##})"
-                };
-            }
-
-            return new TradeSignal();
         }
     }
 }
