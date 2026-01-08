@@ -109,6 +109,27 @@ namespace FuturesBot.Config
         public decimal MinEntryNotionalUsd { get; set; } = 10m;
         public decimal EntryQuoteBufferPercent { get; set; } = 0.02m;
         public decimal EntryMakerOffsetPercent { get; set; } = 0.0003m;
+        /// <summary>
+        /// Use Binance spot LIMIT_MAKER to guarantee maker fee (order will be rejected if it would take liquidity).
+        /// </summary>
+        public bool UseLimitMaker { get; set; } = true;
+
+        /// <summary>
+        /// Maker-chasing for entry: maximum number of cancel/replace attempts for the same entry intent.
+        /// </summary>
+        public int EntryMaxReprices { get; set; } = 6;
+
+        /// <summary>
+        /// Entry maker offset (as % of price) will be chased down towards this minimum to increase fill probability.
+        /// Example: 0.0001 = 0.01%.
+        /// </summary>
+        public decimal EntryMinMakerOffsetPercent { get; set; } = 0.00010m;
+
+        /// <summary>
+        /// Maximum distance (as % of price) allowed to chase from the first placed maker price.
+        /// Prevents chasing too far and turning the strategy into bad fills.
+        /// </summary>
+        public decimal EntryMaxChaseDistancePercent { get; set; } = 0.0015m; // 0.15%
         public decimal SlMakerBufferPercent { get; set; } = 0.0003m;
         public int EntryRepriceSeconds { get; set; } = 60;
         public int MinSecondsBetweenActions { get; set; } = 5;

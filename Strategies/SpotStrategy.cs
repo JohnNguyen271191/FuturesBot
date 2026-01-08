@@ -15,7 +15,7 @@ namespace FuturesBot.Strategies
     /// - Long = Entry
     /// - Short = Exit suggestion (OMS may ignore if not in position)
     /// </summary>
-    public sealed class SpotStrategyV2Dynamic(IndicatorService indicators) : ISpotTradingStrategy
+    public sealed class SpotStrategy(IndicatorService indicators) : ISpotTradingStrategy
     {
         private readonly IndicatorService _indicators = indicators;
 
@@ -153,6 +153,20 @@ namespace FuturesBot.Strategies
 
             if (!trendOk)
             {
+                // Downtrend / bias fail: still allow "human-like" sweep-reversal long
+                // (liquidity sweep -> reclaim -> momentum) to avoid the bot standing still on obvious rebounds.
+                if (IsTypeD_SweepReversal(candlesMain, iE, rsi, atr, volMa, tfMin, scale))
+                {
+                    return new TradeSignal
+                    {
+                        Symbol = symbol,
+                        Time = DateTime.UtcNow,
+                        Type = SignalType.Long,
+                        EntryPrice = close,
+                        Reason = $"SpotV2D[D] SweepReversal | tf={coinInfo.MainTimeFrame} rsi={rsi:F1} atr={atr:F6} volUsd={lastVolUsd:0} volMA={volMa:0}"
+                    };
+                }
+
                 if (ShouldExitOnTrendBreak(cE, cEPrev, e34, e89, rsi, t34, t89, exitRsiWeak, exitEmaBreakTol))
                 {
                     return new TradeSignal
@@ -375,6 +389,69 @@ namespace FuturesBot.Strategies
             if (volMaUsd > 0m && lastVolUsd < volMaUsd * breakVolMinFactor) return false;
 
             return true;
+        }
+
+        // =========================
+        // Type D (NEW): Sweep-Reversal (human-like)
+        // - Allow in downtrend: sweep recent low -> reclaim -> momentum.
+        // - Designed to avoid "bot đứng im" on obvious rebounds.
+        // =========================
+        private static bool IsTypeD_SweepReversal(
+            IReadOnlyList<Candle> e,
+            int iClose,
+            decimal rsi,
+            decimal atr,
+            decimal volMaUsd,
+            int tfMin,
+            decimal scale)
+        {
+            // Need at least 3 closed candles
+            if (e == null || iClose <= 3) return false;
+            if (atr <= 0m) return false;
+
+            // Use 2-candle pattern: (iClose-1) sweep, (iClose) reclaim
+            int iSweep = iClose - 1;
+            var sweep = e[iSweep];
+            var reclaim = e[iClose];
+
+            // Lookback for recent low (exclude sweep/reclaim candles)
+            int lookback = ClampInt((int)Math.Round(18 * (double)scale), 10, 40);
+            int end = Math.Max(1, iSweep - 1);
+            int start = Math.Max(1, end - lookback);
+
+            decimal ll = decimal.MaxValue;
+            for (int k = start; k <= end; k++)
+                ll = Math.Min(ll, e[k].Low);
+
+            if (ll == decimal.MaxValue || ll <= 0m) return false;
+
+            // Buffers: smaller on lower TF
+            // PATCH (human-like): loosen reclaim slightly so the bot can take obvious V-reversal bottoms
+            // (hand traders often enter on a shallow reclaim, not necessarily far above the swept low).
+            decimal sweepBuf = ClampDec(0.0006m * SqrtDec(scale), 0.00035m, 0.0012m);
+            decimal reclaimBuf = ClampDec(0.00035m * SqrtDec(scale), 0.00018m, 0.00085m);
+
+            bool didSweep = sweep.Low < ll * (1m - sweepBuf);
+            bool reclaimed = reclaim.Close > ll * (1m + reclaimBuf);
+            bool bullishReclaim = reclaim.Close > reclaim.Open;
+
+            // Avoid tiny doji reclaim (but allow a bit softer body vs. range so it triggers more often)
+            bool bodyOk = GetBodyToRange(reclaim) >= ClampDec(0.40m - (0.05m * scale), 0.26m, 0.52m);
+
+            // Momentum/health: require RSI recovery (looser on higher TF)
+            decimal rsiMin = ClampDec(42m - (4m * scale), 36m, 43m);
+            if (rsi < rsiMin) return false;
+
+            // Volume: allow soft pass if volMa isn't available (and reduce strictness a bit)
+            var close = reclaim.Close;
+            var lastVolUsd = reclaim.Volume * close;
+            if (volMaUsd > 0m && lastVolUsd < volMaUsd * 0.60m) return false;
+
+            // Reject if reclaim candle is still dumping (range too large vs ATR)
+            var range = reclaim.High - reclaim.Low;
+            if (range > atr * 2.4m) return false;
+
+            return didSweep && reclaimed && bullishReclaim && bodyOk;
         }
 
         // =========================

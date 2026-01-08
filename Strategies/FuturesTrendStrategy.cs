@@ -428,6 +428,31 @@ namespace FuturesBot.Strategies
             bool blockLongByStructure = lowerHigh && !higherLow;
             bool blockShortByStructure = higherLow && !lowerHigh;
 
+            // =================== MODE2: CONTINUATION (human-like) ==================
+            // Many hand-traders enter on: impulse -> base/pullback -> continuation.
+            // This block tries to catch those "obvious" continuation entries so the bot
+            // doesn't stand still while price is trending.
+            if (!extremeUp && !extremeDump)
+            {
+                var cont = TryBuildContinuationSignal(
+                    candlesMain,
+                    iM,
+                    ema34_M,
+                    ema89_M,
+                    rsiM,
+                    macdM,
+                    sigM,
+                    upTrend,
+                    downTrend,
+                    blockLongByStructure,
+                    blockShortByStructure,
+                    rrTrendBase,
+                    coinInfo);
+
+                if (cont.Type != SignalType.None)
+                    return cont;
+            }
+
             // =================== SIDEWAY / MEAN-REVERSION (UPDATED: ENTRY BY MAIN TF) ======================
 
             if (!extremeUp && !extremeDump)
@@ -2300,6 +2325,166 @@ namespace FuturesBot.Strategies
             bool lowerRsi = rsi2 < rsi1 - MinRsiDivergenceGap;
 
             return higherHigh && lowerRsi;
+        }
+
+        // =====================================================================
+        // NEW: Continuation pattern (human-like) – applicable to all coins
+        // Idea: trend (EMA34/89 alignment on MAIN TF) + a small pullback/base
+        // then break of the base in the trend direction.
+        // Mode: TradeMode.Mode2_Continuation (OMS uses different exit profile).
+        // =====================================================================
+        private static decimal ComputeAtr(IReadOnlyList<Candle> candles, int period)
+        {
+            if (candles == null || candles.Count < period + 2) return 0m;
+            int end = candles.Count - 2; // last CLOSED
+            int start = Math.Max(1, end - period + 1);
+
+            decimal sum = 0m;
+            int n = 0;
+
+            for (int i = start; i <= end; i++)
+            {
+                var c = candles[i];
+                var prev = candles[i - 1];
+                var tr = Math.Max(
+                    c.High - c.Low,
+                    Math.Max(Math.Abs(c.High - prev.Close), Math.Abs(c.Low - prev.Close))
+                );
+                sum += tr;
+                n++;
+            }
+
+            return n > 0 ? sum / n : 0m;
+        }
+
+        private TradeSignal TryBuildContinuationSignal(
+            IReadOnlyList<Candle> candlesMain,
+            int iM,
+            IReadOnlyList<decimal> ema34_M,
+            IReadOnlyList<decimal> ema89_M,
+            IReadOnlyList<decimal> rsiM,
+            IReadOnlyList<decimal> macdM,
+            IReadOnlyList<decimal> sigM,
+            bool upTrend,
+            bool downTrend,
+            bool blockLongByStructure,
+            bool blockShortByStructure,
+            decimal rrTrendBase,
+            CoinInfo coinInfo)
+        {
+            // Only when we already have trend alignment ("hand-trader style")
+            if (!upTrend && !downTrend)
+                return new TradeSignal();
+
+            var c0 = candlesMain[iM];     // last CLOSED
+            var c1 = candlesMain[iM - 1];
+
+            var e34 = ema34_M[iM];
+            var e89 = ema89_M[iM];
+            if (e34 <= 0m || e89 <= 0m)
+                return new TradeSignal();
+
+            // Soft momentum confirmation (avoid pure chop)
+            var macdOkUp = macdM[iM] >= sigM[iM];
+            var macdOkDown = macdM[iM] <= sigM[iM];
+
+            // Base/pullback window (closed candles before c0)
+            int baseBars = coinInfo.IsMajor ? 5 : 6;
+            int start = Math.Max(10, iM - 1 - baseBars);
+            int end = iM - 1;
+
+            decimal baseHi = 0m;
+            decimal baseLo = decimal.MaxValue;
+            for (int k = start; k <= end; k++)
+            {
+                baseHi = Math.Max(baseHi, candlesMain[k].High);
+                baseLo = Math.Min(baseLo, candlesMain[k].Low);
+            }
+            if (baseLo == decimal.MaxValue || baseHi <= 0m)
+                return new TradeSignal();
+
+            var baseRange = baseHi - baseLo;
+            var atrM = ComputeAtr(candlesMain, 14);
+            if (atrM <= 0m)
+                return new TradeSignal();
+
+            // Require base to be "tight" vs ATR (otherwise it's just noise)
+            var maxBaseRange = atrM * (coinInfo.IsMajor ? 1.10m : 0.95m);
+            if (baseRange > maxBaseRange)
+                return new TradeSignal();
+
+            // Break buffer + SL buffer
+            var breakBuf = 0.0004m; // 0.04%
+            var slBuf = Math.Max(atrM * 0.25m, c0.Close * 0.0008m);
+
+            // LONG continuation
+            if (upTrend && !blockLongByStructure)
+            {
+                // Pullback should stay above EMA34-ish
+                if (baseLo < e34 * 0.9985m)
+                    return new TradeSignal();
+
+                // Break & close above baseHi
+                bool breakOk = c0.Close > baseHi * (1m + breakBuf) && c0.Close > c0.Open;
+                if (!breakOk) return new TradeSignal();
+
+                // RSI should not be too weak
+                if (rsiM[iM] < (coinInfo.IsMajor ? 48m : 50m))
+                    return new TradeSignal();
+
+                if (!macdOkUp && rsiM[iM] < 55m)
+                    return new TradeSignal();
+
+                var entry = c0.Close;
+                var sl = baseLo - slBuf;
+                var tp = entry + (entry - sl) * Math.Max(1.35m, rrTrendBase);
+
+                return new TradeSignal
+                {
+                    Type = SignalType.Long,
+                    Symbol = coinInfo.Symbol,
+                    Mode = TradeMode.Mode2_Continuation,
+                    EntryPrice = entry,
+                    StopLoss = sl,
+                    TakeProfit = tp,
+                    Reason = $"{coinInfo.Symbol}: MODE2 continuation LONG (baseBars={baseBars}, baseRange≈{baseRange:0.##}, atr≈{atrM:0.##})"
+                };
+            }
+
+            // SHORT continuation
+            if (downTrend && !blockShortByStructure)
+            {
+                // Pullback should stay below EMA34-ish
+                if (baseHi > e34 * 1.0015m)
+                    return new TradeSignal();
+
+                // Break & close below baseLo
+                bool breakOk = c0.Close < baseLo * (1m - breakBuf) && c0.Close < c0.Open;
+                if (!breakOk) return new TradeSignal();
+
+                if (rsiM[iM] > (coinInfo.IsMajor ? 52m : 50m))
+                    return new TradeSignal();
+
+                if (!macdOkDown && rsiM[iM] > 45m)
+                    return new TradeSignal();
+
+                var entry = c0.Close;
+                var sl = baseHi + slBuf;
+                var tp = entry - (sl - entry) * Math.Max(1.35m, rrTrendBase);
+
+                return new TradeSignal
+                {
+                    Type = SignalType.Short,
+                    Symbol = coinInfo.Symbol,
+                    Mode = TradeMode.Mode2_Continuation,
+                    EntryPrice = entry,
+                    StopLoss = sl,
+                    TakeProfit = tp,
+                    Reason = $"{coinInfo.Symbol}: MODE2 continuation SHORT (baseBars={baseBars}, baseRange≈{baseRange:0.##}, atr≈{atrM:0.##})"
+                };
+            }
+
+            return new TradeSignal();
         }
     }
 }

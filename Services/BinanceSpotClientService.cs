@@ -391,7 +391,8 @@ namespace FuturesBot.Services
             {
                 ["symbol"] = symbol,
                 ["side"] = "BUY",
-                ["type"] = "LIMIT",
+                // Use LIMIT_MAKER to guarantee maker fee (Binance will reject if it would match immediately)
+                ["type"] = _config.SpotOms.UseLimitMaker ? "LIMIT_MAKER" : "LIMIT",
                 ["timeInForce"] = "GTC",
                 ["quantity"] = roundedQty.ToString(CultureInfo.InvariantCulture),
                 ["price"] = roundedPrice.ToString(CultureInfo.InvariantCulture),
@@ -560,7 +561,8 @@ namespace FuturesBot.Services
             {
                 ["symbol"] = symbol,
                 ["side"] = "SELL",
-                ["type"] = "LIMIT",
+                // Use LIMIT_MAKER to guarantee maker fee (Binance will reject if it would match immediately)
+                ["type"] = _config.SpotOms.UseLimitMaker ? "LIMIT_MAKER" : "LIMIT",
                 ["timeInForce"] = "GTC",
                 ["quantity"] = roundedQty.ToString(CultureInfo.InvariantCulture),
                 ["price"] = roundedPrice.ToString(CultureInfo.InvariantCulture),
