@@ -369,6 +369,27 @@ namespace FuturesBot.Strategies
             bool trendStrongNow = (trendUpStrong && mainBiasUp) || (trendDownStrong && mainBiasDown);
             bool trendWeakNow = (upTrend || downTrend) && !trendStrongNow;
 
+            // =================== NEW: ANTICIPATION ALERTS (heads-up) ===================
+            // Purpose: when price compresses quanh EMA34/89 theo trend, bot có thể bắn cảnh báo để bạn quyết.
+            if (_s.EnableAnticipationAlerts)
+            {
+                var anticip = TryBuildAnticipationSignal(
+                    candlesMain,
+                    iM,
+                    ema34_M,
+                    ema89_M,
+                    lastM,
+                    upTrend,
+                    downTrend,
+                    coinInfo);
+
+                if (anticip.Type == SignalType.AnticipationLongAlert || anticip.Type == SignalType.AnticipationShortAlert ||
+                    anticip.Type == SignalType.Long || anticip.Type == SignalType.Short)
+                {
+                    return anticip;
+                }
+            }
+
             // =================== TREND STRENGTH METRICS (for soft-pass) ===================
             decimal priceT = lastT.Close > 0 ? lastT.Close : 1m;
             decimal sepTrendNow = Math.Abs(ema89T - ema200T) / priceT;
@@ -2302,6 +2323,186 @@ namespace FuturesBot.Strategies
             bool lowerRsi = rsi2 < rsi1 - MinRsiDivergenceGap;
 
             return higherHigh && lowerRsi;
+        }
+
+        // =====================================================================
+        //                         ANTICIPATION (HEADS-UP)
+        // =====================================================================
+        private TradeSignal TryBuildAnticipationSignal(
+            IReadOnlyList<Candle> candlesMain,
+            int idxClosed,
+            decimal[] ema34,
+            decimal[] ema89,
+            Candle lastClosed,
+            bool upTrendAligned,
+            bool downTrendAligned,
+            CoinInfo coinInfo)
+        {
+            // Only when we have enough data
+            if (candlesMain == null || candlesMain.Count < 30) return new TradeSignal();
+            if (idxClosed < 25) return new TradeSignal();
+
+            int n = Math.Max(3, _s.AnticipationMinCompressionBars);
+            int start = Math.Max(0, idxClosed - n + 1);
+
+            var price = lastClosed.Close <= 0 ? 1m : lastClosed.Close;
+            var e34 = ema34[idxClosed];
+            var e89 = ema89[idxClosed];
+
+            // EMA band compression
+            var bandFrac = Math.Abs(e34 - e89) / price;
+            if (bandFrac > _s.AnticipationMaxEmaBandFrac) return new TradeSignal();
+
+            // Volume drop on main timeframe (using notional close*vol)
+            var ma5 = GetNotionalVolMa(candlesMain, idxClosed, 5);
+            var ma20 = GetNotionalVolMa(candlesMain, idxClosed, 20);
+            if (ma20 > 0 && ma5 > ma20 * _s.AnticipationVolumeDropRatio)
+                return new TradeSignal();
+
+            // Candle compression: average body/range must be small
+            decimal sumBodyRatio = 0m;
+            int cnt = 0;
+            for (int i = start; i <= idxClosed; i++)
+            {
+                var c = candlesMain[i];
+                var range = Math.Max(1e-9m, c.High - c.Low);
+                var body = Math.Abs(c.Close - c.Open);
+                sumBodyRatio += body / range;
+                cnt++;
+            }
+            var avgBodyRatio = cnt > 0 ? sumBodyRatio / cnt : 1m;
+            if (avgBodyRatio > 0.55m) return new TradeSignal();
+
+            // --- Short anticipation ---
+            if (downTrendAligned)
+            {
+                // Price under EMA34/89 but not too far
+                if (lastClosed.Close < e34 && lastClosed.Close < e89)
+                {
+                    var dist = (e34 - lastClosed.Close) / price;
+                    if (dist <= _s.AnticipationMaxDistFromEma34Frac)
+                    {
+                        var (hi, lo) = GetHiLo(candlesMain, start, idxClosed);
+                        var sl = hi * (1m + _s.AnchorSlBufferPercent);
+                        var entry = lastClosed.Close;
+                        var risk = sl - entry;
+                        if (risk > 0)
+                        {
+                            var rr = _s.AnticipationRiskReward > 0 ? _s.AnticipationRiskReward : 1m;
+                            var tp = entry - risk * rr;
+
+                            // Auto trade? convert to real Short, else alert.
+                            if (_s.EnableAnticipationAutoTrade)
+                            {
+                                return new TradeSignal
+                                {
+                                    Type = SignalType.Short,
+                                    Symbol = coinInfo.Symbol,
+                                    EntryPrice = entry,
+                                    StopLoss = sl,
+                                    TakeProfit = tp,
+                                    UseMarketOrder = _s.AnticipationUseMarketOrder,
+                                    Reason = $"ANTICIPATION SHORT: compression under EMA34/89 (band={bandFrac:P2}, avgBody={avgBodyRatio:P0}, vol5/20={SafeRatio(ma5, ma20):0.00})"
+                                };
+                            }
+
+                            return new TradeSignal
+                            {
+                                Type = SignalType.AnticipationShortAlert,
+                                Symbol = coinInfo.Symbol,
+                                EntryPrice = entry,
+                                StopLoss = sl,
+                                TakeProfit = tp,
+                                Reason = $"Nghi ngờ breakdown: compression dưới EMA34/89 (band={bandFrac:P2}, avgBody={avgBodyRatio:P0}, vol5/20={SafeRatio(ma5, ma20):0.00}). Tự short tay thì ok." 
+                            };
+                        }
+                    }
+                }
+            }
+
+            // --- Long anticipation ---
+            if (upTrendAligned)
+            {
+                if (lastClosed.Close > e34 && lastClosed.Close > e89)
+                {
+                    var dist = (lastClosed.Close - e34) / price;
+                    if (dist <= _s.AnticipationMaxDistFromEma34Frac)
+                    {
+                        var (hi, lo) = GetHiLo(candlesMain, start, idxClosed);
+                        var sl = lo * (1m - _s.AnchorSlBufferPercent);
+                        var entry = lastClosed.Close;
+                        var risk = entry - sl;
+                        if (risk > 0)
+                        {
+                            var rr = _s.AnticipationRiskReward > 0 ? _s.AnticipationRiskReward : 1m;
+                            var tp = entry + risk * rr;
+
+                            if (_s.EnableAnticipationAutoTrade)
+                            {
+                                return new TradeSignal
+                                {
+                                    Type = SignalType.Long,
+                                    Symbol = coinInfo.Symbol,
+                                    EntryPrice = entry,
+                                    StopLoss = sl,
+                                    TakeProfit = tp,
+                                    UseMarketOrder = _s.AnticipationUseMarketOrder,
+                                    Reason = $"ANTICIPATION LONG: compression above EMA34/89 (band={bandFrac:P2}, avgBody={avgBodyRatio:P0}, vol5/20={SafeRatio(ma5, ma20):0.00})"
+                                };
+                            }
+
+                            return new TradeSignal
+                            {
+                                Type = SignalType.AnticipationLongAlert,
+                                Symbol = coinInfo.Symbol,
+                                EntryPrice = entry,
+                                StopLoss = sl,
+                                TakeProfit = tp,
+                                Reason = $"Nghi ngờ breakout: compression trên EMA34/89 (band={bandFrac:P2}, avgBody={avgBodyRatio:P0}, vol5/20={SafeRatio(ma5, ma20):0.00})." 
+                            };
+                        }
+                    }
+                }
+            }
+
+            return new TradeSignal();
+        }
+
+        private static (decimal High, decimal Low) GetHiLo(IReadOnlyList<Candle> candles, int start, int end)
+        {
+            decimal hi = decimal.MinValue;
+            decimal lo = decimal.MaxValue;
+            for (int i = start; i <= end; i++)
+            {
+                var c = candles[i];
+                if (c.High > hi) hi = c.High;
+                if (c.Low < lo) lo = c.Low;
+            }
+            if (hi == decimal.MinValue) hi = candles[end].High;
+            if (lo == decimal.MaxValue) lo = candles[end].Low;
+            return (hi, lo);
+        }
+
+        private static decimal GetNotionalVolMa(IReadOnlyList<Candle> candles, int idxClosed, int period)
+        {
+            period = Math.Max(1, period);
+            int end = Math.Min(idxClosed, candles.Count - 1);
+            int start = Math.Max(0, end - period + 1);
+            decimal sum = 0m;
+            int cnt = 0;
+            for (int i = start; i <= end; i++)
+            {
+                var c = candles[i];
+                sum += c.Close * c.Volume;
+                cnt++;
+            }
+            return cnt > 0 ? sum / cnt : 0m;
+        }
+
+        private static decimal SafeRatio(decimal a, decimal b)
+        {
+            if (b == 0) return 0;
+            return a / b;
         }
     }
 }

@@ -222,7 +222,7 @@ namespace FuturesBot.Services
             var p = new Dictionary<string, string>
             {
                 ["symbol"] = symbol,
-                ["side"] = side == SignalType.Long ? "BUY" : "SELL",
+                ["side"] = side == SignalType.Open ? "BUY" : "SELL",
             };
 
             if (limitPrice.HasValue)

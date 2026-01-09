@@ -123,14 +123,14 @@ namespace FuturesBot.Services
                 return;
             }
 
-            // ignore SHORT when no position
-            if (signal != null && signal.Type == SignalType.Short)
+            // ignore CLOSE when no position
+            if (signal != null && signal.Type == SignalType.Close)
                 return;
 
             if (signal == null || signal.Type == SignalType.None)
                 return;
 
-            if (signal.Type != SignalType.Long)
+            if (signal.Type != SignalType.Open)
                 return;
 
             // ===== 3) Entry maker BUY limit =====
@@ -206,9 +206,9 @@ namespace FuturesBot.Services
 
             if (candlesMain == null || candlesMain.Count < BarsForMonitorMin)
             {
-                // if no candles, still can exit on strategy Short
-                if (signal != null && signal.Type == SignalType.Short)
-                    await EnsureMakerSellAsync(symbol, qtyTotal, lastPrice, pendingSell, "SIG_SHORT(noCandles)", ct);
+                // if no candles, still can exit on strategy Close
+                if (signal != null && signal.Type == SignalType.Close)
+                    await EnsureMakerSellAsync(symbol, qtyTotal, lastPrice, pendingSell, "SIG_CLOSE(noCandles)", ct);
 
                 return;
             }
@@ -252,7 +252,7 @@ namespace FuturesBot.Services
             }
 
             // exit rules:
-            bool exitBySignal = signal != null && signal.Type == SignalType.Short;
+            bool exitBySignal = signal != null && signal.Type == SignalType.Close;
 
             bool closeBelow34 = (e34 > 0m) && (c0.Close < e34 * (1m - EmaBreakTol));
             bool closeBelow89 = (e89 > 0m) && (c0.Close < e89 * (1m - EmaBreakTol));

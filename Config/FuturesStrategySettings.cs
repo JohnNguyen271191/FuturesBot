@@ -48,5 +48,30 @@ namespace FuturesBot.Config
         public decimal ClimaxVolumeMultiplier { get; set; } = 1.5m;
 
         public decimal OverextendedFromEmaPercent { get; set; } = 0.01m;
+
+        // ========================= Alerts / Anticipation =========================
+        // When enabled, strategy can emit "heads-up" signals for manual decision.
+        public bool EnableAnticipationAlerts { get; set; } = true;
+
+        // If true, strategy will convert anticipation alerts into real entries (Long/Short)
+        // so the bot auto trades those zones.
+        public bool EnableAnticipationAutoTrade { get; set; } = false;
+
+        // If true and auto trade is enabled, use market order for anticipation entries.
+        public bool AnticipationUseMarketOrder { get; set; } = false;
+
+        // Compression detection
+        // EMA band (|EMA34-EMA89| / price) must be below this fraction.
+        public decimal AnticipationMaxEmaBandFrac { get; set; } = 0.0035m; // 0.35%
+        public int AnticipationMinCompressionBars { get; set; } = 4;
+
+        // Volume drop: MA5 < MA20 * ratio
+        public decimal AnticipationVolumeDropRatio { get; set; } = 0.75m;
+
+        // Max distance from EMA34 to still consider "under/above EMA" compression
+        public decimal AnticipationMaxDistFromEma34Frac { get; set; } = 0.0030m; // 0.30%
+
+        // Suggested RR for auto-trade anticipation (if enabled)
+        public decimal AnticipationRiskReward { get; set; } = 1.0m;
     }
 }

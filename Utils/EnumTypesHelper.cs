@@ -5,12 +5,19 @@
         public enum SignalType
         {
             None,
+            // SPOT: Open position (BUY). Futures uses Long.
+            Open,
             Long,
             Short,
             Close,
             Info,
             CloseShort,
-            CloseLong
+            CloseLong,
+
+            // ALERT/ANTICIPATION
+            AnticipationLongAlert,
+            AnticipationShortAlert,
+            CapitulationLongAlert
         }
 
         public enum TradeMode

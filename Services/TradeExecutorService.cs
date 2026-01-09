@@ -28,11 +28,20 @@ namespace FuturesBot.Services
                 return;
             }
 
-            // NEW: chặn nếu đã có vị thế hoặc lệnh chờ
-            if (await _exchange.HasOpenPositionOrOrderAsync(coinInfo.Symbol))
+            // ===== Alerts (heads-up) =====
+            if (signal.Type == SignalType.AnticipationLongAlert || signal.Type == SignalType.AnticipationShortAlert)
             {
+                var entryText = signal.EntryPrice.HasValue ? $"entry≈{signal.EntryPrice.Value:0.##}" : "entry=n/a";
+                var slText = signal.StopLoss.HasValue ? $"sl≈{signal.StopLoss.Value:0.##}" : "sl=n/a";
+                var tpText = signal.TakeProfit.HasValue ? $"tp≈{signal.TakeProfit.Value:0.##}" : "tp=n/a";
+
+                await _notifier.SendAsync($"[FUTURES][ALERT] {coinInfo.Symbol} {signal.Type}: {entryText}, {slText}, {tpText} | {signal.Reason}");
                 return;
             }
+
+            // NEW: chặn nếu đã có vị thế hoặc lệnh chờ
+            if (await _exchange.HasOpenPositionOrOrderAsync(coinInfo.Symbol))
+                return;
 
             if (signal.EntryPrice is null || signal.StopLoss is null || signal.TakeProfit is null)
             {
@@ -77,7 +86,16 @@ PaperMode: {_config.PaperMode}
                 return;
             }
 
-            var isOrdered = await _exchange.PlaceFuturesOrderAsync(coinInfo.Symbol, signal.Type, qty, entry, sl, tp, coinInfo.Leverage, _notifier, marketOrder: false);
+            var isOrdered = await _exchange.PlaceFuturesOrderAsync(
+                coinInfo.Symbol,
+                signal.Type,
+                qty,
+                entry,
+                sl,
+                tp,
+                coinInfo.Leverage,
+                _notifier,
+                marketOrder: signal.UseMarketOrder);
 
             if (isOrdered)
             {

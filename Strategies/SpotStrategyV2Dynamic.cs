@@ -152,7 +152,7 @@ namespace FuturesBot.Strategies
                     {
                         Symbol = symbol,
                         Time = DateTime.UtcNow,
-                        Type = SignalType.Short,
+                        Type = SignalType.Close,
                         Reason = $"SpotV2D: EXIT trendBreak | tf={coinInfo.MainTimeFrame} rsi={rsi:F1} e34={e34:0.##} e89={e89:0.##} t34={t34:0.##} t89={t89:0.##}"
                     };
                 }
@@ -195,7 +195,7 @@ namespace FuturesBot.Strategies
                 {
                     Symbol = symbol,
                     Time = DateTime.UtcNow,
-                    Type = SignalType.Long,
+                    Type = SignalType.Open,
                     EntryPrice = close,
                     Reason = $"SpotV2D[A] EMA Retest+Reclaim | tf={coinInfo.MainTimeFrame} rsi={rsi:F1} volUsd={lastVolUsd:0} volMA={volMa:0}"
                 };
@@ -207,7 +207,7 @@ namespace FuturesBot.Strategies
                 {
                     Symbol = symbol,
                     Time = DateTime.UtcNow,
-                    Type = SignalType.Long,
+                    Type = SignalType.Open,
                     EntryPrice = close,
                     Reason = $"SpotV2D[B] BaseBreak Continuation | tf={coinInfo.MainTimeFrame} rsi={rsi:F1} atr={atr:F6} volUsd={lastVolUsd:0} volMA={volMa:0}"
                 };
@@ -219,7 +219,7 @@ namespace FuturesBot.Strategies
                 {
                     Symbol = symbol,
                     Time = DateTime.UtcNow,
-                    Type = SignalType.Long,
+                    Type = SignalType.Open,
                     EntryPrice = close,
                     Reason = $"SpotV2D[C] Break&Hold | tf={coinInfo.MainTimeFrame} rsi={rsi:F1} atr={atr:F6} volUsd={lastVolUsd:0} volMA={volMa:0}"
                 };
@@ -232,7 +232,7 @@ namespace FuturesBot.Strategies
                 {
                     Symbol = symbol,
                     Time = DateTime.UtcNow,
-                    Type = SignalType.Short,
+                    Type = SignalType.Close,
                     Reason = $"SpotV2D: EXIT soft | tf={coinInfo.MainTimeFrame} rsi={rsi:F1} close<EMA34/89"
                 };
             }
