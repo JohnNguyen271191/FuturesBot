@@ -651,7 +651,7 @@ namespace FuturesBot.Services
                         // ======================================================================
                         if (enableMicro && hasEntry && canUseRR)
                         {
-                            decimal plannedRiskUsd = _botConfig.AccountBalance * (coinInfo.RiskPerTradePercent / 100m);
+                            decimal plannedRiskUsd = _botConfig.Futures.WalletCapUsd * (coinInfo.RiskPerTradePercent / 100m);
 
                             decimal baseRiskUsd;
                             if (riskUsd > 0m && plannedRiskUsd > 0m)

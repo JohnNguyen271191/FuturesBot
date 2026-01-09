@@ -44,8 +44,7 @@ namespace FuturesBot.Services
             var tp = signal.TakeProfit.Value;
 
             var allocation = coinInfo.AllocationPercent > 0 ? coinInfo.AllocationPercent : 100m;
-            var totalCap = _config.Futures.WalletCapUsd > 0 ? _config.Futures.WalletCapUsd : _config.AccountBalance;
-            var coinCap = totalCap * allocation / 100m;
+            var coinCap = _config.Futures.WalletCapUsd * allocation / 100m;
 
             var riskPct = coinInfo.RiskPerTradePercent > 0
                 ? coinInfo.RiskPerTradePercent

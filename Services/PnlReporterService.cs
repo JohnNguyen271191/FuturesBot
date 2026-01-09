@@ -22,11 +22,6 @@ namespace FuturesBot.Services
 
         private DateTime? _cooldownUntil = null;
 
-        public void SetDailyBaseCapital()
-        {
-            _dailyBaseCapital = botConfig.AccountBalance;
-        }
-
         public void SetDailyBaseCapital(decimal baseCapital)
         {
             _dailyBaseCapital = baseCapital;

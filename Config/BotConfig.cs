@@ -36,12 +36,6 @@ namespace FuturesBot.Config
         /// </summary>
         public string SpotQuoteAsset { get; set; } = "FDUSD";
 
-        /// <summary>
-        /// Legacy futures account balance used by old RiskManager.
-        /// New sizing uses Spot/Futures WalletCapUsd instead.
-        /// </summary>
-        public decimal AccountBalance { get; set; } = 200m;
-
         public decimal MaxDailyLossPercent { get; set; } = 5m;
         public double CooldownDuration { get; set; } = 1;
 

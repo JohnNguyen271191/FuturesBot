@@ -50,8 +50,7 @@ namespace FuturesBot.Services
                 return;
 
             // daily base capital for summary + cooldown (use Futures wallet cap)
-            var baseCap = _config.Futures.WalletCapUsd > 0 ? _config.Futures.WalletCapUsd : _config.AccountBalance;
-            _pnl.SetDailyBaseCapital(baseCap);
+            _pnl.SetDailyBaseCapital(_config.Futures.WalletCapUsd);
 
             var coins = (_config.Futures.Coins?.Length > 0)
                 ? _config.Futures.Coins
